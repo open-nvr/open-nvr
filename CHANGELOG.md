@@ -6,63 +6,9 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [0.1.12] — 2026-11-16
 
-- **Apps subscribe to the always-on detector by default.** Six example
-  apps (abandoned-object, intrusion-detection, loitering-detection,
-  line-crossing, occupancy-counting, package-delivery), `ppe-check` and
-  the SDK's `App` facade defaulted to the wide subject
-  `opennvr.inference.>`, and four of them to Tier-0 switched off, so a
-  config that left those two lines out saw nothing on a stock install,
-  or saw every object twice once a heavy detector ran on the camera.
-  The defaults are now `opennvr.inference.tier0.>` with Tier-0 consumed,
-  in the code and in each `config.example.yml`. The shipped
-  `config.docker.yml` files already said so, so an installed app behaves
-  as before. A config that names its own subject, or sets
-  `consume_tier0: false`, is honoured; a facade app with Tier-0 off
-  keeps the wide subject.
-- **First-time setup confirms the authenticator before it finishes.** The
-  setup page showed the QR code and sent the operator to sign in, counting
-  the authenticator as enrolled the moment the code was displayed. Closing
-  the tab before scanning, or a scan that did not take, locked the operator
-  out of the account they had just created. Setup now has a third step: a
-  code from the app confirms the authenticator, the recovery codes are
-  shown once and must be acknowledged as saved, and "Continue" lands in
-  OpenNVR signed in. Until the code is seen the account signs in with its
-  password and finishes on the usual enrolment screen. Scripted installs
-  call `POST /auth/first-time-setup/verify` with the `setup_session` that
-  step 1 now returns.
-- **Updates install by themselves by default.** A new site's update
-  policy was *off*, so it never learned that a release existed. The
-  default is now *automatic*: the host runner checks every few hours
-  and installs a signed stable release by itself, fixes and new
-  features alike (never a new major version), any night between 02:00
-  and 04:00 site time, after the site's own delay of up to three days
-  that security fixes skip. Each install is backed up first and rolled
-  back if the new version is not healthy; a release that needs steps on
-  the host, or that cannot be rolled back, waits for a person. Settings
-  → OpenNVR Updates turns this down to notify-only or off. A site that
-  saved a policy keeps it; the host treats a missing policy file as the
-  default.
-- **A search result opens paused.** Clicking a result (or any link to an
-  instant) opened the recording and played at once, so the moment was
-  gone before the operator found the subject. It now opens paused on the
-  instant; play starts when the operator presses it. Picking a day on the
-  playback page plays as before.
-- **The storage floor and the "Degraded" it caused.** The automatic
-  rotation floor is now 5 % of the recordings disk, at least 5 GB and at
-  most 20 GB (it was 2 GB or 2 %). On the boards we ship the recordings
-  share the disk with the OS, Docker and the database, and 2 GB left no
-  room to pull a core update. At the same time the health bar said
-  "Degraded · Storage" on every healthy box, because the monitor's
-  default "90 % used" alarm fired on a disk that rotation keeps full by
-  design. That alarm is off by default now. Unset, the monitor watches
-  the rotation floor itself: the `disk_low` alert fires when free space
-  falls a margin under the floor (rotation not keeping up, or the disk
-  full of other data) and clears above it. The dashboard shows a
-  rotating disk as "rotating", not as a warning, and treats the floor
-  the same way the server does. Operators who saved a disk threshold
-  keep it.
+Setup, updates and apps without hand edits. `./start.sh uninstall` gives a clean slate; a new site installs releases by itself; first-time setup confirms the authenticator before it finishes; the installers offer one-click app install, search by meaning and voice search, none of which needs the Camera Agent any more. A recorder's channels are added in one go from discovery. A search result opens paused. The storage floor is 5 % of the disk (5 to 20 GB) and a full disk that rotates is not Degraded. WebRTC addresses are applied at core startup. Apps subscribe to the always-on detector by default, and the rules for building an efficient app are one guide, read by people, coding assistants and `opennvr-app validate --strict`. Adapter pins stay at `0.1.11`: no adapter changed. App SDK 0.13.0 (`sdk-v0.13.0`).
 
 ### Added
 
@@ -155,7 +101,145 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ships its own overlay and so is not in the curated index, can now be
   removed with one click like the catalog apps.
 
+- Live view from anywhere (#925): a tile tries real-time video (WebRTC) and
+  falls back to low-latency HLS by itself when no media path answers, within
+  about eight seconds and with the spinner up, never an error. The browser
+  remembers the fallback for the session so later tiles start on HLS at once,
+  probes WebRTC again every fifteen minutes and when the network comes back,
+  and shows a small "HLS" badge saying why. The player also adds the address
+  it opened the page on as a candidate, so a LAN viewer works whatever address
+  the launcher recorded at install, including `localhost` (sent as 127.0.0.1,
+  the one candidate a local browser has once MediaMTX stops advertising its
+  own interfaces).
+- A live tile survives the network changing under it. A VPN coming or going,
+  a Wi-Fi switch or a laptop lid leaves a WebRTC session that nothing can
+  renegotiate, so the tile rebuilds it: a frame watchdog counts decoded frames
+  every 3 s and rebuilds after 8 s without one (ICE can say "connected" long
+  after a route change), the bounded fast retries are followed by a slow
+  retry every 30 s for as long as the tile is on screen instead of a Retry
+  button, a tile that is not playing starts over at once when the browser
+  comes back online or the tab is shown again, and a tile on HLS by fallback
+  probes WebRTC again every fifteen minutes, soon after the network changed,
+  and at once when another tile's probe got through, then switches back.
+- Settings → WebRTC: a public address (IP or DNS name) and a public media
+  port, and the list of addresses the media server advertises with where each
+  came from. Core finds the public IP with the configured STUN server itself
+  and refreshes it every ten minutes, keeping the last answer through a round
+  that gets none; `GET /api/v1/webrtc/advertised` (admin) and the extra fields
+  on `GET /api/v1/webrtc/rtc-config`. Emptying either field clears it, a bad
+  address is refused with the reason (422), and the save answers at once with
+  the STUN round running behind it.
+
+- **App SDK 0.13.0.** Publishes what `main` carried since 0.12.0:
+  `nvr.description()` (the shared live description of a camera, sync
+  and async), `opennvr-app validate --strict` with the platform-rule
+  checks, the `AGENTS.md` and assistant skill in the scaffold, and a
+  default subject that follows `consume_tier0`.
+
+### Changed
+
+- **Apps subscribe to the always-on detector by default.** Six example
+  apps (abandoned-object, intrusion-detection, loitering-detection,
+  line-crossing, occupancy-counting, package-delivery), `ppe-check` and
+  the SDK's `App` facade defaulted to the wide subject
+  `opennvr.inference.>`, and four of them to Tier-0 switched off, so a
+  config that left those two lines out saw nothing on a stock install,
+  or saw every object twice once a heavy detector ran on the camera.
+  The defaults are now `opennvr.inference.tier0.>` with Tier-0 consumed,
+  in the code and in each `config.example.yml`. The shipped
+  `config.docker.yml` files already said so, so an installed app behaves
+  as before. A config that names its own subject, or sets
+  `consume_tier0: false`, is honoured; a facade app with Tier-0 off
+  keeps the wide subject.
+- **First-time setup confirms the authenticator before it finishes.** The
+  setup page showed the QR code and sent the operator to sign in, counting
+  the authenticator as enrolled the moment the code was displayed. Closing
+  the tab before scanning, or a scan that did not take, locked the operator
+  out of the account they had just created. Setup now has a third step: a
+  code from the app confirms the authenticator, the recovery codes are
+  shown once and must be acknowledged as saved, and "Continue" lands in
+  OpenNVR signed in. Until the code is seen the account signs in with its
+  password and finishes on the usual enrolment screen. Scripted installs
+  call `POST /auth/first-time-setup/verify` with the `setup_session` that
+  step 1 now returns.
+- **Updates install by themselves by default.** A new site's update
+  policy was *off*, so it never learned that a release existed. The
+  default is now *automatic*: the host runner checks every few hours
+  and installs a signed stable release by itself, fixes and new
+  features alike (never a new major version), any night between 02:00
+  and 04:00 site time, after the site's own delay of up to three days
+  that security fixes skip. Each install is backed up first and rolled
+  back if the new version is not healthy; a release that needs steps on
+  the host, or that cannot be rolled back, waits for a person. Settings
+  → OpenNVR Updates turns this down to notify-only or off. A site that
+  saved a policy keeps it; the host treats a missing policy file as the
+  default.
+- **A search result opens paused.** Clicking a result (or any link to an
+  instant) opened the recording and played at once, so the moment was
+  gone before the operator found the subject. It now opens paused on the
+  instant; play starts when the operator presses it. Picking a day on the
+  playback page plays as before.
+- **The storage floor and the "Degraded" it caused.** The automatic
+  rotation floor is now 5 % of the recordings disk, at least 5 GB and at
+  most 20 GB (it was 2 GB or 2 %). On the boards we ship the recordings
+  share the disk with the OS, Docker and the database, and 2 GB left no
+  room to pull a core update. At the same time the health bar said
+  "Degraded · Storage" on every healthy box, because the monitor's
+  default "90 % used" alarm fired on a disk that rotation keeps full by
+  design. That alarm is off by default now. Unset, the monitor watches
+  the rotation floor itself: the `disk_low` alert fires when free space
+  falls a margin under the floor (rotation not keeping up, or the disk
+  full of other data) and clears above it. The dashboard shows a
+  rotating disk as "rotating", not as a warning, and treats the floor
+  the same way the server does. Operators who saved a disk threshold
+  keep it.
+
+- Live HLS is served as low-latency HLS (`hlsVariant: lowLatency`, 200 ms
+  parts, nginx no longer buffers `/hls/`), which brings a fallen-back tile
+  from several seconds behind to one or two.
+- The browser sends its own ICE candidates with the WHEP offer (it used to
+  post the offer before gathering any), and no STUN server is built into the
+  web app: ICE servers come from Settings alone. STUN is sent to MediaMTX as
+  client-only, since its single-port listener cannot use a STUN-discovered
+  candidate; TURN stays shared.
+- MediaMTX no longer advertises its own container addresses
+  (`webrtcIPsFromInterfaces: no`); the reachable ones come from core.
+- The "learned hosts" mechanism (`X-Server-Addr`) is gone: on the compose
+  bridge it never learned anything. An existing `webrtc_ice_hosts` row is
+  moved into the public address setting once.
+- Publishing a browser webcam from a network where the media port is blocked
+  now says so (naming the port) after two failed connections, slows its
+  retries to the longest backoff and keeps trying, so a MediaMTX restart or a
+  network still coming up heals by itself; the same address-bar candidates
+  are added to its answer.
+- **The detector's frame rate and crop budget follow the flavour.**
+  `DETECT_FPS` and `DETECT_MAX_REGIONS` ship empty in `.env.example`; the
+  compose file sets 2 fps and 4 crops, the qualcomm overlay 4 fps and 3
+  crops; a number in `.env` outranks both, so an existing install keeps
+  what it set. Both pairs are measured. CPU
+  (`bench/cpu-detector-defaults-2026-11-13.md`, an 8-core host with four
+  busy cameras): one yolo26n crop costs ~0.5 core-second whichever
+  backend, the host sustains ~2 frames/s per camera whatever is asked,
+  and the 5 fps 0.1.11 shipped dropped thousands of frames and two thirds
+  of the visits (7–15 a minute against 23–28 at 2 fps); the crop cap
+  barely matters under load. Hexagon (Ventuno Q): two busy cameras at
+  5 fps with 8 crops asked for ~80 inferences a second (~15 ms each) and
+  pinned the device at 100 % with the plate reader and the captioner
+  queued behind it; 3 crops at 4 fps took ~40 % at ~50 ms per frame per
+  camera, plates and captions flowing. The frame-counted dials lengthen
+  in seconds at 2 fps as they did before 0.1.11 (calibration deadline
+  150 frames ≈ 75 s, stationary re-check 50 frames ≈ 25 s). (PR #392.)
+
 ### Fixed
+
+- **Live video from outside after a cold start.** MediaMTX's start-up
+  hook pushed the WebRTC address list before core existed, failed on the
+  name lookup and never retried, so a fresh install or a full restart
+  advertised only the LAN address and every remote viewer fell back to
+  HLS until an admin re-saved the WebRTC page. Core now applies the list
+  at its own start-up and retries until MediaMTX takes it, the hook
+  retries, and the player always gets the server's resolved addresses,
+  which a page opened on a domain name needs (#957).
 
 - **A recorder added by address took another channel's sub stream.**
   Adding an NVR with its IP and credentials picked the smallest stream
@@ -240,77 +324,6 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docker compose up -d <id>` and `docker compose rm -s -f <id>`, run in
   the checkout, and the reconciler names no files either; the index
   validator enforces the new shape.
-
-### Added
-
-- Live view from anywhere (#925): a tile tries real-time video (WebRTC) and
-  falls back to low-latency HLS by itself when no media path answers, within
-  about eight seconds and with the spinner up, never an error. The browser
-  remembers the fallback for the session so later tiles start on HLS at once,
-  probes WebRTC again every fifteen minutes and when the network comes back,
-  and shows a small "HLS" badge saying why. The player also adds the address
-  it opened the page on as a candidate, so a LAN viewer works whatever address
-  the launcher recorded at install, including `localhost` (sent as 127.0.0.1,
-  the one candidate a local browser has once MediaMTX stops advertising its
-  own interfaces).
-- A live tile survives the network changing under it. A VPN coming or going,
-  a Wi-Fi switch or a laptop lid leaves a WebRTC session that nothing can
-  renegotiate, so the tile rebuilds it: a frame watchdog counts decoded frames
-  every 3 s and rebuilds after 8 s without one (ICE can say "connected" long
-  after a route change), the bounded fast retries are followed by a slow
-  retry every 30 s for as long as the tile is on screen instead of a Retry
-  button, a tile that is not playing starts over at once when the browser
-  comes back online or the tab is shown again, and a tile on HLS by fallback
-  probes WebRTC again every fifteen minutes, soon after the network changed,
-  and at once when another tile's probe got through, then switches back.
-- Settings → WebRTC: a public address (IP or DNS name) and a public media
-  port, and the list of addresses the media server advertises with where each
-  came from. Core finds the public IP with the configured STUN server itself
-  and refreshes it every ten minutes, keeping the last answer through a round
-  that gets none; `GET /api/v1/webrtc/advertised` (admin) and the extra fields
-  on `GET /api/v1/webrtc/rtc-config`. Emptying either field clears it, a bad
-  address is refused with the reason (422), and the save answers at once with
-  the STUN round running behind it.
-
-### Changed
-
-- Live HLS is served as low-latency HLS (`hlsVariant: lowLatency`, 200 ms
-  parts, nginx no longer buffers `/hls/`), which brings a fallen-back tile
-  from several seconds behind to one or two.
-- The browser sends its own ICE candidates with the WHEP offer (it used to
-  post the offer before gathering any), and no STUN server is built into the
-  web app: ICE servers come from Settings alone. STUN is sent to MediaMTX as
-  client-only, since its single-port listener cannot use a STUN-discovered
-  candidate; TURN stays shared.
-- MediaMTX no longer advertises its own container addresses
-  (`webrtcIPsFromInterfaces: no`); the reachable ones come from core.
-- The "learned hosts" mechanism (`X-Server-Addr`) is gone: on the compose
-  bridge it never learned anything. An existing `webrtc_ice_hosts` row is
-  moved into the public address setting once.
-- Publishing a browser webcam from a network where the media port is blocked
-  now says so (naming the port) after two failed connections, slows its
-  retries to the longest backoff and keeps trying, so a MediaMTX restart or a
-  network still coming up heals by itself; the same address-bar candidates
-  are added to its answer.
-- **The detector's frame rate and crop budget follow the flavour.**
-  `DETECT_FPS` and `DETECT_MAX_REGIONS` ship empty in `.env.example`; the
-  compose file sets 2 fps and 4 crops, the qualcomm overlay 4 fps and 3
-  crops; a number in `.env` outranks both, so an existing install keeps
-  what it set. Both pairs are measured. CPU
-  (`bench/cpu-detector-defaults-2026-11-13.md`, an 8-core host with four
-  busy cameras): one yolo26n crop costs ~0.5 core-second whichever
-  backend, the host sustains ~2 frames/s per camera whatever is asked,
-  and the 5 fps 0.1.11 shipped dropped thousands of frames and two thirds
-  of the visits (7–15 a minute against 23–28 at 2 fps); the crop cap
-  barely matters under load. Hexagon (Ventuno Q): two busy cameras at
-  5 fps with 8 crops asked for ~80 inferences a second (~15 ms each) and
-  pinned the device at 100 % with the plate reader and the captioner
-  queued behind it; 3 crops at 4 fps took ~40 % at ~50 ms per frame per
-  camera, plates and captions flowing. The frame-counted dials lengthen
-  in seconds at 2 fps as they did before 0.1.11 (calibration deadline
-  150 frames ≈ 75 s, stationary re-check 50 frames ≈ 25 s). (PR #392.)
-
-### Fixed
 
 - **An edge update can pass its own check, and a rollback no longer ends as
   "failed".** The updater compared core's version string with the manifest's
@@ -6686,7 +6699,8 @@ address in the README.
 
 ---
 
-[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/open-nvr/open-nvr/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/open-nvr/open-nvr/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/open-nvr/open-nvr/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/open-nvr/open-nvr/compare/v0.1.8...v0.1.9
