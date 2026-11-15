@@ -217,6 +217,13 @@ untouched() {   # nothing at all changed
 }
 
 # The contract, whichever script is under test ($1 = run_sh | run_ps1).
+# The sentence is drawn, never printed: at least five wide rows after the
+# prompt, and the sentence itself nowhere in the output as text.
+drawn() {
+    [ "$(printf '%s\n' "$1" | sed -n '/type the sentence/,$p' | awk 'length($0) >= 40' | wc -l)" -ge 5 ] \
+        && ! printf '%s\n' "$1" | grep -qiF "$PHRASE"
+}
+
 suite() {
     local run="$1" out rc missing left
 
@@ -246,10 +253,10 @@ suite() {
     if [ $rc -ne 0 ] && untouched && printf '%s' "$out" | grep -q 'not the confirmation'; then pass
     else fail "rc=$rc: $out"; fi
 
-    start_test "$run: warns before asking: database, apps, footage, no undo"
+    start_test "$run: warns before asking: database, apps, footage, no undo; the sentence is drawn, not printed"
     if printf '%s' "$out" | grep -q 'WARNING' && printf '%s' "$out" | grep -q 'every installed app' \
        && printf '%s' "$out" | grep -q 'all footage in' && printf '%s' "$out" | grep -q 'no undo' \
-       && printf '%s' "$out" | grep -qF "type exactly:  $PHRASE"; then pass
+       && printf '%s' "$out" | grep -q 'type the sentence drawn here' && drawn "$out"; then pass
     else fail "$out"; fi
 
     start_test "$run: Enter + the typed sentence removes the install, apps, footage, backups, host agent files and images"

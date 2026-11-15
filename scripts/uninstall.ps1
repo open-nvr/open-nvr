@@ -6,7 +6,8 @@
 # scripts/uninstall.sh (read that header for why).
 #
 #   .\start.ps1 uninstall                    show what goes, ask you to type the
-#                                            confirmation, then remove it all
+#                                            confirmation, which it draws on the
+#                                            screen, then remove it all
 #   .\start.ps1 uninstall --dry-run          show what would go, change nothing
 #   .\start.ps1 uninstall --yes              do not ask (for scripts; the same removal)
 #   .\start.ps1 uninstall --keep-recordings  leave the footage for the next install
@@ -307,6 +308,53 @@ function Show-Warning {
 # does not fail the operator who meant it.
 function Get-Normalised([string]$Text) { return (($Text -replace '\s+', ' ').Trim().ToLowerInvariant()) }
 
+# The sentence is drawn, not printed, so it cannot be copied off the screen:
+# the operator reads it and types it. Capitals in 3x5 cells, two columns a
+# cell, wrapped by word to the window's width.
+$Glyphs = @{
+    "a" = ".#. #.# ### #.# #.#"; "b" = "##. #.# ##. #.# ##."; "c" = "### #.. #.. #.. ###"
+    "d" = "##. #.# #.# #.# ##."; "e" = "### #.. ### #.. ###"; "f" = "### #.. ### #.. #.."
+    "g" = "### #.. #.# #.# ###"; "h" = "#.# #.# ### #.# #.#"; "i" = "### .#. .#. .#. ###"
+    "j" = "..# ..# ..# #.# ###"; "k" = "#.# #.# ##. #.# #.#"; "l" = "#.. #.. #.. #.. ###"
+    "m" = "#.# ### ### #.# #.#"; "n" = "### #.# #.# #.# #.#"; "o" = "### #.# #.# #.# ###"
+    "p" = "### #.# ### #.. #.."; "q" = "### #.# #.# ### ..#"; "r" = "##. #.# ##. #.# #.#"
+    "s" = "### #.. ### ..# ###"; "t" = "### .#. .#. .#. .#."; "u" = "#.# #.# #.# #.# ###"
+    "v" = "#.# #.# #.# #.# .#."; "w" = "#.# #.# ### ### #.#"; "x" = "#.# #.# .#. #.# #.#"
+    "y" = "#.# #.# .#. .#. .#."; "z" = "### ..# .#. #.. ###"
+}
+
+# One line of words, five rows: 6 columns a letter, 1 between letters, 4 between words.
+function Show-Words([string]$Words) {
+    for ($row = 0; $row -lt 5; $row++) {
+        $line = "  "
+        foreach ($ch in $Words.ToCharArray()) {
+            if ($ch -eq ' ') { $line += "    "; continue }
+            $glyph = if ($Glyphs.ContainsKey("$ch")) { $Glyphs["$ch"] } else { "... ... ... ... ..." }
+            $cell = ($glyph -split ' ')[$row]
+            $line += ($cell -replace '#', '██' -replace '\.', '  ') + " "
+        }
+        Write-Host $line
+    }
+}
+
+function Get-WordsWidth([string]$Words) {
+    $spaces = @($Words.ToCharArray() | Where-Object { $_ -eq ' ' }).Count
+    return ($Words.Length - $spaces) * 7 + $spaces * 4 - 1
+}
+
+function Show-Sentence([string]$Sentence) {
+    $cols = 80
+    try { $w = $Host.UI.RawUI.WindowSize.Width; if ($w -ge 40) { $cols = $w } } catch {}
+    $limit = $cols - 3
+    $line = ""
+    foreach ($word in ($Sentence -split ' ')) {
+        if ($line -and (Get-WordsWidth "$line $word") -gt $limit) { Show-Words $line; Write-Host ""; $line = $word }
+        elseif ($line) { $line = "$line $word" }
+        else { $line = $word }
+    }
+    if ($line) { Show-Words $line }
+}
+
 # Images hold no site data, so this is a choice, not part of the warning.
 # Default yes: a clean machine is what most people mean by uninstall.
 function Confirm-Images {
@@ -323,7 +371,10 @@ function Confirm-Uninstall {
     $phrase = Get-ConfirmPhrase
     Show-Warning
     Write-Host ""
-    Write-Host "  To go ahead, type exactly:  $phrase"
+    Write-Say "To go ahead, type the sentence drawn here (capitals do not matter):"
+    Write-Host ""
+    Show-Sentence $phrase
+    Write-Host ""
     # Read-Host, redirected or not: [Console]::In.ReadLine() blocks on an
     # empty redirected stdin once a child process has run.
     $answer = Read-Host "  >"

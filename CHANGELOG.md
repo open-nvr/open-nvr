@@ -33,8 +33,10 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   footage, the update backups, and the update runner, host agent and
   camera-VLAN firewall table when they belong to this folder. It shows
   the plan first and goes ahead only when the operator types
-  `uninstall and remove all data and recordings` (`--yes` for
-  scripts, `--dry-run` to look). `--keep-recordings` and
+  `uninstall and remove all data and recordings`, which is drawn on
+  the screen in block letters rather than printed, so it cannot be
+  copied from there (`--yes` for scripts, `--dry-run` to look).
+  `--keep-recordings` and
   `--keep-backups` leave those for the next install. It asks whether
   OpenNVR's own images go too, with their total size; the default is
   yes, and `--keep-images` / `--delete-images` decide it for scripts.

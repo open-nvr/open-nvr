@@ -7,7 +7,8 @@
 # use .\start.ps1 uninstall (scripts\uninstall.ps1).
 #
 #   ./start.sh uninstall                    show what goes, ask you to type the
-#                                           confirmation, then remove it all
+#                                           confirmation, which it draws on the
+#                                           screen, then remove it all
 #   ./start.sh uninstall --dry-run          show what would go, change nothing
 #   ./start.sh uninstall --yes              do not ask (for scripts; the same removal)
 #   ./start.sh uninstall --keep-recordings  leave the footage for the next install
@@ -348,6 +349,74 @@ show_warning() {
 # capital does not fail the operator who meant it.
 normalise() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//'; }
 
+# The sentence is drawn, not printed, so it cannot be copied off the screen:
+# the operator reads it and types it. Capitals in 3x5 cells, two columns a
+# cell, wrapped by word to the terminal's width.
+glyph_row() {   # letter, row 1-5 -> three cells
+    local g
+    case "$1" in
+        a) g=".#. #.# ### #.# #.#" ;;  b) g="##. #.# ##. #.# ##." ;;
+        c) g="### #.. #.. #.. ###" ;;  d) g="##. #.# #.# #.# ##." ;;
+        e) g="### #.. ### #.. ###" ;;  f) g="### #.. ### #.. #.." ;;
+        g) g="### #.. #.# #.# ###" ;;  h) g="#.# #.# ### #.# #.#" ;;
+        i) g="### .#. .#. .#. ###" ;;  j) g="..# ..# ..# #.# ###" ;;
+        k) g="#.# #.# ##. #.# #.#" ;;  l) g="#.. #.. #.. #.. ###" ;;
+        m) g="#.# ### ### #.# #.#" ;;  n) g="### #.# #.# #.# #.#" ;;
+        o) g="### #.# #.# #.# ###" ;;  p) g="### #.# ### #.. #.." ;;
+        q) g="### #.# #.# ### ..#" ;;  r) g="##. #.# ##. #.# #.#" ;;
+        s) g="### #.. ### ..# ###" ;;  t) g="### .#. .#. .#. .#." ;;
+        u) g="#.# #.# #.# #.# ###" ;;  v) g="#.# #.# #.# #.# .#." ;;
+        w) g="#.# #.# ### ### #.#" ;;  x) g="#.# #.# .#. #.# #.#" ;;
+        y) g="#.# #.# .#. .#. .#." ;;  z) g="### ..# .#. #.. ###" ;;
+        *) g="... ... ... ... ..." ;;
+    esac
+    printf '%s' "$g" | cut -d' ' -f"$2"
+}
+
+# One line of words, five rows: 6 columns a letter, 1 between letters, 4 between words.
+draw_words() {
+    local row i ch cell line
+    for row in 1 2 3 4 5; do
+        line="  "
+        i=0
+        while [ "$i" -lt "${#1}" ]; do
+            ch="${1:$i:1}"
+            if [ "$ch" = " " ]; then
+                line="$line    "
+            else
+                cell="$(glyph_row "$ch" "$row")"
+                cell="${cell//#/██}"
+                line="$line${cell//./  } "
+            fi
+            i=$((i + 1))
+        done
+        printf '%s\n' "$line"
+    done
+}
+
+words_width() {   # columns a line of words takes
+    local n=${#1} s
+    s=$(printf '%s' "$1" | tr -cd ' ' | wc -c)
+    echo $(( (n - s) * 7 + s * 4 - 1 ))
+}
+
+draw_sentence() {
+    local cols limit line="" word
+    cols=$(tput cols 2>/dev/null || echo 80)
+    [ "$cols" -ge 40 ] 2>/dev/null || cols=80
+    limit=$((cols - 3))
+    for word in $1; do
+        if [ -n "$line" ] && [ "$(words_width "$line $word")" -gt "$limit" ]; then
+            draw_words "$line"; printf '\n'; line="$word"
+        elif [ -n "$line" ]; then
+            line="$line $word"
+        else
+            line="$word"
+        fi
+    done
+    [ -z "$line" ] || draw_words "$line"
+}
+
 # Images hold no site data, so this is a choice, not part of the warning.
 # Default yes: a clean machine is what most people mean by uninstall.
 ask_images() {
@@ -371,7 +440,11 @@ ask_confirmation() {
     local phrase answer=""
     phrase="$(confirm_phrase)"
     show_warning
-    printf '\n  To go ahead, type exactly:  %s\n' "$phrase"
+    printf '\n'
+    say "To go ahead, type the sentence drawn here (capitals do not matter):"
+    printf '\n'
+    draw_sentence "$phrase"
+    printf '\n'
     if [ -t 0 ]; then
         read -r -p "  > " answer || true
     else

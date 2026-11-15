@@ -57,7 +57,7 @@ Open the URL, accept the self-signed certificate, paste the token, add a camera.
 | Tail live logs | `./start.sh logs` |
 | Add an overlay or profile (fake cameras, an app) | set `OPENNVR_EXAMPLE_COMPOSE` / `OPENNVR_EXAMPLE_PROFILE` in `.env`, then `./start.sh up` — not `docker compose -f …` by hand, which drops the hardware flavour |
 | Reclaim disk after upgrades | `./start.sh prune` |
-| Remove OpenNVR from this machine: apps, database, footage and all | `./start.sh uninstall` *(shows the plan, then asks you to type the confirmation; `--dry-run` to look first; other stacks on the machine are never touched)* |
+| Remove OpenNVR from this machine: apps, database, footage and all | `./start.sh uninstall` *(shows the plan, then asks you to type the confirmation sentence, which it draws on the screen rather than printing it, so it cannot be copied from there; `--dry-run` to look first; other stacks on the machine are never touched)* |
 | Upgrade to a new release | back up, check out the tag, set `CORE_TAG`/`ADAPTER_TAG`, `./start.sh up`: [step by step](DOCKER_QUICKSTART.md#upgrading-to-a-new-release) |
 
 Unattended installs: `cp .env.example .env && ./scripts/generate-secrets.sh --write && ./start.sh up`. Retention, hardening and every compose file: [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md).
