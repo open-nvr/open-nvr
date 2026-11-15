@@ -6,6 +6,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A search result opens paused.** Clicking a result (or any link to an
+  instant) opened the recording and played at once, so the moment was
+  gone before the operator found the subject. It now opens paused on the
+  instant; play starts when the operator presses it. Picking a day on the
+  playback page plays as before.
+
 ### Added
 
 - **Voice search without the Camera Agent.** The speech-to-text adapter
