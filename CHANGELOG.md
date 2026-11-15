@@ -43,6 +43,28 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`./start.sh uninstall` (`.\start.ps1 uninstall`): a clean slate.** It
+  removes this install from the machine, every installed app and its
+  data included: the containers, the volumes (database, keys, app
+  settings and data), the networks, the generated files (`.env`,
+  certificates, update state, the host agent's binary and key), the
+  footage, the update backups, and the update runner, host agent and
+  camera-VLAN firewall table when they belong to this folder. It shows
+  the plan first and goes ahead only when the operator types
+  `uninstall and remove all data and recordings`, which is drawn on
+  the screen in block letters rather than printed, so it cannot be
+  copied from there (`--yes` for scripts, `--dry-run` to look).
+  `--keep-recordings` and
+  `--keep-backups` leave those for the next install. It asks whether
+  OpenNVR's images go too, with their total size; the default is yes,
+  and `--keep-images` / `--delete-images` decide it for scripts. Those
+  are its own images, the ones compose built for it, and the base
+  images its compose files and Dockerfiles pin (postgres, nginx, nats,
+  alpine, ...) when no other container on the machine runs them.
+  Nothing of any other stack on the machine is
+  touched: every item is matched to this install's compose project and
+  names, shared base images stay, and there is no prune and no forced
+  removal anywhere. After it, `./start.sh` is a fresh install.
 - **Voice search without the Camera Agent.** The speech-to-text adapter
   lived in the agent's compose file under its voice profile, so speaking
   a search into the search page needed the agent installed in voice
