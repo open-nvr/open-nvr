@@ -17,12 +17,11 @@ nats_token: null
 # ── Tracking ───────────────────────────────────────────────────────
 #
 # A breach belongs to a tracked object, so one intruder raises one
-# alarm. On the stock stack consume Tier-0, which already tracks:
-#   subject_pattern: "opennvr.inference.tier0.>"
-#   consume_tier0: true
+# alarm. Tier-0, the detector every camera already runs, tracks:
+# subscribe to it alone (docs/BUILDING_EFFICIENT_APPS.md, rule 1).
 # Without track ids the app falls back to one breach per (camera, label).
-subject_pattern: "opennvr.inference.>"
-consume_tier0: false
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
 
 # ── Arming ─────────────────────────────────────────────────────────
 #

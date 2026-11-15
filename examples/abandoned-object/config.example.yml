@@ -17,13 +17,11 @@ nats_token: null
 # ── Tracking ───────────────────────────────────────────────────────
 #
 # An item is followed, not merely spotted — "this bag has been alone
-# for 90s" needs a stable id. On the stock stack consume Tier-0, which
-# already tracks:
-#   subject_pattern: "opennvr.inference.tier0.>"
-#   consume_tier0: true
-# Without track ids nothing is reported, and the app says so once.
-subject_pattern: "opennvr.inference.>"
-consume_tier0: false
+# for 90s" needs a stable id. Tier-0, the detector every camera already
+# runs, tracks: subscribe to it alone (docs/BUILDING_EFFICIENT_APPS.md,
+# rule 1). Without track ids nothing is reported, and the app says so once.
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
 
 # ── What can be left, and what counts as company ───────────────────
 #

@@ -230,3 +230,21 @@ def test_active_hours_parse():
     assert ActiveHours.parse(None) is None
     with pytest.raises(ValueError):
         ActiveHours.parse({"start": "x", "end": "06:00"})
+
+
+def test_a_config_that_names_no_subject_rides_tier0_alone(tmp_path):
+    """The trigger is a Tier-0 track with a best frame: a config that
+    leaves the subject and the flag out must still see one, and must
+    not see the same person twice the day a heavy detector runs."""
+    from opennvr_app_sdk import load_app_config
+
+    import ppe_check
+
+    path = tmp_path / "c.yml"
+    path.write_text('nats_url: "nats://x:4222"\n')
+    cfg = load_app_config(str(path), ppe_check.AppConfig)
+    assert cfg.consume_tier0 is True
+    assert cfg.subject_pattern == "opennvr.inference.tier0.>"
+    path.write_text('nats_url: "nats://x:4222"\nsubject_pattern: "opennvr.inference.yolov8.>"\nconsume_tier0: false\n')
+    cfg = load_app_config(str(path), ppe_check.AppConfig)
+    assert cfg.consume_tier0 is False and cfg.subject_pattern == "opennvr.inference.yolov8.>"

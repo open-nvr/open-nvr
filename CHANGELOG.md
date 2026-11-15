@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Apps subscribe to the always-on detector by default.** Six example
+  apps (abandoned-object, intrusion-detection, loitering-detection,
+  line-crossing, occupancy-counting, package-delivery), `ppe-check` and
+  the SDK's `App` facade defaulted to the wide subject
+  `opennvr.inference.>`, and four of them to Tier-0 switched off, so a
+  config that left those two lines out saw nothing on a stock install,
+  or saw every object twice once a heavy detector ran on the camera.
+  The defaults are now `opennvr.inference.tier0.>` with Tier-0 consumed,
+  in the code and in each `config.example.yml`. The shipped
+  `config.docker.yml` files already said so, so an installed app behaves
+  as before. A config that names its own subject, or sets
+  `consume_tier0: false`, is honoured; a facade app with Tier-0 off
+  keeps the wide subject.
 - **First-time setup confirms the authenticator before it finishes.** The
   setup page showed the QR code and sent the operator to sign in, counting
   the authenticator as enrolled the moment the code was displayed. Closing
@@ -52,6 +65,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keep it.
 
 ### Added
+
+- **An app can ask what is on a camera now without calling a model.**
+  `OpenNVR.description(camera, max_age_s=30, prefer_store=False)` (and
+  its async twin) reads core's one shared live description
+  (`GET /internal/app/cameras/{id}/description`, RFC-0004 step 3): the
+  description core already has when it is fresh enough, else one look
+  shared by every asker that arrives while it runs. The answer says
+  where it came from, how old it is and whether this call cost an
+  inference. The route is scoped to the cameras selected for the app, so
+  an app can neither read nor make the model run on a camera nobody
+  pointed it at. Until now only the camera agent could reach it.
 
 - **The rules for building an app, in one place, for people and for
   coding assistants.** What makes an app cheap on an OpenNVR box

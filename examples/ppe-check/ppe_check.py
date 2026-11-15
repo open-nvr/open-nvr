@@ -162,6 +162,10 @@ class AppConfig(BaseAppConfig):
     best_frame_url: str = ""
     kaic_url: str | None = None
     kaic_api_key: str | None = None
+    #: The app's trigger is a Tier-0 person track with a best frame, so it
+    #: consumes Tier-0, and Tier-0 alone (BUILDING_EFFICIENT_APPS.md,
+    #: rule 1). A config that leaves these out gets the working answer.
+    consume_tier0: bool = True
 
     def __post_init__(self) -> None:
         self.required_items = [str(i).strip().lower() for i in (self.required_items or []) if str(i).strip()]
@@ -184,6 +188,8 @@ class AppConfig(BaseAppConfig):
             raise ValueError("look_timeout_seconds, track_ttl_seconds and stale_after_seconds must be > 0")
         if self.alert_severity not in SEVERITIES:
             raise ValueError(f"alert_severity must be one of {SEVERITIES}")
+        if self.subject_pattern is None:
+            self.subject_pattern = "opennvr.inference.tier0.>"
         self.best_frame_url = (self.best_frame_url or os.environ.get("DETECT_PIPELINE_METRICS_URL")
                                or DEFAULT_BEST_FRAME_URL).rstrip("/")
         self.active_hours = ActiveHours.parse(self.active_hours)

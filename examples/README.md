@@ -45,9 +45,12 @@ The thirteen shipped examples cover two orthogonal axes of the OpenNVR pipeline:
                   │ package-delivery¹       │                      │
                   └─────────────────────────┴──────────────────────┘
 
-  ¹ These four drive KAI-C directly AND emit their own alerts —
-    they're the full producer-side templates. Start here if you want
-    to learn the producer flow first.
+  ¹ intrusion-detection and license-plate-recognition now run no model:
+    they subscribe (to Tier-0 tracks and to plate.recognized.v1). The
+    apps that call a model through KAI-C today are package-delivery,
+    ppe-check, gate-watch, garbage-dumping, smart-doorbell and
+    guard-scan-compliance. Which of them to copy for that, and which
+    not, is in docs/BUILDING_EFFICIENT_APPS.md.
   ² camera-agent sits in the "subscribes to inference" row because
     it's reactive — the user talks to it. It runs tools (which DO
     drive KAI-C) on demand, but the example is shaped as a
@@ -122,16 +125,15 @@ full design (desired-state + reconciler, RBAC, digest pinning, audit).
 ### [`intrusion-detection/`](intrusion-detection)
 
 **Detect people or vehicles entering restricted zones during restricted hours,
-fire an alert.** The canonical producer-side template — drives KAI-C, walks
-the audit chain end to end, demonstrates both HTTP-polling and WebSocket-
-streaming transports.
+fire an alert.** A subscriber to the platform's own detector (Tier-0): it
+runs no model, and one tracked intruder raises one alarm.
 
 | | |
 |---|---|
-| Pattern | Drives inference (HTTP poll or WS stream) → fires alerts |
-| Adapter | YOLOv8 (object detection) |
+| Pattern | Subscribes to Tier-0 tracks → fires alerts |
+| Adapter | (none — rides the platform's detector) |
 | Difficulty | ⭐ beginner |
-| Best for learning | The full producer pipeline from camera → KAI-C → alert |
+| Best for learning | Zones, schedules and one alarm per tracked object, on detections the platform already made |
 | Tests | 87 |
 
 ```bash
@@ -152,7 +154,7 @@ already running.
 | | |
 |---|---|
 | Pattern | Subscribes to NATS inference events → fires alerts |
-| Adapter | (rides upstream's YOLOv8 — no direct adapter call) |
+| Adapter | (none — rides the platform's detector, Tier-0) |
 | Difficulty | ⭐⭐ intermediate |
 | Best for learning | NATS subscription, state machines, multi-app deployments |
 | Tests | 50 |
@@ -177,7 +179,7 @@ optional under-occupancy for posts that must stay staffed.
 | | |
 |---|---|
 | Pattern | Subscribes to NATS inference events → fires alerts |
-| Adapter | (rides upstream's YOLOv8 — no direct adapter call) |
+| Adapter | (none — rides the platform's detector, Tier-0) |
 | Difficulty | ⭐⭐ intermediate |
 | Best for learning | Edge-triggered state machines, zone counting, threshold debounce |
 | Tests | 7 |
@@ -241,26 +243,23 @@ python abandoned_object.py --config config.yml
 ### [`footage-search/`](footage-search)
 
 **Search recorded footage in plain language — "every red truck at the dock
-yesterday."** An indexer subscribes to detector + captioner events into a
-local SQLite index; a `search` CLI parses a natural-language query into
-labels + descriptor keywords + time window + camera and returns matching
-moments, each with the `correlation_id` for the recorded segment. Works on
-existing adapters (object class from the detector, "red" from BLIP
-captions); point it at the `vlm` adapter for precise attributes. Optional
-local-Ollama query parsing. No cloud, no API keys.
+yesterday."** The app keeps no index of its own: the platform describes
+and embeds each visit once, and a search is one `timeline.find` call
+against that store. Selecting a camera for this app is what switches
+captions and embeddings on for it. Optional local-Ollama query parsing
+(off by default). No cloud, no API keys.
 
 | | |
 |---|---|
-| Pattern | Indexer subscribes to NATS → SQLite; CLI natural-language search |
-| Adapters | (rides upstream's detector + a captioner/VLM — no direct call) |
+| Pattern | Asks the platform's store (`timeline.find`); no index, no model call |
+| Adapters | (none of its own — the platform's enrichment tier describes the visits) |
 | Difficulty | ⭐⭐⭐ advanced |
-| Best for learning | Building a searchable index off the event bus, NL→filter parsing |
+| Best for learning | Reusing what the platform already computed instead of computing it again |
 | Tests | 6 |
 
 ```bash
 cd examples/footage-search && uv sync --extra dev
 cp config.example.yml config.yml
-python footage_search.py index  --config config.yml      # build the index
 python footage_search.py search --config config.yml "red truck yesterday"
 ```
 

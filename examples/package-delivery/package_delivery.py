@@ -130,7 +130,7 @@ MANIFEST = AppManifest(
     requires_tasks=["object_detection", "multi_object_tracking"],
     # Lights the first-class Deliveries page (app/src/lib/appVerticals.ts).
     provides=["deliveries"],
-    subscribes="opennvr.inference.>",
+    subscribes="opennvr.inference.tier0.>",
     # Widened onto the cameras picked for this app so the COCO stand-in
     # works on a stock install; a package-capable skill is used over it
     # whenever one is registered.
@@ -321,7 +321,7 @@ class AppConfig:
     attach_snapshot: bool = True
     alert_cooldown_seconds: float = 20.0
     track_ttl_seconds: float = 10.0
-    consume_tier0: bool = False
+    consume_tier0: bool = True
     auto_cameras: bool = False
 
 
@@ -408,7 +408,7 @@ def load_config(path: str) -> AppConfig:
         if not subject:
             raise ValueError("config: 'subject_pattern' must not be empty")
     else:
-        subject = "opennvr.inference.>"
+        subject = "opennvr.inference.tier0.>"
 
     # The 1.0 app called the porch ``roi``; the catalog draws ``zone``.
     zones_override = raw.get("zone", raw.get("zones", raw.get("roi")))
@@ -478,7 +478,7 @@ def load_config(path: str) -> AppConfig:
         kaic_url=str(raw["kaic_url"]) if raw.get("kaic_url") else None,
         kaic_api_key=str(raw["kaic_api_key"]) if raw.get("kaic_api_key") else None,
         track_ttl_seconds=float(raw.get("track_ttl_seconds", 10.0)),
-        consume_tier0=bool(raw.get("consume_tier0", False)),
+        consume_tier0=bool(raw.get("consume_tier0", True)),
         auto_cameras=auto_cameras,
         **knobs,
     )

@@ -435,6 +435,14 @@ class AsyncOpenNVR:
         return await self._http.get_bytes(
             f"/api/v1/internal/app/cameras/{_camera_id(camera)}/snapshot")
 
+    async def description(self, camera, *, max_age_s: float = 30.0,
+                          prefer_store: bool = False) -> dict | None:
+        """What is on this camera now, in words, from the platform's one
+        shared look (see :meth:`OpenNVR.description`)."""
+        return await self._http.get_json(
+            f"/api/v1/internal/app/cameras/{_camera_id(camera)}/description",
+            max_age_s=float(max_age_s), prefer_store="true" if prefer_store else "false")
+
     async def save_evidence(self, jpeg: bytes) -> str | None:
         """Store a JPEG for an alert to cite; returns its path.
 

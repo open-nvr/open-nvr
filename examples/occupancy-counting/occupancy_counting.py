@@ -182,7 +182,7 @@ MANIFEST = AppManifest(
     requires_tasks=["object_detection"],  # checked vs GET /api/v1/adapters
     # This app powers the first-class Occupancy page.
     provides=["occupancy"],
-    subscribes="opennvr.inference.>",
+    subscribes="opennvr.inference.tier0.>",
     params=[
         Param("watch_labels", list, default=["person"],
               description="Detection labels to count — person for people, "
@@ -379,7 +379,7 @@ def load_config(path: str) -> AppConfig:
         if not subject:
             raise ValueError("config: 'subject_pattern' must not be empty")
     else:
-        subject = "opennvr.inference.>"
+        subject = "opennvr.inference.tier0.>"
 
     try:
         debounce = int(raw.get("debounce_frames", 1))

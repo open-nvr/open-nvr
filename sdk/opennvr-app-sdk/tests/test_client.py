@@ -52,6 +52,12 @@ class _FakeCore(BaseHTTPRequestHandler):
             return self._reply(200, b"\xff\xd8jpeg", "image/jpeg")
         if p == "/api/v1/internal/app/cameras/2/snapshot":
             return self._reply(503, {"detail": "offline"})
+        if p == "/api/v1/internal/app/cameras/1/description":
+            return self._reply(200, {"camera_id": 1, "text": "a white van at the gate",
+                                     "source": "fresh", "age_s": 4.0, "model_called": False,
+                                     "query": parse_qs(u.query)})
+        if p == "/api/v1/internal/app/cameras/2/description":
+            return self._reply(404, {"detail": "Camera not found"})
         if p == "/api/v1/internal/app/recordings/1":
             return self._reply(200, {"recordings": [{"start": "2026-09-05T10:00:00Z",
                                                      "duration": 60.0}]})
@@ -184,3 +190,17 @@ def test_camera_id_parsing():
     assert _camera_id(Camera(id=3, handle="cam3", name="", role="", frame_url="")) == 3
     with pytest.raises(ValueError):
         _camera_id("gate")
+
+
+def test_description_is_the_shared_look_not_a_model_call(core):
+    """An app asks core what is on a camera; it does not call a caption
+    model. Outside the roster (404) and unreachable both read as None —
+    "could not ask", never "nothing there"."""
+    with OpenNVR(core) as nvr:
+        got = nvr.description("cam1")
+        assert got["text"] == "a white van at the gate" and got["model_called"] is False
+        assert got["query"] == {"max_age_s": ["30.0"], "prefer_store": ["false"]}
+        got = nvr.description(1, max_age_s=5, prefer_store=True)
+        assert got["query"] == {"max_age_s": ["5.0"], "prefer_store": ["true"]}
+        assert nvr.description("cam2") is None
+    assert OpenNVR("http://127.0.0.1:1", timeout=0.2).description(1) is None

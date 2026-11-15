@@ -270,3 +270,16 @@ def test_async_infer_stream_handshake_frames_and_teardown():
 async def _ret(value):
     return value
 
+
+
+def test_description_awaited(stack):
+    core, _ = stack
+
+    async def go():
+        async with AsyncOpenNVR(core) as nvr:
+            got = await nvr.description("cam1", max_age_s=10)
+            assert got["text"] == "a white van at the gate"
+            assert got["query"] == {"max_age_s": ["10.0"], "prefer_store": ["false"]}
+            assert await nvr.description("cam2") is None
+
+    asyncio.run(go())

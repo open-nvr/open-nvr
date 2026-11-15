@@ -92,6 +92,7 @@ Before asking a model about a visit, read what the platform has already computed
 | Who is inside | `nvr.timeline.plates_inside()` |
 | The photo of a visit | `nvr.timeline.evidence(event_id)` |
 | Is anyone there now, how many | the latest Tier-0 tracks; no model call |
+| What is on the camera now, in words | `nvr.description(camera, max_age_s=30)` — one shared look for every asker |
 
 ### 5. Build on domain events
 

@@ -224,6 +224,14 @@ such reuse.
 | Who is inside | `nvr.timeline.plates_inside()` |
 | The photo of a visit | `nvr.timeline.evidence(event_id)` |
 | Is anyone there now, how many | the latest Tier-0 tracks; no model call |
+| What is on the camera now, in words | `nvr.description(camera, max_age_s=30)` — one shared look for every asker |
+
+`nvr.description()` is the live case. Core keeps one description per
+camera: it returns the one it has when that is younger than
+`max_age_s`, and otherwise makes one look that every asker arriving
+meanwhile shares. The answer carries `model_called`, so an app can see
+what its question cost. It is scoped to the cameras selected for the
+app (in the SDK after 0.12.0).
 
 A search answer may carry `pending`: visits in the window that are not
 described yet. That is "not yet", and the platform has queued them;
@@ -236,8 +244,7 @@ who is inside). [`examples/footage-search`](../examples/footage-search/)
 [`examples/camera-agent`](../examples/camera-agent/) (`camera_snapshot`
 answers count and presence from Tier-0 tracks with no inference).
 
-**Check.** Review. See [Planned](#planned-not-yet-rules) for the shared
-live description.
+**Check.** Review.
 
 ## Rule 5 — Build on domain events
 
@@ -457,13 +464,6 @@ These are decided in direction and not finished. Do not build on them
 as if they were, and do not treat their absence as permission to go
 around the platform.
 
-- **One shared "what is on this camera now".** Core has one path for a
-  live description: the newest described visit if it is fresh, else one
-  gated look shared by every asker
-  (`GET /internal/camera-agent/cameras/{id}/description`, RFC-0004 step
-  3). The camera agent and the Mirror use it. It is not in the App SDK
-  client yet; until it is, an app that needs a live answer makes one
-  `nvr.ai.infer` call on a trigger (rule 2) and caches it.
 - **Capability tokens.** An adapter will accept a call only with a
   token KAI-C minted, which turns rule 3 from a convention into a
   refusal (RFC-0001, RFC-0004 principle 5).
@@ -475,30 +475,32 @@ around the platform.
 
 ## Where the examples stand
 
-Every example was read against these rules on 2026-11-15. The apps
-named under **Reference** above do that rule correctly. These do not
-yet, and should not be copied for the part named:
+Every example was read against these rules on 2026-11-15, and what
+could be corrected without changing what an app detects was: the six
+detector apps, `ppe-check` and the `App` facade now default to the
+Tier-0 subject, the scaffold and the cookbook teach it, and
+`nvr.description()` gives apps the shared live look. The apps named
+under **Reference** above do that rule correctly.
 
-| App | What still goes the old way |
-|---|---|
-| `smart-doorbell` | Face recognition on every polled frame with no Tier-0 trigger; holds the face adapter's address for enrolment; the alert carries the photo as bytes; dedup is in memory. |
-| `gate-watch`, `garbage-dumping` | A model call on every poll (30 s and 60 s) whether or not anything is in the scene. |
-| `guard-scan-compliance` | Decodes a video-rate stream and runs pose per frame. This is the declared exception of rule 2 (keypoints at ten frames a second), not a pattern. |
-| `camera-agent` | Holds adapter addresses for speech-to-text, text-to-speech, faces and the language model; decodes RTSP itself as a fallback; describes a stored visit by calling the model instead of reading its caption; its watches run the detector on a timer; it does not subscribe to `visit.enriched.v1`. The Mirror's person card runs its own model loop. |
-| `ppe-check` | Right on rule 2, but fetches the best frame from a pipeline address it holds instead of the SDK's `BestFrameClient`. |
-| `abandoned-object` | Works out "stationary" itself instead of reading Tier-0's flag. |
-| `occupancy-counting` | Finds its cameras through the older skill discovery, not `roster()`. |
-| `footage-search` | The optional query parser calls a language model at its own address (off by default). |
-| `inference-listener` | A plumbing demo: it prints every camera's raw events and does not parse Tier-0 tracks. Not a template for an app. |
-| `abandoned-object`, `intrusion-detection`, `loitering-detection`, `line-crossing` | The code defaults and `config.example.yml` are the adapter-only mode (wide subject, Tier-0 off), which sees nothing on a stock install. `config.docker.yml` is the right one. |
+What is left changes WHEN an app looks, so it changes what the app can
+catch and how fast. Each needs a run on real cameras before it is
+changed, and until then should not be copied for the part named:
+
+| App | What still goes the old way | What decides the change |
+|---|---|---|
+| `smart-doorbell` | Face recognition on every polled frame, with no Tier-0 person track as the trigger; holds the face adapter's address for enrolment; the alert carries the photo as bytes; dedup is in memory. | Whether Tier-0 reliably tracks a person whose face fills a doorbell frame. If it misses close faces, a trigger would lose recognitions. |
+| `gate-watch`, `garbage-dumping` | A model call on every poll (30 s and 60 s) whether or not anything moved. | A gate can open, and rubbish can appear, with no tracked person or vehicle in frame. A visit-based trigger needs a slow fallback poll, and the delay it adds has to be accepted. |
+| `guard-scan-compliance` | Decodes a video-rate stream and runs pose per frame. | Nothing: this is the declared exception of rule 2 (keypoints at ten frames a second), not a pattern. |
+| `camera-agent` | Holds adapter addresses for speech-to-text, text-to-speech, faces and the language model; decodes RTSP itself as a fallback; describes a stored visit by calling the model instead of reading its caption; its watches run the detector on a timer; it does not subscribe to `visit.enriched.v1`. The Mirror's person card runs its own model loop. | Speech and the language model have no KAI-C route yet. The rest is the remaining work of RFC-0004 step 4, measured on the box. |
+| `abandoned-object` | Works out "stationary" itself instead of reading Tier-0's flag. | Tier-0's flag counts frames, the app counts seconds; the two must be shown to agree at the configured frame rate. |
+| `occupancy-counting` | Finds its cameras through the older skill discovery, not `roster()`. | Works; a tidy-up. |
+| `footage-search` | The optional query parser calls a language model at its own address (off by default). | A language-model route through KAI-C. |
+| `inference-listener` | A plumbing demo: it prints every camera's raw events and does not parse Tier-0 tracks. Not a template for an app. | — |
 
 No example uses `DomainEventSubscriber`, `timeline.evidence` or
 `BestFrameClient` yet; the cookbook
 ([`sdk/opennvr-app-sdk/cookbook/`](../sdk/opennvr-app-sdk/cookbook/))
-has one runnable file for each. Three cookbook files
-(`03_frame_app.py`, `11_tier0.py`, `14_infer_stream.py`) predate these
-rules and show a model call per frame; read them for the API, not for
-the pattern.
+has one runnable file for each.
 
 ## Related reading
 

@@ -565,6 +565,31 @@ class OpenNVR:
         return self._http.get_bytes(
             f"/api/v1/internal/app/cameras/{_camera_id(camera)}/snapshot")
 
+    def description(self, camera, *, max_age_s: float = 30.0,
+                    prefer_store: bool = False) -> dict | None:
+        """What is on this camera now, in words — the platform's one
+        shared look, not a model call of the app's own.
+
+        Returns core's answer: ``text``, ``source`` (``visit`` — the
+        newest described visit; ``fresh`` — a look made within
+        ``max_age_s``; or a new look), ``age_s``, ``observed_at``,
+        ``attributes`` and ``model_called`` (whether this call cost an
+        inference). ``None`` when core could not be asked, which is not
+        "nothing there".
+
+        A description younger than ``max_age_s`` is returned as it is;
+        otherwise one look is made and shared by every asker that
+        arrives while it runs, so several apps asking about one camera
+        cost one inference. ``prefer_store=True`` lets the newest
+        visit's caption answer first ("what was just seen") — that is
+        one object's crop, not the whole frame. Ask on a trigger (a
+        track appeared, a person asked), never on a timer: a quiet
+        camera should cost nothing.
+        """
+        return self._http.get_json(
+            f"/api/v1/internal/app/cameras/{_camera_id(camera)}/description",
+            max_age_s=float(max_age_s), prefer_store="true" if prefer_store else "false")
+
     def save_evidence(self, jpeg: bytes) -> str | None:
         """Store a JPEG for an alert to cite; returns its path.
 

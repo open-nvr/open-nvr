@@ -68,7 +68,7 @@ def test_manifest_defaults_and_passthrough():
     m = app.manifest()
     assert (m.id, m.name, m.version, m.category) == (
         "gate-watch", "Gate Watch", "2.1.0", "perimeter")
-    assert m.subscribes == "opennvr.inference.>"
+    assert m.subscribes == "opennvr.inference.tier0.>"
     assert m.requires_tasks == ["object_detection"]
     assert m.author == "ACME" and m.pricing == "paid"
     # An alert type is derived per rule, at the rule's severity.
@@ -810,3 +810,26 @@ def test_live_config_is_applied_and_the_zone_cache_dropped():
     det.on_config_update({"driveway": {"cam-1": ZONE}})
     det.handle_event(inference_event(detection("person", x=0.1, y=0.1)))
     assert seen == ["cam-1"], "a redrawn zone needed a restart"
+
+
+def test_the_default_subject_follows_what_the_app_consumes(tmp_path):
+    """Tier-0 consumed: Tier-0's subject alone, so a heavy detector on
+    the same camera cannot deliver every object a second time. Tier-0
+    off: the app rides adapter completions on the wide subject. A
+    subject the operator wrote is never replaced."""
+    from opennvr_app_sdk import App
+
+    rides = App("rides-tier0", name="Rides")
+    assert rides.manifest().subscribes == "opennvr.inference.tier0.>"
+    cfg_file = tmp_path / "c.yml"
+    cfg_file.write_text('nats_url: "nats://x:4222"\n')
+    assert rides.load_config(str(cfg_file)).subject_pattern == "opennvr.inference.tier0.>"
+    cfg_file.write_text('nats_url: "nats://x:4222"\nconsume_tier0: false\n')
+    assert rides.load_config(str(cfg_file)).subject_pattern == "opennvr.inference.>"
+    cfg_file.write_text('nats_url: "nats://x:4222"\nsubject_pattern: "opennvr.inference.yolov8.>"\n')
+    assert rides.load_config(str(cfg_file)).subject_pattern == "opennvr.inference.yolov8.>"
+
+    adapter_only = App("adapter-only", name="Adapter only", consume_tier0=False)
+    assert adapter_only.manifest().subscribes == "opennvr.inference.>"
+    cfg_file.write_text('nats_url: "nats://x:4222"\n')
+    assert adapter_only.load_config(str(cfg_file)).subject_pattern == "opennvr.inference.>"

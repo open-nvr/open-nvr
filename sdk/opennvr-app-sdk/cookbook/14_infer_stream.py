@@ -12,8 +12,15 @@ session shares one audit correlation id — which is what makes a
 sequence of frames traceable as one episode rather than N unrelated
 inferences.
 
-Reach for it when you are polling fast (tracking, counting, an
-interactive view). Stay with `KaiCClient` when you are not.
+Reach for it rarely. Detection, tracking and counting are NOT reasons:
+the platform's own detector already does those on every camera, and an
+app subscribes to the result (`11_tier0.py`). A stream session is for a
+rule that needs a model on every frame because the thing it measures
+only exists across frames — body keypoints through a scan sweep, a
+fall. It costs one model session per camera for as long as it runs, so
+the app says so, and `opennvr-app validate` asks for the reason
+(docs/BUILDING_EFFICIENT_APPS.md, rule 2). The adapter below is a pose
+model for that reason.
 """
 from opennvr_app_sdk import InferStream, KaiCError, OpenNVR
 
@@ -23,8 +30,8 @@ def track_for_a_while(kaic_url: str, api_key: str, camera_id: str,
     """One session, N frames. The session closes itself on the way out,
     including on an exception."""
     results = []
-    with InferStream(kaic_url, api_key, adapter="yolov8",
-                     camera_id=camera_id, client_id="dock-watch") as stream:
+    with InferStream(kaic_url, api_key, adapter="yolo-pose",
+                     camera_id=camera_id, client_id="scan-check") as stream:
         for jpeg in frames:
             try:
                 result = stream.infer(jpeg)      # -> §5.1-shaped dict
@@ -40,7 +47,7 @@ def through_the_platform_client(camera_id: str, frames: list[bytes]) -> list[dic
     """The same thing without knowing where KAI-C lives or what the key
     is — `nvr.ai.stream` builds the InferStream from the app's own
     credential."""
-    with OpenNVR() as nvr, nvr.ai.stream("yolov8", camera_id=camera_id) as stream:
+    with OpenNVR() as nvr, nvr.ai.stream("yolo-pose", camera_id=camera_id) as stream:
         return [stream.infer(jpeg)["result"] for jpeg in frames]
 
 

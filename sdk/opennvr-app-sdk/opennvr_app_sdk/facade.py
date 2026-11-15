@@ -1008,7 +1008,7 @@ class App:
                 AlertType(name=self.id, severity="medium")]
 
         kwargs = dict(self._manifest_kwargs)
-        kwargs.setdefault("subscribes", "opennvr.inference.>")
+        kwargs.setdefault("subscribes", self.default_subject())
         return AppManifest(
             id=self.id,
             name=self._name,
@@ -1048,11 +1048,24 @@ class App:
 
     def load_config(self, path: str) -> Any:
         """Load ``path`` into :meth:`config_class`, defaulting the NATS
-        subject to the inference broadcast."""
+        subject to :meth:`default_subject` for what the loaded config
+        consumes."""
         cfg = load_app_config(path, self.config_class())
         if getattr(cfg, "subject_pattern", None) is None:
-            cfg.subject_pattern = "opennvr.inference.>"
+            cfg.subject_pattern = self.default_subject(
+                bool(getattr(cfg, "consume_tier0", self.consume_tier0)))
         return cfg
+
+    def default_subject(self, consume_tier0: bool | None = None) -> str:
+        """The subject an app subscribes to when its config names none.
+
+        An app that consumes Tier-0 subscribes to Tier-0 alone: on the
+        wide ``opennvr.inference.>`` every object arrives twice the day
+        a heavy detector runs on the same camera
+        (BUILDING_EFFICIENT_APPS.md, rule 1). An app that turned Tier-0
+        off rides adapter completions, and keeps the wide subject."""
+        consume = self.consume_tier0 if consume_tier0 is None else consume_tier0
+        return "opennvr.inference.tier0.>" if consume else "opennvr.inference.>"
 
     def detector_class(self) -> type[Detector]:
         """Compile the app to a :class:`~.detector.Detector` subclass.

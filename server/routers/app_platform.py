@@ -13,6 +13,7 @@ the deployment's site key answers unscoped (and may name an app with
 Routes (prefix ``/api/v1/internal/app``):
 
 * ``GET  /cameras/{id}/snapshot``             — current JPEG
+* ``GET  /cameras/{id}/description``          — what is on it now, in words (the shared look)
 * ``GET  /cameras/{id}/stream``               — scoped RTSP URL for frames
 * ``GET  /recordings/{id}``                   — recorded segments
 * ``GET  /recordings/{id}/url``               — playback URL for one segment
@@ -87,6 +88,35 @@ def _app_id_for(db: Session, principal, app_id: str | None) -> str:
 
 
 # ── Cameras ─────────────────────────────────────────────────────────
+
+
+@router.get("/cameras/{camera_id}/description")
+async def app_camera_description(
+    camera_id: int,
+    max_age_s: float = 30.0,
+    prefer_store: bool = False,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """What is on this camera now, in words, from the one shared path
+    (RFC-0004 step 3, ``services/camera_description.py``) — for an app
+    on a camera selected for it.
+
+    The answer is the same one the agent's live look gets: a description
+    younger than ``max_age_s`` if there is one, else ONE gated look that
+    every asker arriving meanwhile shares; with ``prefer_store`` the
+    newest described visit answers first. ``model_called`` says whether
+    this call cost an inference. An app asks here instead of calling a
+    caption model itself, so N apps asking about one camera cost one
+    look, inside the budget that protects the detector. 404 for a camera
+    outside the app's roster, which also means an app cannot make the
+    model run on a camera nobody pointed it at.
+    """
+    cam = _camera_in_roster(db, principal, camera_id)
+    from services.camera_description import describe
+
+    max_age_s = max(0.0, min(3600.0, float(max_age_s)))
+    return await describe(int(cam.id), max_age_s, prefer_store=bool(prefer_store))
 
 
 @router.get("/cameras/{camera_id}/snapshot")

@@ -23,7 +23,7 @@ def _build(**overrides):
     """Construct the app with an in-memory dispatcher."""
     config = app.config_class()(
         nats_url="nats://test:4222",
-        subject_pattern="opennvr.inference.>",
+        subject_pattern="opennvr.inference.tier0.>",
         **overrides,
     )
     recorder = RecorderChannel()
@@ -79,7 +79,7 @@ def test_config_loader_roundtrips(tmp_path):
     # Defaults the SDK supplies: the deployment's NATS endpoint (from
     # the environment the installer exports) and the detection stream.
     assert cfg.nats_url
-    assert cfg.subject_pattern == "opennvr.inference.>"
+    assert cfg.subject_pattern == "opennvr.inference.tier0.>"
     assert cfg.consume_tier0 is True
 
 
@@ -90,5 +90,5 @@ def test_manifest_identity_matches_module():
     assert manifest.id == "__APP_ID__"
     assert manifest.name == "__APP_NAME__"
     assert "__TASK__" in manifest.requires_tasks
-    assert manifest.subscribes == "opennvr.inference.>"
+    assert manifest.subscribes == "opennvr.inference.tier0.>"
     assert [a.name for a in manifest.emits] == ["__APP_ID__"]

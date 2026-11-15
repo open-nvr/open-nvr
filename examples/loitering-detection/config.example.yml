@@ -10,11 +10,10 @@
 
 # ── NATS endpoint (KAI-C's event bus) ──────────────────────────────
 #
-# This example subscribes to KAI-C's inference broadcast surface
-# (NATS event bus) instead of driving its own KAI-C calls. It rides the
-# inference stream another app (e.g. intrusion-detection) is already
-# pushing. Net: one adapter inference fans out to N consumers; this
-# app pays zero GPU cost on top of whatever's already running.
+# This example subscribes to the detections the platform already
+# publishes (NATS event bus) instead of driving its own inference: one
+# detector per camera fans out to every app, and this app adds no model
+# cost of its own.
 nats_url: "nats://nats:4222"
 # Bare-metal / host-mode deployment:
 # nats_url: "nats://127.0.0.1:4222"
@@ -24,10 +23,11 @@ nats_url: "nats://nats:4222"
 # isolated dev deployments where NATS is configured auth-less.
 nats_token: null
 
-# Subject pattern. The wildcard ``opennvr.inference.>`` catches
-# every adapter's events; narrow to ``opennvr.inference.yolov8.>``
-# if you only care about object detection results, etc.
-subject_pattern: "opennvr.inference.>"
+# Subject pattern. Tier-0 is the detector every camera already runs,
+# and it tracks; subscribe to it alone (docs/BUILDING_EFFICIENT_APPS.md,
+# rule 1). The wide ``opennvr.inference.>`` with Tier-0 consumed
+# delivers every object twice once a heavy detector runs on the camera.
+subject_pattern: "opennvr.inference.tier0.>"
 
 # ── Detection filter ──────────────────────────────────────────────
 #
@@ -40,12 +40,10 @@ watch_labels:
 
 # ── Tracking ──────────────────────────────────────────────────────
 #
-# Dwell is measured per tracked object (one stay per track_id). On the
-# stock stack consume Tier-0, which already tracks:
-#   subject_pattern: "opennvr.inference.tier0.>"
-#   consume_tier0: true
-# Without track ids the app falls back to one stay per (camera, label).
-consume_tier0: false
+# Dwell is measured per tracked object (one stay per track_id), and
+# Tier-0 supplies the track ids. Without them the app falls back to one
+# stay per (camera, label).
+consume_tier0: true
 
 # ── Rule ──────────────────────────────────────────────────────────
 #
