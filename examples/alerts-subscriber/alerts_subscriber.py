@@ -85,6 +85,9 @@ MANIFEST = AppManifest(
         Param("webhook_timeout_seconds", float, default=5.0),
     ],
     emits=[],  # pass-through: consumes alerts, emits none
+    # Reads no camera data, so the catalog offers no camera picker
+    # (BUILDING_EFFICIENT_APPS.md, rule 6).
+    camera_picker=False,
 )
 
 

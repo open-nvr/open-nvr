@@ -12,16 +12,12 @@ nats_url: "nats://nats:4222"
 # nats_url: "nats://127.0.0.1:4222"   # bare-metal / host-mode
 nats_token: null
 
-# IMPORTANT: line-crossing needs per-object identity. Subscribe to a
-# stream whose detections carry a ``track_id`` — chain the ``bytetrack``
-# adapter after your detector, or use a detector that tracks natively.
-# Narrow the subject to that tracked stream if you can:
-subject_pattern: "opennvr.inference.>"
-
-# Tier-0 (the stack's own detector) publishes tracked detections on
-# opennvr.inference.tier0.> — the zero-cost way to get track ids:
-# subject_pattern: "opennvr.inference.tier0.>"
-# consume_tier0: true
+# IMPORTANT: line-crossing needs per-object identity. Tier-0, the
+# detector every camera already runs, publishes tracked detections on
+# opennvr.inference.tier0.> at no extra cost: subscribe to it alone
+# (docs/BUILDING_EFFICIENT_APPS.md, rule 1).
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
 
 # ── What to count ─────────────────────────────────────────────────
 watch_labels:

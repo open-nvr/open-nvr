@@ -53,6 +53,7 @@ caps   = nvr.ai.capabilities()                    # adapters, tasks, health
 |---|---|---|
 | `cameras()`, `camera(x)` | `GET /internal/camera-agent/cameras` | the app's roster |
 | `snapshot(cam)` | `GET /internal/app/cameras/{id}/snapshot` | roster |
+| `description(cam, max_age_s=, prefer_store=)` | `GET /internal/app/cameras/{id}/description` | roster |
 | `camera.stream(cam)`, `stream_grant(cam)` | `GET /internal/app/cameras/{id}/stream` | roster |
 | `recordings(cam).list/url/frame_at` | `GET /internal/app/recordings/{id}[/url]`, `/internal/camera-agent/recordings/frame` | roster |
 | `timeline.search/evidence` | `GET /internal/camera-agent/events[/{id}/evidence]` | roster |
@@ -75,6 +76,16 @@ the platform's LIVE view of a camera the app is assigned. `ai.stream()`
 at the bottom of the table is a KAI-C inference session. Having both
 named `stream` in one table is a trap the table used to set by listing
 only the second one.
+
+`description(cam)` is how an app learns what is on a camera *now*, in
+words, without calling a caption model. Core answers from one shared
+path: a description younger than `max_age_s` if it has one, else one
+look that every asker arriving meanwhile shares, so several apps asking
+about one camera cost one inference, inside the budget that protects
+the detector. The answer says where it came from (`source`), how old it
+is (`age_s`) and whether this call cost a model call (`model_called`).
+Ask on a trigger, not on a timer
+([BUILDING_EFFICIENT_APPS.md](BUILDING_EFFICIENT_APPS.md), rules 2 and 4).
 
 `timeline.search()` and `timeline.find()` are different questions.
 `search` filters by label and time — "cars on cam3 yesterday". `find`

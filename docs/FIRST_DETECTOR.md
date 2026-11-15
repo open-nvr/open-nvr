@@ -11,11 +11,13 @@ method** — the rule.
 > No Docker needed for steps 1–3. A running OpenNVR stack (step 4) is
 > only needed to see it fire against live cameras.
 
-The SDK ships three archetypes. This guide builds a **Detector**: it
-*subscribes* to KAI-C's NATS inference stream and reacts to detections
-another app is already driving — so it pays **zero adapter GPU cost**.
-(`FrameApp` *drives* inference itself — see
-[`examples/smart-doorbell`](../examples/smart-doorbell) — and
+The SDK ships several archetypes. This guide builds a **Detector**: it
+*subscribes* to the detections the platform already publishes for every
+camera (Tier-0, the always-on detector) — so it decodes no video and
+runs no model of its own. That is rule 1 of
+[BUILDING_EFFICIENT_APPS.md](BUILDING_EFFICIENT_APPS.md), which is worth
+ten minutes before your rule grows.
+(`FrameApp` *drives* inference itself, and is the costly exception — and
 `AlertSubscriber` is the pass-through archetype that rides the alert bus,
 like [`examples/home-assistant-relay`](../examples/home-assistant-relay).)
 
@@ -65,42 +67,47 @@ examples/package-watch/
 
 ## 2. Look at the rule (3 min)
 
-Everything except **the rule** is boilerplate the SDK's `Detector` base
-owns: the NATS subscribe/decode loop, per-message exception isolation,
-the `camera_id` + `result.detections` payload walk, `completed_at`
-timestamp parsing, alert dispatch, the CLI, and signal handling. What's
-left for you is one method, `on_detections`, in `package_watch.py`.
-Here's the heart of what the generator wrote (abridged — the file on
-disk carries fuller docstrings and type annotations):
+Everything except **the rule** is the SDK's: the NATS loop, per-message
+exception isolation, the Tier-0 bridge, alert dispatch, the contract
+server, live config, the CLI and signal handling. What's left for you
+is one decorated function in `package_watch.py`. Here's the heart of
+what the generator wrote (abridged):
 
 ```python
-def on_detections(self, camera_id, detections, event) -> list[Alert]:
-    """THE RULE — this is the one method you fill in.
+app = App("package-watch", name="Package Watch", version="0.1.0",
+          category="analytics", requires_tasks=["object_detection"])
 
-    Called once per decoded inference event that has a camera_id and a
-    result.detections list. Return the Alert objects to fire (the SDK
-    base dispatches them). Return [] to stay quiet.
-    """
-    # Each detection is a §5.1 dict: {"label", "confidence", "bbox":
-    # {"x","y","w","h"}, "track_id", "attributes"}. bbox coords are
-    # normalized (0..1). Filter to the labels this app watches.
-    matches = [
-        det
-        for det in detections
-        if isinstance(det, dict)
-        and str(det.get("label", "")).lower() in self.cfg.watch_labels
-    ]
-    if not matches:
-        return []
+app.param("min_confidence", float, default=0.5)
+app.param("dwell_s", float, default=0.0)
 
-    label = str(matches[0].get("label", "")).lower()
-    # TODO: put YOUR rule here. This starter alerts on any sighting.
-    return [self._build_alert(camera_id=camera_id, label=label, event=event)]
+
+@app.on_detection("person",
+                  min_confidence="$min_confidence",
+                  dwell="$dwell_s",
+                  severity="medium",
+                  emits="package-watch")
+def person_seen(event) -> None:
+    """THE RULE."""
+    event.alert(f"{event.label.capitalize()} seen on {event.camera}",
+                f"Package Watch observed a {event.label} on camera {event.camera}.")
 ```
 
-The starter fires on **any** sighting of a watched label. That's your
-canvas. **Where you put your rule** is the `# TODO` line — replace the
-trivial "any match" with your predicate:
+The rule is called once per detection that passes the filters, with
+`event.camera`, `event.label`, `event.confidence`, `event.track_id`,
+`event.zone`, `event.dwell_s`, `event.config` and `event.nvr` (the
+platform client). The filters do what most rules used to hand-roll:
+`zone=` adds the per-camera zone editor and fires only inside it,
+`dwell=` waits for continuous presence and fires once per episode,
+`cooldown=` throttles a repeat. `App` compiles to a `Detector`; when a
+rule outgrows the decorator, subclass `Detector` and implement
+`on_detections(camera_id, detections, event)` — the examples below do.
+
+The generated `config.example.yml` subscribes to
+`opennvr.inference.tier0.>` with `consume_tier0: true`, and the app
+directory carries `AGENTS.md` and a Claude Code skill with the
+platform's rules for a coding assistant.
+
+The starter fires on **any** sighting of a person. That's your canvas:
 
 | You want… | Reach for | Example to copy |
 |---|---|---|
@@ -110,9 +117,9 @@ trivial "any match" with your predicate:
 | Track the same object across frames | key state on `det["track_id"]` | [`line-crossing`](../examples/line-crossing) |
 | Gate on confidence / time-of-day | plain Python in the filter | — |
 
-Add config knobs as `Param(...)` entries in the `MANIFEST` and fields on
-`AppConfig` — the catalog renders every param as a form field, so an
-operator tunes your rule without touching code.
+Add config knobs with `app.param(...)` — the catalog renders every
+param as a form field, so an operator tunes your rule without touching
+code. Refer to one from a filter as `"$name"`.
 
 ## 3. Run the tests green (2 min)
 

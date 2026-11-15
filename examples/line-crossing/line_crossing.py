@@ -106,7 +106,7 @@ MANIFEST = AppManifest(
     requires_tasks=["object_detection", "multi_object_tracking"],
     # Lights the first-class Tripwires page (app/src/lib/appVerticals.ts).
     provides=["crossings"],
-    subscribes="opennvr.inference.>",
+    subscribes="opennvr.inference.tier0.>",
     params=[
         Param("watch_labels", list, default=["person"], suggestions=LABEL_SUGGESTIONS,
               description="Object classes to count. Vehicles and people usually want separate lines."),
@@ -243,7 +243,7 @@ class AppConfig:
     # ``opennvr.inference.tier0.>`` — the SDK bridges them into
     # on_detections when this is set. It is the zero-cost tracking source
     # a stock stack has; a chained bytetrack adapter is the alternative.
-    consume_tier0: bool = False
+    consume_tier0: bool = True
     # ── discovery ──
     auto_cameras: bool = False
     opennvr_url_for_discovery: str = ""
@@ -325,7 +325,7 @@ def load_config(path: str) -> AppConfig:
         if not subject:
             raise ValueError("config: 'subject_pattern' must not be empty")
     else:
-        subject = "opennvr.inference.>"
+        subject = "opennvr.inference.tier0.>"
 
     try:
         track_ttl = float(raw.get("track_ttl_seconds", 30.0))
@@ -421,7 +421,7 @@ def load_config(path: str) -> AppConfig:
         contract_host=str(raw["contract_host"]) if raw.get("contract_host") else None,
         opennvr_url=str(raw["opennvr_url"]) if raw.get("opennvr_url") else None,
         opennvr_token=str(raw["opennvr_token"]) if raw.get("opennvr_token") else None,
-        consume_tier0=bool(raw.get("consume_tier0", False)),
+        consume_tier0=bool(raw.get("consume_tier0", True)),
         auto_cameras=auto_cameras,
         opennvr_url_for_discovery=str(raw.get("opennvr_url") or ""),
         internal_api_key=raw.get("internal_api_key") or None,

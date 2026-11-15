@@ -110,7 +110,7 @@ MANIFEST = AppManifest(
     requires_tasks=["object_detection", "multi_object_tracking"],
     # Lights the first-class Left Items page (app/src/lib/appVerticals.ts).
     provides=["left_items"],
-    subscribes="opennvr.inference.>",
+    subscribes="opennvr.inference.tier0.>",
     # Tier-0 tracks only person/vehicles/pets by default; the platform widens
     # it to these on the cameras picked for the app, or a stock install sees no bag.
     tier0_labels=["backpack", "handbag", "suitcase"],
@@ -310,7 +310,7 @@ class AppConfig:
     fixture_radius: float = 0.03
     attach_snapshot: bool = True
     track_ttl_seconds: float = 10.0
-    consume_tier0: bool = False
+    consume_tier0: bool = True
     auto_cameras: bool = False
 
 
@@ -416,7 +416,7 @@ def load_config(path: str) -> AppConfig:
         if not subject:
             raise ValueError("config: 'subject_pattern' must not be empty")
     else:
-        subject = "opennvr.inference.>"
+        subject = "opennvr.inference.tier0.>"
 
     labels_raw = raw.get("object_labels")
     if labels_raw is None:
@@ -513,7 +513,7 @@ def load_config(path: str) -> AppConfig:
         opennvr_url=str(raw["opennvr_url"]) if raw.get("opennvr_url") else None,
         opennvr_token=str(raw["opennvr_token"]) if raw.get("opennvr_token") else None,
         track_ttl_seconds=float(raw.get("track_ttl_seconds", 10.0)),
-        consume_tier0=bool(raw.get("consume_tier0", False)),
+        consume_tier0=bool(raw.get("consume_tier0", True)),
         auto_cameras=auto_cameras,
         **knobs,
     )

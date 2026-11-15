@@ -1005,3 +1005,35 @@ def test_the_app_gets_zones_only_for_its_picked_cameras(env):
     body = tc.get("/apps/loitering-detection/config", headers=_app(key)).json()
     assert body["config"]["zones"] == {str(ids["gate"]): zone}
     assert body["cameras"] == [ids["gate"]]
+
+
+def test_the_shared_description_follows_the_roster(platform, monkeypatch):
+    """An app asks core what is on a camera instead of calling a caption
+    model (RFC-0004 step 3). The route is roster-scoped: an app can
+    neither read nor make the model run on a camera nobody selected for
+    it."""
+    tc, ids, _, key = platform
+    asked: list[tuple] = []
+
+    async def _describe(camera_id, max_age_s=30.0, *, prefer_store=False):
+        asked.append((camera_id, max_age_s, prefer_store))
+        return {"camera_id": camera_id, "text": "a white van at the gate",
+                "source": "fresh", "age_s": 2.0, "model_called": False}
+
+    import services.camera_description as cd
+    monkeypatch.setattr(cd, "describe", _describe)
+
+    r = tc.get(f"/internal/app/cameras/{ids['gate']}/description",
+               params={"max_age_s": 5, "prefer_store": "true"}, headers=_app(key))
+    assert r.status_code == 200 and r.json()["text"] == "a white van at the gate"
+    assert asked == [(ids["gate"], 5.0, True)]
+    # Outside the roster: 404, and the model path is never reached.
+    assert tc.get(f"/internal/app/cameras/{ids['yard']}/description",
+                  headers=_app(key)).status_code == 404
+    assert len(asked) == 1
+    # max_age_s is clamped, not trusted.
+    tc.get(f"/internal/app/cameras/{ids['gate']}/description",
+           params={"max_age_s": 10**9}, headers=_app(key))
+    assert asked[-1][1] == 3600.0
+    # No key at all is refused.
+    assert tc.get(f"/internal/app/cameras/{ids['gate']}/description").status_code == 401

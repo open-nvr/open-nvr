@@ -12,7 +12,7 @@ exports breaks in CI rather than misleading you months later.
 |---|---|---|
 | [01_app_facade.py](https://github.com/open-nvr/open-nvr/blob/main/sdk/opennvr-app-sdk/cookbook/01_app_facade.py) | `App`, `DetectionEvent` | **Start here.** The decorator front door — most apps need nothing else. |
 | [02_detector.py](https://github.com/open-nvr/open-nvr/blob/main/sdk/opennvr-app-sdk/cookbook/02_detector.py) | `Detector` | The class the facade compiles to. Consume inference another app is already driving. |
-| [03_frame_app.py](https://github.com/open-nvr/open-nvr/blob/main/sdk/opennvr-app-sdk/cookbook/03_frame_app.py) | `FrameApp`, `KaiCClient` | Drive your own inference: poll frames, call a model, pay the GPU. |
+| [03_frame_app.py](https://github.com/open-nvr/open-nvr/blob/main/sdk/opennvr-app-sdk/cookbook/03_frame_app.py) | `FrameApp`, `KaiCClient` | The costly archetype, for a rule about the scene that no track describes: poll slowly, call the model through KAI-C, and record why. |
 | [04_alert_subscriber.py](https://github.com/open-nvr/open-nvr/blob/main/sdk/opennvr-app-sdk/cookbook/04_alert_subscriber.py) | `AlertSubscriber` | React to alerts other apps fire — relays, SIEM bridges, notifiers. |
 | [05_domain_event_subscriber.py](https://github.com/open-nvr/open-nvr/blob/main/sdk/opennvr-app-sdk/cookbook/05_domain_event_subscriber.py) | `DomainEventSubscriber` | React to contracted domain events (`plate.recognized.v1`, …). |
 

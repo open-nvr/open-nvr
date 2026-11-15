@@ -116,7 +116,7 @@ MANIFEST = AppManifest(
     requires_tasks=["object_detection", "multi_object_tracking"],
     # Lights the first-class Perimeter page (app/src/lib/appVerticals.ts).
     provides=["intrusion"],
-    subscribes="opennvr.inference.>",
+    subscribes="opennvr.inference.tier0.>",
     params=[
         Param("watch_labels", list, default=["person"], suggestions=LABEL_SUGGESTIONS,
               description="Classes that count as an intruder. A yard that expects "
@@ -294,7 +294,7 @@ class AppConfig:
     override_minutes: float = 60.0
     attach_snapshot: bool = True
     track_ttl_seconds: float = 5.0
-    consume_tier0: bool = False
+    consume_tier0: bool = True
     auto_cameras: bool = False
 
 
@@ -376,7 +376,7 @@ def load_config(path: str) -> AppConfig:
         if not subject:
             raise ValueError("config: 'subject_pattern' must not be empty")
     else:
-        subject = "opennvr.inference.>"
+        subject = "opennvr.inference.tier0.>"
 
     watch_labels_raw = raw.get("watch_labels")
     if watch_labels_raw is None:
@@ -462,7 +462,7 @@ def load_config(path: str) -> AppConfig:
         opennvr_url=str(raw["opennvr_url"]) if raw.get("opennvr_url") else None,
         opennvr_token=str(raw["opennvr_token"]) if raw.get("opennvr_token") else None,
         track_ttl_seconds=float(raw.get("track_ttl_seconds", 5.0)),
-        consume_tier0=bool(raw.get("consume_tier0", False)),
+        consume_tier0=bool(raw.get("consume_tier0", True)),
         auto_cameras=auto_cameras,
         **knobs,
     )
