@@ -429,7 +429,11 @@ export function SyncPlayback() {
     setMasterMs(target)
     setView({ start: dayStart, end: dayEnd })
     setZoomIdx(0)
-    setPlaying(true)
+    // A deep link (a search result, an alert) opens PAUSED on its instant:
+    // the operator came to look at one moment, and footage that runs on by
+    // itself has left that moment before they have found the subject. They
+    // press play. A day picked on this page plays, as before.
+    setPlaying(asked == null)
   }, [segsLoading, selectedDate, segsByCam, unionSegs, dayStart, dayEnd])
 
   // ---- Master clock: advances wall-clock time, skipping global gaps --------

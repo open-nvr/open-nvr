@@ -43,13 +43,14 @@ _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 class UpdatePolicy(BaseModel):
     #: off: never look; notify: look and say so; manual: also allow Update
-    #: now; auto: also install, inside the window.
-    mode: Literal["off", "notify", "manual", "auto"] = "off"
+    #: now; auto (the default): also install releases by itself, inside the
+    #: window. Only signed stable releases, with a backup and rollback.
+    mode: Literal["off", "notify", "manual", "auto"] = "auto"
     channel: Literal["stable"] = "stable"
-    #: How big an update "auto" may install by itself.
-    auto_scope: Literal["patch", "minor"] = "patch"
+    #: How big an update "auto" may install by itself (never a major one).
+    auto_scope: Literal["patch", "minor"] = "minor"
     #: Site-local days and times the host may install in (auto only).
-    window_days: str = "sun"
+    window_days: str = "mon,tue,wed,thu,fri,sat,sun"
     window_start: str = "02:00"
     window_end: str = "04:00"
 
@@ -79,7 +80,7 @@ def _policy(db: Session) -> UpdatePolicy:
         return UpdatePolicy()
     try:
         return UpdatePolicy(**json.loads(row.json_value))
-    except Exception:  # an unreadable row falls back to the safe default (off)
+    except Exception:  # an unreadable row falls back to the default (auto)
         return UpdatePolicy()
 
 

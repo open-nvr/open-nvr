@@ -405,7 +405,8 @@ function Invoke-UpdateQueue {
         return
     }
     $mode = Get-UpdKV $policy MODE
-    if (-not $mode -or $mode -eq "off") { return }
+    if (-not $mode) { $mode = "auto" }  # nothing saved yet: the default, install releases by itself
+    if ($mode -eq "off") { return }
     $last = Get-UpdKV "$UpdDir\check.env" CHECKED_EPOCH
     $every = if ($env:OPENNVR_UPDATE_CHECK_EVERY) { [long]$env:OPENNVR_UPDATE_CHECK_EVERY } else { 21600 }
     if (-not $last -or ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$last) -ge $every) {
@@ -433,7 +434,7 @@ function Update-UpdateRunner {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($admin) {
         Write-UpdSay "Installing the update runner, so OpenNVR Updates in the app can work"
-        Write-UpdSay "(it does nothing until an update policy is chosen there; opt out: .\start.ps1 auto-update disable)."
+        Write-UpdSay "(it installs releases by itself at night, with a backup and rollback; change that in the app, or opt out: .\start.ps1 auto-update disable)."
         try { Set-AutoUpdate "enable" }
         catch { Write-UpdWarn "The update runner is not installed: $($_.Exception.Message)" }
     } else {

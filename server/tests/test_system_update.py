@@ -68,7 +68,9 @@ def test_status_reads_the_host(env, host):  # noqa: F811
                         "finished": "2026-10-29T01:05:00Z", "in_progress": False}
     assert [h["result"] for h in s["history"]] == ["rolled_back", "succeeded"]  # newest first
     assert s["runner"]["running"] is True and s["connected"] is True
-    assert s["policy"]["mode"] == "off" and s["pending_request"] is None
+    assert s["policy"] == {"mode": "auto", "channel": "stable", "auto_scope": "minor", "window_days": "mon,tue,wed,thu,fri,sat,sun",
+                           "window_start": "02:00", "window_end": "04:00"}  # the default: nightly, fixes and features
+    assert s["pending_request"] is None
 
 
 def test_a_found_version_that_is_not_newer_is_not_offered(env, host):  # noqa: F811
@@ -122,6 +124,7 @@ def test_requests_that_cannot_go_ahead(env, host, setup, body, words):  # noqa: 
 
 def test_no_request_while_updates_are_off_or_one_is_waiting(env, host):  # noqa: F811
     _found(host[0])
+    assert _policy(env, mode="off").status_code == 200  # the default (auto) would allow it
     r = env.client.post(f"{URL}/request", headers=env.jwt("admin"), json={"version": "9.9.9"})
     assert r.status_code == 409 and "turned off" in r.json()["detail"]
     _policy(env)
@@ -143,7 +146,7 @@ def test_without_the_folders_mounted_nothing_is_requested(env, host, monkeypatch
 
 
 def test_policy_is_validated_stored_and_mirrored(env, host):  # noqa: F811
-    r = _policy(env, mode="auto", window_days="Sat, sun,sat", window_start="01:30", window_end="03:00")
+    r = _policy(env, mode="auto", auto_scope="patch", window_days="Sat, sun,sat", window_start="01:30", window_end="03:00")
     assert r.status_code == 200, r.text
     assert r.json()["window_days"] == "sat,sun"
     mirrored = (host[1] / "policy.env").read_text().splitlines()
