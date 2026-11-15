@@ -36,8 +36,8 @@ FINISHED_STEPS = {"succeeded", "rolled_back", "failed"}
 RUNNER_STALE_S = 10 * 60
 
 MODES = ("off", "notify", "manual", "auto")
-DEFAULT_POLICY = {"mode": "off", "channel": "stable", "auto_scope": "patch",
-                  "window_days": "sun", "window_start": "02:00", "window_end": "04:00"}
+DEFAULT_POLICY = {"mode": "auto", "channel": "stable", "auto_scope": "minor",
+                  "window_days": "mon,tue,wed,thu,fri,sat,sun", "window_start": "02:00", "window_end": "04:00"}
 
 
 def _kv_last(path: Path) -> dict[str, str]:
