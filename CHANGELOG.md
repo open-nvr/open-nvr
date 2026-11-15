@@ -8,6 +8,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A search result opens paused.** Clicking a result (or any link to an
+  instant) opened the recording and played at once, so the moment was
+  gone before the operator found the subject. It now opens paused on the
+  instant; play starts when the operator presses it. Picking a day on the
+  playback page plays as before.
 - **The storage floor and the "Degraded" it caused.** The automatic
   rotation floor is now 5 % of the recordings disk, at least 5 GB and at
   most 20 GB (it was 2 GB or 2 %). On the boards we ship the recordings
