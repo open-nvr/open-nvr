@@ -74,7 +74,7 @@ case "$1" in
             rm) drop "$S/networks" "$3" ;;
         esac
         ;;
-    images) cat "$S/images" ;;
+    images) if [[ "$fmt" == *Size* ]]; then sed 's/$/|1.5GB/' "$S/images"; else cat "$S/images"; fi ;;
     image) drop "$S/images" "$3" ;;
     run) ;;
     *) echo "fake docker: unexpected: $*" >&2; exit 99 ;;
@@ -173,7 +173,8 @@ run_ps1() {
     FAKE_DOCKER_STATE="$(cygpath -w "$STATE")" FAKE_BASH="$BASH_WIN" PATH="$BIN:$PATH" \
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$SITE/scripts/uninstall.ps1")" "$@" <"${STDIN_FILE:-/dev/null}" 2>&1 | tr -d '\r'
 }
-typed() { STDIN_FILE="$WORK/answer"; printf '%s\n' "$1" > "$STDIN_FILE"; }
+# The lines the operator types, in order: the images answer, then the sentence.
+typed() { STDIN_FILE="$WORK/answer"; printf '%s\n' "$@" > "$STDIN_FILE"; }
 untyped() { STDIN_FILE=""; }
 
 has() { grep -qE "^$(printf '%s' "$2" | sed 's/[.[\*^$/]/\\&/g')(\||$)" "$STATE/$1"; }
@@ -222,12 +223,12 @@ suite() {
     start_test "$run: --dry-run removes nothing and names no stranger"
     fixture "${WD_LABEL:-}"
     untyped
-    out=$($run --dry-run --delete-images); rc=$?
+    out=$($run --dry-run); rc=$?
     missing=$(neighbours_missing)
     # What each script says it leaves alone must not include the .env it removes.
     if printf '%s' "$out" | grep -E 'your own copies' | grep -qE ' \.env( |$)'; then missing="$missing listed:.env"; fi
     if [ $rc -eq 0 ] && [ -z "$missing" ] && untouched \
-       && printf '%s' "$out" | grep -q 'opennvr_attendly' \
+       && printf '%s' "$out" | grep -q 'opennvr_attendly' && printf '%s' "$out" | grep -qE 'images \(4, 6\.0 GB\)' \
        && ! printf '%s' "$out" | grep -qE '^ +(my_postgres|pgadmin|webapp_db|mysite_pgadmin_data)$'; then pass
     else fail "rc=$rc missing=[$missing] $(grep -E 'rm ' "$STATE/calls.log" | head -3)"; fi
 
@@ -240,7 +241,7 @@ suite() {
 
     start_test "$run: the wrong sentence changes nothing"
     fixture "${WD_LABEL:-}"
-    typed "yes"
+    typed "" "yes"   # images: default; sentence: wrong
     out=$($run); rc=$?
     if [ $rc -ne 0 ] && untouched && printf '%s' "$out" | grep -q 'not the confirmation'; then pass
     else fail "rc=$rc: $out"; fi
@@ -251,40 +252,53 @@ suite() {
        && printf '%s' "$out" | grep -qF "type exactly:  $PHRASE"; then pass
     else fail "$out"; fi
 
-    start_test "$run: the typed sentence removes the install, apps, footage, backups and host agent files"
+    start_test "$run: Enter + the typed sentence removes the install, apps, footage, backups, host agent files and images"
     fixture "${WD_LABEL:-}"
-    typed "  Uninstall and  remove all data and recordings "   # case and spacing forgiven
+    typed "" "  Uninstall and  remove all data and recordings "   # images: Enter = yes; case and spacing forgiven
     out=$($run); rc=$?
     missing=$(neighbours_missing); left=$(install_left)
     if [ $rc -eq 0 ] && [ -z "$missing" ] && [ -z "$left" ] \
        && [ ! -e "$REC/cam-1" ] && [ ! -e "$REC/cam-12" ] && [ ! -e "$REC/orphaned" ] && [ ! -e "$REC/.evidence" ] \
        && [ -d "$REC" ] && [ ! -e "$SITE/backups" ] \
-       && has images ghcr.io/open-nvr/core:0.1.10 && has images ghcr.io/open-nvr/attendly:0.3.0; then pass
+       && ! has images ghcr.io/open-nvr/core:0.1.10 && ! has images ghcr.io/open-nvr/attendly:0.3.0 \
+       && ! has images opennvr/app-installer:local && ! has images mysite-whisper:latest \
+       && printf '%s' "$out" | grep -q "Also delete OpenNVR's"; then pass
     else fail "rc=$rc missing=[$missing] left=[$left]: $out"; fi
 
-    start_test "$run: --yes does the same without asking"
+    start_test "$run: answering n to the images keeps them, and only them"
+    fixture "${WD_LABEL:-}"
+    typed "n" "$PHRASE"
+    out=$($run); rc=$?
+    missing=$(neighbours_missing); left=$(install_left)
+    if [ $rc -eq 0 ] && [ -z "$missing" ] && [ -z "$left" ] && [ ! -e "$REC/cam-1" ] \
+       && has images ghcr.io/open-nvr/core:0.1.10 && has images ghcr.io/open-nvr/attendly:0.3.0 \
+       && printf '%s' "$out" | grep -q 'The images stay'; then pass
+    else fail "rc=$rc missing=[$missing] left=[$left]: $out"; fi
+
+    start_test "$run: --yes does the same without asking, images included"
     fixture "${WD_LABEL:-}"
     untyped
     out=$($run --yes); rc=$?
     missing=$(neighbours_missing); left=$(install_left)
     if [ $rc -eq 0 ] && [ -z "$missing" ] && [ -z "$left" ] && [ ! -e "$REC/cam-1" ] && [ ! -e "$SITE/backups" ] \
-       && printf '%s' "$out" | grep -q 'WARNING'; then pass
+       && ! has images ghcr.io/open-nvr/core:0.1.10 && has images postgres:15-alpine \
+       && printf '%s' "$out" | grep -q 'WARNING' && ! printf '%s' "$out" | grep -q "Also delete OpenNVR's"; then pass
     else fail "rc=$rc missing=[$missing] left=[$left]: $out"; fi
 
-    start_test "$run: --keep-recordings --keep-backups leave footage and backups; --delete-images removes OpenNVR's images only"
+    start_test "$run: --keep-recordings --keep-backups --keep-images leave footage, backups and images, and ask nothing about images"
     fixture "${WD_LABEL:-}"
-    typed "uninstall and remove all data"   # the shorter sentence: footage stays
-    out=$($run --keep-recordings --keep-backups --delete-images); rc=$?
+    typed "uninstall and remove all data"   # the shorter sentence: footage stays; no images question
+    out=$($run --keep-recordings --keep-backups --keep-images); rc=$?
     missing=$(neighbours_missing); left=$(install_left)
     if [ $rc -eq 0 ] && [ -z "$missing" ] && [ -z "$left" ] \
        && [ -f "$REC/cam-1/2026-11-01/a.mp4" ] && [ -d "$SITE/backups/20260101-0.1.0" ] \
-       && ! has images ghcr.io/open-nvr/core:0.1.10 && ! has images ghcr.io/open-nvr/attendly:0.3.0 \
-       && ! has images opennvr/app-installer:local && ! has images mysite-whisper:latest; then pass
+       && has images ghcr.io/open-nvr/core:0.1.10 && has images ghcr.io/open-nvr/attendly:0.3.0 \
+       && ! printf '%s' "$out" | grep -q "Also delete OpenNVR's"; then pass
     else fail "rc=$rc missing=[$missing] left=[$left]: $out"; fi
 
     start_test "$run: with footage kept, the long sentence is not accepted"
     fixture "${WD_LABEL:-}"
-    typed "$PHRASE"
+    typed "" "$PHRASE"
     out=$($run --keep-recordings); rc=$?
     if [ $rc -ne 0 ] && untouched; then pass; else fail "rc=$rc: $out"; fi
 

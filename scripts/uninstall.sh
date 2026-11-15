@@ -12,8 +12,10 @@
 #   ./start.sh uninstall --yes              do not ask (for scripts; the same removal)
 #   ./start.sh uninstall --keep-recordings  leave the footage for the next install
 #   ./start.sh uninstall --keep-backups     leave ./backups (the updater's database dumps)
-#   ./start.sh uninstall --delete-images    also OpenNVR's own images (the next
-#                                           install downloads them again)
+#   ./start.sh uninstall --keep-images      keep OpenNVR's own images for the next
+#                                           install (otherwise you are asked, and
+#                                           the default is to delete them)
+#   ./start.sh uninstall --delete-images    delete them without asking
 #   ./start.sh uninstall --project NAME     also a compose project of an install
 #                                           whose folder is gone
 #
@@ -57,7 +59,8 @@ FILES=".env mediamtx-certs nginx-certs agent-certs host-hardening
 data/updates data/update-requests data/net-hints data/host-agent data/host-agent-key
 bin/opennvr-host.exe bin/opennvr-host.old.exe bin/opennvr-host bin/opennvr-host.build bin/opennvr-host.old"
 
-DRY=0; YES=0; DEL_REC=1; DEL_BACKUPS=1; DEL_IMAGES=0; EXTRA_PROJECT=""
+# DEL_IMAGES empty = not decided yet: the operator is asked, default yes.
+DRY=0; YES=0; DEL_REC=1; DEL_BACKUPS=1; DEL_IMAGES=""; EXTRA_PROJECT=""
 FAILED=0
 
 say()  { printf '  %s\n' "$*"; }
@@ -67,7 +70,7 @@ die()  { printf '  ✗ %s\n' "$*" >&2; exit 1; }
 failed() { printf '  ✗ %s\n' "$*" >&2; FAILED=$((FAILED + 1)); }
 indent() { sed 's/^/      /'; }
 
-usage() { sed -n '5,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '5,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -75,6 +78,7 @@ while [ $# -gt 0 ]; do
         --yes|-y) YES=1 ;;
         --keep-recordings) DEL_REC=0 ;;
         --keep-backups) DEL_BACKUPS=0 ;;
+        --keep-images) DEL_IMAGES=0 ;;
         --delete-images) DEL_IMAGES=1 ;;
         --project) [ $# -ge 2 ] || die "--project needs a name"; EXTRA_PROJECT="$2"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -114,6 +118,13 @@ default_project() {
 add_line() { if [ -n "$1" ]; then printf '%s\n%s' "$1" "$2"; else printf '%s' "$2"; fi; }
 in_lines() { printf '%s\n' "$1" | grep -qxF -- "$2"; }
 count_lines() { if [ -n "$1" ]; then printf '%s\n' "$1" | wc -l | tr -d ' '; else printf 0; fi; }
+# "1.73GB" / "678MB" / "32.3kB", as docker images prints them, in whole MB.
+size_mb() {
+    printf '%s' "$1" | sed -E 's/^([0-9.]+) *([A-Za-z]*).*/\1 \2/' \
+        | awk '{ v = $1 + 0; u = $2; if (u ~ /^T/) v *= 1048576; else if (u ~ /^G/) v *= 1024;
+                 else if (u ~ /^k/) v /= 1024; else if (u ~ /^B/) v /= 1048576; printf "%d", v + 0.5 }'
+}
+images_gb() { awk -v mb="$IMAGES_MB" 'BEGIN { printf "%.1f GB", mb / 1024 }'; }
 
 collect() {
     local all name project workdir image p line
@@ -154,22 +165,29 @@ collect() {
         done <<< "$(docker network ls --filter "label=com.docker.compose.project=$p" --format '{{.Name}}')"
     done <<< "$PROJECTS"
 
-    IMAGES=""
-    while IFS= read -r line; do
+    IMAGES=""; IMAGES_MB=0
+    local ours size
+    while IFS='|' read -r line size; do
+        [ -n "$line" ] || continue
+        ours=0
         case "$line" in
-            ghcr.io/open-nvr/*|opennvr/*) IMAGES=$(add_line "$IMAGES" "$line") ;;
+            ghcr.io/open-nvr/*|opennvr/*) ours=1 ;;
             *)
                 # A locally built <project>-<service>: only one this install ran.
                 while IFS= read -r p; do
                     case "$line" in
                         "$p"-*) if in_lines "$USED_IMAGES" "${line%:latest}" || in_lines "$USED_IMAGES" "$line"; then
-                                    IMAGES=$(add_line "$IMAGES" "$line")
+                                    ours=1
                                 fi ;;
                     esac
                 done <<< "$PROJECTS"
                 ;;
         esac
-    done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}')"
+        if [ "$ours" = 1 ]; then
+            IMAGES=$(add_line "$IMAGES" "$line")
+            IMAGES_MB=$((IMAGES_MB + $(size_mb "${size:-0}")))
+        fi
+    done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}|{{.Size}}')"
 }
 
 recordings_root() {
@@ -273,8 +291,11 @@ show_plan() {
         else say "Update backups in ./backups — KEPT (--keep-backups)"; fi
     fi
     if [ -n "$IMAGES" ]; then
-        if [ "$DEL_IMAGES" = 1 ]; then say "OpenNVR images ($(count_lines "$IMAGES"))"
-        else say "OpenNVR images ($(count_lines "$IMAGES")) — KEPT, the next install reuses them (--delete-images removes them)"; fi
+        case "$DEL_IMAGES" in
+            1) say "OpenNVR images ($(count_lines "$IMAGES"), $(images_gb))" ;;
+            0) say "OpenNVR images ($(count_lines "$IMAGES"), $(images_gb)) — KEPT for the next install (--keep-images)" ;;
+            *) say "OpenNVR images ($(count_lines "$IMAGES"), $(images_gb)) — you are asked; the default is to delete them" ;;
+        esac
     fi
     if [ -z "$CONTAINERS$VOLUMES$NETWORKS$(existing_files)$RUNNER$HOST_AGENT" ]; then
         say "(nothing: no OpenNVR install found for this folder)"
@@ -318,6 +339,7 @@ show_warning() {
     say "  - the certificates and keys"
     [ "$DEL_REC" = 1 ] && [ "$rec_count" -gt 0 ] && say "  - all footage in $REC_ROOT ($rec_count folder(s))"
     [ "$DEL_BACKUPS" = 1 ] && [ -d backups ] && say "  - the update backups in ./backups"
+    [ "$DEL_IMAGES" = 1 ] && [ -n "$IMAGES" ] && say "  - OpenNVR's $(count_lines "$IMAGES") images ($(images_gb)); the next install downloads them again"
     printf '  There is no undo.\n'
     printf '  ============================================================\n'
 }
@@ -325,6 +347,25 @@ show_warning() {
 # One line, lower-cased, inner whitespace squeezed, so a double space or a
 # capital does not fail the operator who meant it.
 normalise() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//'; }
+
+# Images hold no site data, so this is a choice, not part of the warning.
+# Default yes: a clean machine is what most people mean by uninstall.
+ask_images() {
+    [ -z "$DEL_IMAGES" ] && [ -n "$IMAGES" ] || return 0
+    local answer=""
+    printf '\n'
+    say "Also delete OpenNVR's $(count_lines "$IMAGES") images ($(images_gb))? They hold no site data;"
+    say "the next install downloads them again."
+    if [ -t 0 ]; then
+        read -r -p "  Delete the images? [Y/n]: " answer || true
+    else
+        IFS= read -r answer || true
+    fi
+    case "$answer" in
+        [Nn]*) DEL_IMAGES=0; say "The images stay." ;;
+        *) DEL_IMAGES=1 ;;
+    esac
+}
 
 ask_confirmation() {
     local phrase answer=""
@@ -426,8 +467,10 @@ if [ "$DRY" = 1 ]; then
 fi
 
 if [ "$YES" = 1 ]; then
+    [ -n "$DEL_IMAGES" ] || DEL_IMAGES=1
     show_warning
 else
+    ask_images
     ask_confirmation
 fi
 printf '\n'

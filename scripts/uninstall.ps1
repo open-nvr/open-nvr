@@ -11,8 +11,10 @@
 #   .\start.ps1 uninstall --yes              do not ask (for scripts; the same removal)
 #   .\start.ps1 uninstall --keep-recordings  leave the footage for the next install
 #   .\start.ps1 uninstall --keep-backups     leave .\backups (the updater's database dumps)
-#   .\start.ps1 uninstall --delete-images    also OpenNVR's own images (the next
-#                                            install downloads them again)
+#   .\start.ps1 uninstall --keep-images      keep OpenNVR's own images for the next
+#                                            install (otherwise you are asked, and
+#                                            the default is to delete them)
+#   .\start.ps1 uninstall --delete-images    delete them without asking
 #   .\start.ps1 uninstall --project NAME     also a compose project of an install
 #                                            whose folder is gone
 #
@@ -52,7 +54,8 @@ $Files = @(".env", "mediamtx-certs", "nginx-certs", "agent-certs", "host-hardeni
            "bin\opennvr-host.exe", "bin\opennvr-host.old.exe", "bin\opennvr-host", "bin\opennvr-host.build")
 $FootagePattern = '^(cam-\d.*|orphaned|\.evidence|\.hevc_cache)$'
 
-$Dry = $false; $Yes = $false; $DelRec = $true; $DelBackups = $true; $DelImages = $false
+# $DelImages $null = not decided yet: the operator is asked, default yes.
+$Dry = $false; $Yes = $false; $DelRec = $true; $DelBackups = $true; $DelImages = $null
 $ExtraProject = ""
 $script:Failed = 0
 
@@ -69,6 +72,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         "-y"                  { $Yes = $true }
         "--keep-recordings"   { $DelRec = $false }
         "--keep-backups"      { $DelBackups = $false }
+        "--keep-images"       { $DelImages = $false }
         "--delete-images"     { $DelImages = $true }
         "--project" {
             $i++
@@ -76,7 +80,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
             $ExtraProject = $args[$i]
         }
         { $_ -in "-h", "--help" } {
-            Get-Content $PSCommandPath -TotalCount 17 | Select-Object -Skip 3 | ForEach-Object { $_ -replace '^# ?', '' }
+            Get-Content $PSCommandPath -TotalCount 19 | Select-Object -Skip 3 | ForEach-Object { $_ -replace '^# ?', '' }
             exit 0
         }
         default { Stop-With "unknown option: $($args[$i]) (see --help)" }
@@ -115,6 +119,14 @@ function Get-DefaultProject {
 }
 
 function Get-NormalPath([string]$Path) { return ($Path -replace '/', '\').TrimEnd('\') }
+
+# "1.73GB" / "678MB" / "32.3kB", as docker images prints them, in MB.
+function Get-SizeMB([string]$Text) {
+    if ($Text -notmatch '^([\d.]+)\s*([kKMGT]?B)') { return 0 }
+    $v = [double]$Matches[1]
+    switch ($Matches[2].ToUpper()) { 'TB' { return $v * 1048576 } 'GB' { return $v * 1024 } 'MB' { return $v } 'KB' { return $v / 1024 } default { return $v / 1048576 } }
+}
+function Get-ImagesGB { return ('{0:N1} GB' -f ($Found.ImagesMB / 1024)) }
 
 function Find-Install {
     $all = @(docker ps -a --format '{{.Names}}|{{.Image}}|{{.Labels}}') | Where-Object { $_ } | ForEach-Object {
@@ -155,19 +167,22 @@ function Find-Install {
             Where-Object { $_ -cmatch "^${q}_(opennvr_.*|default)$" }
     }
 
-    $images = @()
-    foreach ($line in @(docker images --format '{{.Repository}}:{{.Tag}}')) {
-        if (-not $line) { continue }
-        if ($line -like "ghcr.io/open-nvr/*" -or $line -like "opennvr/*") { $images += $line; continue }
-        # A locally built <project>-<service>: only one this install ran.
-        foreach ($p in $projects) {
-            if ($line -like "$p-*" -and (($used -contains $line) -or ($used -contains ($line -replace ':latest$', '')))) {
-                $images += $line
+    $images = @(); $imagesMB = 0.0
+    foreach ($row in @(docker images --format '{{.Repository}}:{{.Tag}}|{{.Size}}')) {
+        if (-not $row) { continue }
+        $parts = $row -split '\|', 2
+        $line = $parts[0]; $size = if ($parts.Count -ge 2) { $parts[1] } else { '' }
+        $ours = ($line -like "ghcr.io/open-nvr/*" -or $line -like "opennvr/*")
+        if (-not $ours) {
+            # A locally built <project>-<service>: only one this install ran.
+            foreach ($p in $projects) {
+                if ($line -like "$p-*" -and (($used -contains $line) -or ($used -contains ($line -replace ':latest$', '')))) { $ours = $true }
             }
         }
+        if ($ours) { $images += $line; $imagesMB += Get-SizeMB $size }
     }
 
-    return @{ Containers = @($containers); Elsewhere = @($elsewhere); Volumes = @($volumes); Networks = @($networks); Images = @($images) }
+    return @{ Containers = @($containers); Elsewhere = @($elsewhere); Volumes = @($volumes); Networks = @($networks); Images = @($images); ImagesMB = $imagesMB }
 }
 
 function Get-RecordingsRoot {
@@ -235,8 +250,10 @@ function Show-Plan {
         else { Write-Say "Update backups in .\backups - KEPT (--keep-backups)" }
     }
     if ($Found.Images.Count -gt 0) {
-        if ($DelImages) { Write-Say "OpenNVR images ($($Found.Images.Count))" }
-        else { Write-Say "OpenNVR images ($($Found.Images.Count)) - KEPT, the next install reuses them (--delete-images removes them)" }
+        $n = "$($Found.Images.Count), $(Get-ImagesGB)"
+        if ($DelImages -eq $true) { Write-Say "OpenNVR images ($n)" }
+        elseif ($DelImages -eq $false) { Write-Say "OpenNVR images ($n) - KEPT for the next install (--keep-images)" }
+        else { Write-Say "OpenNVR images ($n) - you are asked; the default is to delete them" }
     }
     if (($Found.Containers.Count + $Found.Volumes.Count + $Found.Networks.Count + $files.Count -eq 0) -and -not $Runner -and -not $HostAgent) {
         Write-Say "(nothing: no OpenNVR install found for this folder)"
@@ -281,6 +298,7 @@ function Show-Warning {
     Write-Say "  - the certificates and keys"
     if ($DelRec -and $footage.Count -gt 0) { Write-Say "  - all footage in $RecRoot ($($footage.Count) folder(s))" }
     if ($DelBackups -and (Test-Path "backups")) { Write-Say "  - the update backups in .\backups" }
+    if ($DelImages -eq $true -and $Found.Images.Count -gt 0) { Write-Say "  - OpenNVR's $($Found.Images.Count) images ($(Get-ImagesGB)); the next install downloads them again" }
     Write-Host "  There is no undo." -ForegroundColor Yellow
     Write-Host "  ============================================================" -ForegroundColor Yellow
 }
@@ -288,6 +306,18 @@ function Show-Warning {
 # Lower-cased, inner whitespace squeezed, so a double space or a capital
 # does not fail the operator who meant it.
 function Get-Normalised([string]$Text) { return (($Text -replace '\s+', ' ').Trim().ToLowerInvariant()) }
+
+# Images hold no site data, so this is a choice, not part of the warning.
+# Default yes: a clean machine is what most people mean by uninstall.
+function Confirm-Images {
+    if ($null -ne $DelImages -or $Found.Images.Count -eq 0) { return }
+    Write-Host ""
+    Write-Say "Also delete OpenNVR's $($Found.Images.Count) images ($(Get-ImagesGB))? They hold no site data;"
+    Write-Say "the next install downloads them again."
+    $answer = Read-Host "  Delete the images? [Y/n]"
+    if ("$answer" -match '^\s*[Nn]') { $script:DelImages = $false; Write-Say "The images stay." }
+    else { $script:DelImages = $true }
+}
 
 function Confirm-Uninstall {
     $phrase = Get-ConfirmPhrase
@@ -334,7 +364,13 @@ if ($Dry) {
     exit 0
 }
 
-if ($Yes) { Show-Warning } else { Confirm-Uninstall }
+if ($Yes) {
+    if ($null -eq $DelImages) { $DelImages = $true }
+    Show-Warning
+} else {
+    Confirm-Images
+    Confirm-Uninstall
+}
 Write-Host ""
 
 # Host services first, so no tick brings anything back while the rest goes.

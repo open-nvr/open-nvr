@@ -35,9 +35,10 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the plan first and goes ahead only when the operator types
   `uninstall and remove all data and recordings` (`--yes` for
   scripts, `--dry-run` to look). `--keep-recordings` and
-  `--keep-backups` leave those for the next install; `--delete-images`
-  also removes OpenNVR's own images, which otherwise stay for the next
-  install to reuse. Nothing of any other stack on the machine is
+  `--keep-backups` leave those for the next install. It asks whether
+  OpenNVR's own images go too, with their total size; the default is
+  yes, and `--keep-images` / `--delete-images` decide it for scripts.
+  Nothing of any other stack on the machine is
   touched: every item is matched to this install's compose project and
   names, shared base images stay, and there is no prune and no forced
   removal anywhere. After it, `./start.sh` is a fresh install.
