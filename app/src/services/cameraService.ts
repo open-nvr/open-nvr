@@ -249,6 +249,14 @@ export const cameraService = {
     ip: string,
     params: { username: string; password: string; port?: number }
   ) => api.post(`/api/v1/connect`, '', { params: { ip, ...params } }),
+  // Several cameras at once (an NVR's channels after /connect). Runs as an
+  // import job: poll getCameraImportJob with the returned id.
+  bulkCreateCameras: (payload: {
+    source: string
+    onvif_port?: number
+    control_scheme?: string
+    cameras: Array<Record<string, unknown>>
+  }) => api.post('/api/v1/cameras/bulk', payload),
 
   // Camera Settings (device driver — Phase 0: read-only)
   getCameraCapabilities: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/capabilities`),

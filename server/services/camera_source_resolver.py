@@ -329,10 +329,22 @@ def _pick_substream_uri(profiles: list[dict], main_uri: str) -> str | None:
     definition), else simply the next profile (ONVIF convention: profile 2
     is the sub-encoding). No guessing: everything here came from the device
     itself, which is what makes storing it by default safe.
+
+    On an NVR every channel is its own video source, and the smallest
+    profile overall is some other channel's substream. Only profiles that
+    share the main profile's ``video_source_token`` are candidates, so the
+    camera's detection stream is always the same picture as its recording.
     """
     main_plain = html.unescape(main_uri)
+    main_profile = next(
+        (p for p in profiles if html.unescape(p.get("stream_uri") or "") == main_plain),
+        None,
+    )
+    source = (main_profile or {}).get("video_source_token")
     candidates = []
     for p in profiles[1:]:
+        if source and p.get("video_source_token") not in (None, source):
+            continue
         uri = html.unescape(p.get("stream_uri") or "")
         if not uri or uri == main_plain:
             continue

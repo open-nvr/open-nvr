@@ -1626,13 +1626,13 @@ main() {
         fi
     fi
     # The runner behind OpenNVR Updates in the app: `up` installs it (one
-    # sudo on Linux). It only checks in until an update policy is chosen in
-    # the app, and the policy starts off, so nothing is fetched unasked.
+    # sudo on Linux). The policy starts as automatic: releases install by
+    # themselves at night, with a backup and rollback; the app can change that.
     if [[ "$(env_get UPDATE_RUNNER)" == "off" ]]; then
         info "Update runner: off (later: ./start.sh auto-update enable)"
     else
         env_set UPDATE_RUNNER on
-        ok "Update runner: installed when OpenNVR starts; choose an update policy in Configuration → OpenNVR Updates"
+        ok "Update runner: installed when OpenNVR starts; releases install by themselves at night (change this in Configuration → OpenNVR Updates)"
     fi
     printf '\n  Configuration and images are ready. Starting OpenNVR...\n\n'
     # Last word before exec — after this, compose owns the terminal and a

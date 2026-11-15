@@ -579,6 +579,18 @@ async def create_camera_checked(
                 camera_create = camera_create.model_copy(
                     update={"rtsp_url": url_with_creds}
                 )
+            # The same for a supplied substream: MediaMTX pulls the stored URL
+            # as-is for the sub path, so a bare one failed auth while the main
+            # stream played (an import's NVR rows, the ONVIF bulk add).
+            sub_with_creds = inject_credentials(
+                camera_create.substream_url,
+                camera_create.username,
+                camera_create.password,
+            )
+            if sub_with_creds and sub_with_creds != camera_create.substream_url:
+                camera_create = camera_create.model_copy(
+                    update={"substream_url": sub_with_creds}
+                )
             # Still enrich identity + locate the ONVIF port (for time-sync).
             identity = await fetch_identity(
                 camera_create.ip_address,
@@ -1137,6 +1149,75 @@ async def run_camera_import(
     planned = _plan_upload(db, current_user, await _read_upload(file), file.filename or "")
     job = camera_import.start_import(
         current_user.id, file.filename or "", planned, mode=mode, probe=probe
+    )
+    return job.as_dict()
+
+
+class BulkCameraRow(BaseModel):
+    """One camera of a bulk add: an NVR channel the Add Camera dialog
+    connected to over ONVIF. URLs come WITHOUT a login; the create path
+    embeds the username and password (a no-op when a URL already has one)."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    ip_address: str = Field(..., max_length=45)
+    port: int = Field(554, ge=1, le=65535)
+    username: str | None = Field(None, max_length=50)
+    password: str | None = Field(None, max_length=255)
+    rtsp_url: str = Field(..., max_length=500)
+    substream_url: str | None = Field(None, max_length=500)
+    manufacturer: str | None = Field(None, max_length=100)
+    model: str | None = Field(None, max_length=100)
+    firmware_version: str | None = Field(None, max_length=100)
+    serial_number: str | None = Field(None, max_length=100)
+    hardware_id: str | None = Field(None, max_length=100)
+
+
+class BulkCameraCreate(BaseModel):
+    #: Where the rows came from, for the job and its audit entry
+    #: (e.g. "onvif:192.168.1.50").
+    source: str = Field(..., min_length=1, max_length=100)
+    #: The ONVIF control endpoint the rows were read from, stored on each
+    #: camera so the settings drivers never re-guess it.
+    onvif_port: int | None = Field(None, ge=1, le=65535)
+    control_scheme: Literal["http", "https"] | None = None
+    cameras: list[BulkCameraRow] = Field(..., min_length=1)
+
+
+@router.post("/bulk")
+async def bulk_create_cameras(
+    body: BulkCameraCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_cameras_manage),
+):
+    """Add several cameras at once: the channels of an NVR the Add Camera
+    dialog connected to over ONVIF. Runs as an import job (poll GET
+    /cameras/import/jobs/{id}), so each camera goes through the same
+    checks and provisioning as one added by hand, a few at a time, and a
+    channel already on the system (same stream, anyone's) is skipped, never
+    added twice. No device probe: the identity came from the connect that
+    produced these rows."""
+    from services import camera_import, camera_io
+    from services.camera_scope import manageable_camera_ids
+
+    if len(body.cameras) > camera_io.MAX_CHANNELS:
+        raise HTTPException(
+            status_code=422, detail=f"At most {camera_io.MAX_CHANNELS} cameras at once."
+        )
+    if camera_import.running_job(current_user.id):
+        raise HTTPException(status_code=409, detail="An import of yours is still running.")
+
+    planned = []
+    for i, row in enumerate(body.cameras, start=1):
+        fields = row.model_dump(exclude_none=True)
+        if body.onvif_port:
+            fields["onvif_port"] = body.onvif_port
+        if body.control_scheme:
+            fields["control_scheme"] = body.control_scheme
+        planned.append(camera_io.PlannedCamera(row=i, channel=i, fields=fields))
+    existing = db.query(Camera).filter(Camera.deleted_at.is_(None)).all()
+    camera_io.match_existing(planned, existing, manageable_camera_ids(db, current_user))
+    job = camera_import.start_import(
+        current_user.id, body.source, planned, mode="add", probe=False
     )
     return job.as_dict()
 

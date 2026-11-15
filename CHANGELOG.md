@@ -19,6 +19,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   password and finishes on the usual enrolment screen. Scripted installs
   call `POST /auth/first-time-setup/verify` with the `setup_session` that
   step 1 now returns.
+- **Updates install by themselves by default.** A new site's update
+  policy was *off*, so it never learned that a release existed. The
+  default is now *automatic*: the host runner checks every few hours
+  and installs a signed stable release by itself, fixes and new
+  features alike (never a new major version), any night between 02:00
+  and 04:00 site time, after the site's own delay of up to three days
+  that security fixes skip. Each install is backed up first and rolled
+  back if the new version is not healthy; a release that needs steps on
+  the host, or that cannot be rolled back, waits for a person. Settings
+  → OpenNVR Updates turns this down to notify-only or off. A site that
+  saved a policy keeps it; the host treats a missing policy file as the
+  default.
 - **A search result opens paused.** Clicking a result (or any link to an
   instant) opened the recording and played at once, so the moment was
   gone before the operator found the subject. It now opens paused on the
@@ -41,6 +53,37 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A recorder's channels, added in one go.** Discovering an NVR or DVR
+  over ONVIF found it, but Connect then Add made one camera from its
+  first stream, and every further channel meant a new discovery and an
+  "already added" warning. The connect step now lists the recorder's
+  channels (size, whether it has a sub stream, and which are already
+  cameras here) with a name prefix, and adds the ticked ones as
+  "<prefix> Ch <n>" in one go, with progress and a result per channel.
+  Each camera gets its own channel's main and sub stream. A single
+  camera connects and adds exactly as before.
+- **`./start.sh uninstall` (`.\start.ps1 uninstall`): a clean slate.** It
+  removes this install from the machine, every installed app and its
+  data included: the containers, the volumes (database, keys, app
+  settings and data), the networks, the generated files (`.env`,
+  certificates, update state, the host agent's binary and key), the
+  footage, the update backups, and the update runner, host agent and
+  camera-VLAN firewall table when they belong to this folder. It shows
+  the plan first and goes ahead only when the operator types
+  `uninstall and remove all data and recordings`, which is drawn on
+  the screen in block letters rather than printed, so it cannot be
+  copied from there (`--yes` for scripts, `--dry-run` to look).
+  `--keep-recordings` and
+  `--keep-backups` leave those for the next install. It asks whether
+  OpenNVR's images go too, with their total size; the default is yes,
+  and `--keep-images` / `--delete-images` decide it for scripts. Those
+  are its own images, the ones compose built for it, and the base
+  images its compose files and Dockerfiles pin (postgres, nginx, nats,
+  alpine, ...) when no other container on the machine runs them.
+  Nothing of any other stack on the machine is
+  touched: every item is matched to this install's compose project and
+  names, shared base images stay, and there is no prune and no forced
+  removal anywhere. After it, `./start.sh` is a fresh install.
 - **Voice search without the Camera Agent.** The speech-to-text adapter
   lived in the agent's compose file under its voice profile, so speaking
   a search into the search page needed the agent installed in voice
@@ -67,6 +110,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A recorder added by address took another channel's sub stream.**
+  Adding an NVR with its IP and credentials picked the smallest stream
+  across every channel as the camera's sub stream, so detection could
+  watch channel 9 while channel 1 was recorded. The sub stream now comes
+  from the same channel as the main stream. A sub stream URL given on
+  create (an import's recorder rows included) also gets the camera's
+  login embedded, as the main URL always did; without it the sub path
+  failed to authenticate while the main stream played.
 - **The one-click app installer runs, and runs on Windows.** Its image
   asked Debian for a package that only Docker's own repository has, its
   entrypoint looked for `main.py` in the mounted checkout, and SQLAlchemy

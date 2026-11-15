@@ -41,8 +41,8 @@ type PreviewRow = {
 }
 type Preview = { filename: string; summary: Record<RowStatus | 'total', number>; rows: PreviewRow[] }
 type Outcome = 'created' | 'updated' | 'unchanged' | 'skipped' | 'failed'
-type JobResult = { row: number; channel: number | null; name: string | null; outcome: Outcome; message: string; camera_id: number | null }
-type Job = { id: string; state: 'running' | 'done'; total: number; done: number; counts: Partial<Record<Outcome, number>>; results: JobResult[] }
+export type JobResult = { row: number; channel: number | null; name: string | null; outcome: Outcome; message: string; camera_id: number | null }
+export type Job = { id: string; state: 'running' | 'done'; total: number; done: number; counts: Partial<Record<Outcome, number>>; results: JobResult[] }
 
 const STATUS_VARIANT: Record<RowStatus, BadgeVariant> = {
   new: 'success', update: 'info', unchanged: 'neutral', duplicate: 'warning', error: 'destructive',
@@ -283,7 +283,9 @@ function FilterChip({ active, onClick, label, count, variant }: { active: boolea
   )
 }
 
-function JobView({ job }: { job: Job }) {
+// Also shown by the Add Camera dialog when it adds an NVR's channels through
+// the same job.
+export function JobView({ job }: { job: Job }) {
   const { t } = useTranslation()
   const pct = job.total ? Math.round((job.done / job.total) * 100) : 100
   const problems = job.results.filter((r) => r.outcome === 'failed' || r.outcome === 'skipped')

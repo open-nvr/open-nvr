@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 CONCURRENCY = 3
 #: How long a finished job's results stay readable.
 KEEP_S = 2 * 3600
+#: Device identity a planned camera may carry (set by the ONVIF bulk add).
+IDENTITY_FIELDS = ("manufacturer", "model", "firmware_version", "serial_number", "hardware_id")
 
 
 @dataclass
@@ -146,11 +148,25 @@ async def _apply(p: PlannedCamera, owner_id: int, mode: str, probe: bool) -> dic
                 port=f.get("port", 554), username=f.get("username"), password=f.get("password"),
                 rtsp_url=f.get("rtsp_url"), substream_url=f.get("substream_url"),
                 location=f.get("location"), vlan=f.get("vlan"),
+                # Identity the caller already read from the device (the ONVIF
+                # bulk add); a spreadsheet row never carries these.
+                **{k: f[k] for k in IDENTITY_FIELDS if f.get(k)},
             )
             made = await create_camera_checked(
                 create, force=True, db=db, current_user=user, request=None,
                 probe=probe, duplicate_check=False,
             )
+            # The ONVIF control endpoint the caller connected on. Without a
+            # probe, create_camera_checked never resolves it itself, and the
+            # settings drivers would re-guess the port on every open.
+            if f.get("onvif_port") or f.get("control_scheme"):
+                cam = db.get(Camera, made.id)
+                if cam is not None:
+                    if f.get("onvif_port"):
+                        cam.onvif_port = f["onvif_port"]
+                    if f.get("control_scheme"):
+                        cam.control_scheme = f["control_scheme"]
+                    db.commit()
             if f.get("is_active") is False:
                 cam = db.get(Camera, made.id)
                 await update_camera(camera_id=made.id, camera_update=CameraUpdate(is_active=False),

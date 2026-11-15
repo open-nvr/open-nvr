@@ -31,6 +31,7 @@ time. See ``_onvif_request``.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import html
@@ -586,7 +587,35 @@ async def fetch_profiles_digest(
             "name": _xml_text(name_m.group(1)) if name_m else token,
         }
 
-        bounds_match = re.search(r'width="(\d+)"\s+height="(\d+)"', block)
+        # The video source this profile encodes. On an NVR every channel is
+        # its own source, so this is what tells channel 3's main and sub
+        # streams apart from channel 4's. Captured from the video block only:
+        # a profile also carries <AudioSourceConfiguration><SourceToken>.
+        vsc = re.search(
+            r"<(?:\w+:)?VideoSourceConfiguration\b[^>]*>(.*?)</(?:\w+:)?VideoSourceConfiguration>",
+            block,
+            re.DOTALL,
+        )
+        if vsc:
+            st = re.search(r"<(?:\w+:)?SourceToken>([^<]+)</(?:\w+:)?SourceToken>", vsc.group(1))
+            if st:
+                profile_info["video_source_token"] = _xml_text(st.group(1).strip())
+
+        # The stream's size is the ENCODER resolution. The source Bounds (the
+        # width="…" height="…" attributes) are the sensor, identical for a
+        # channel's main and sub stream, so they are only the fallback.
+        enc = re.search(
+            r"<(?:\w+:)?VideoEncoderConfiguration\b[^>]*>(.*?)</(?:\w+:)?VideoEncoderConfiguration>",
+            block,
+            re.DOTALL,
+        )
+        res = enc and re.search(
+            r"<(?:\w+:)?Resolution>\s*<(?:\w+:)?Width>(\d+)</(?:\w+:)?Width>\s*"
+            r"<(?:\w+:)?Height>(\d+)</(?:\w+:)?Height>",
+            enc.group(1),
+            re.DOTALL,
+        )
+        bounds_match = res or re.search(r'width="(\d+)"\s+height="(\d+)"', block)
         if bounds_match:
             profile_info["width"] = int(bounds_match.group(1))
             profile_info["height"] = int(bounds_match.group(2))
@@ -594,6 +623,61 @@ async def fetch_profiles_digest(
         profiles.append(profile_info)
 
     return profiles
+
+
+def _profile_area(p: dict[str, Any]) -> int:
+    return (p.get("width") or 0) * (p.get("height") or 0)
+
+
+def group_channels(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The device's video channels, one per video source, from its profiles.
+
+    An IP camera has one source and comes out as one channel; a 16-channel
+    NVR as 16. Channels are numbered by order of first appearance (vendor
+    token patterns are not guessed at: a wrong guess mislabels a channel
+    silently). Per channel, ``main`` is the largest encoder resolution among
+    the profiles with a stream URI (unknown sizes sort last, ties keep device
+    order) and ``sub`` the smallest whose URI differs from main's, or None.
+    That is the same rule camera_source_resolver uses for a camera's
+    substream, kept inside the channel so a 16-channel recorder never pairs
+    channel 1's recording with channel 9's detection stream.
+
+    Profiles without a source token form one channel of their own, so a
+    device that omits the token still degrades to today's single camera.
+    """
+    groups: dict[str | None, list[dict[str, Any]]] = {}
+    for p in profiles:
+        groups.setdefault(p.get("video_source_token"), []).append(p)
+
+    channels = []
+    for index, (token, members) in enumerate(groups.items(), start=1):
+        with_uri = [p for p in members if p.get("stream_uri")]
+        # Largest first; sort is stable so ties keep device order. Unknown
+        # sizes (area 0) must not win main, so they sort last.
+        ranked = sorted(with_uri, key=lambda p: -(_profile_area(p) or -1))
+        main = ranked[0] if ranked else None
+        sub = None
+        if main:
+            main_uri = html.unescape(main["stream_uri"])
+            rest = [
+                p for p in with_uri
+                if p is not main and html.unescape(p["stream_uri"]) != main_uri
+            ]
+            if rest:
+                # Smallest known size first; unknown sizes last.
+                rest.sort(key=lambda p: _profile_area(p) or float("inf"))
+                sub = rest[0]
+        channels.append(
+            {
+                "index": index,
+                "name": f"Ch {index}",
+                "source_token": token,
+                "main": main,
+                "sub": sub,
+                "profiles": members,
+            }
+        )
+    return channels
 
 
 async def get_stream_uri_digest(
@@ -745,20 +829,26 @@ async def connect_and_get_profiles(
     # Get profiles
     profiles = await fetch_profiles_digest(ip, username, password, port, scheme)
 
-    # Get stream URI for each profile
-    profiles_with_uri = []
-    for profile in profiles:
-        try:
-            uri = await get_stream_uri_digest(
-                ip, username, password, profile["token"], port, scheme
-            )
-            profile["stream_uri"] = uri
-        except Exception as e:
-            main_logger.warning(
-                f"Failed to get stream URI for profile {profile['token']}: {e}"
-            )
-            profile["stream_uri"] = None
-        profiles_with_uri.append(profile)
+    # Get stream URI for each profile. A few at a time: a 16-channel NVR has
+    # 32 profiles, and one request after another took the better part of a
+    # minute to connect. Bounded, because embedded stacks drop requests when
+    # hammered (see the discovery probe's history). Order is kept.
+    sem = asyncio.Semaphore(4)
+
+    async def _uri(profile: dict[str, Any]) -> None:
+        async with sem:
+            try:
+                profile["stream_uri"] = await get_stream_uri_digest(
+                    ip, username, password, profile["token"], port, scheme
+                )
+            except Exception as e:
+                main_logger.warning(
+                    f"Failed to get stream URI for profile {profile['token']}: {e}"
+                )
+                profile["stream_uri"] = None
+
+    await asyncio.gather(*(_uri(p) for p in profiles))
+    profiles_with_uri = profiles
 
     return {
         "ip": ip,
@@ -766,6 +856,10 @@ async def connect_and_get_profiles(
         "scheme": scheme,
         "device_info": device_info,
         "profiles": profiles_with_uri,
+        # The same profiles grouped per video source: one entry for a camera,
+        # one per channel for an NVR. What the Add Camera dialog's channel
+        # list and the bulk add are built from.
+        "channels": group_channels(profiles_with_uri),
     }
 
 

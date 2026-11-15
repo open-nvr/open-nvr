@@ -44,6 +44,17 @@ from.
 5. Click **Save**. The camera should turn green in the dashboard within
    ~30 seconds.
 
+**Adding a recorder (NVR / DVR) and its channels:** a recorder shows up
+in the discovered list once, like a camera. After you connect to it, the
+dialog lists its channels instead of a single stream: each line shows the
+channel, its resolution, whether it has a sub stream, and an "Already
+added" badge when that channel is a camera here already. Tick the
+channels you want (empty slots cannot be ticked), give a name prefix, and
+click **Add N cameras**. Each channel becomes a camera named
+"<prefix> Ch <n>" with its own main and sub stream, and the dialog shows
+a result per channel as they are added. Channels already on the system
+are skipped, never added twice.
+
 **Adding a camera by RTSP URL (fallback):**
 
 1. Click **Cameras → Add camera**.

@@ -4,7 +4,9 @@
 
 Pure, so every rule is tested on its own (tests/test_updater_policy.py).
 The host runner asks once a minute (``python -m updater due``); the policy
-is what the app saved (data/update-requests/policy.env).
+is what the app saved (data/update-requests/policy.env). Until something is
+saved the policy is the default: ``auto``, fixes and new features (never a
+major version), every night between 02:00 and 04:00 site time.
 
 An automatic update needs all of: mode ``auto``; a stable release; nothing
 the operator must do first (manual steps) and nothing that cannot be rolled
@@ -28,16 +30,16 @@ MAX_DELAY_H = 72
 
 @dataclass(frozen=True)
 class Policy:
-    mode: str = "off"
-    auto_scope: str = "patch"
-    window_days: tuple[str, ...] = ("sun",)
+    mode: str = "auto"
+    auto_scope: str = "minor"
+    window_days: tuple[str, ...] = DAYS
     window_start: str = "02:00"
     window_end: str = "04:00"
 
     @classmethod
     def from_env(cls, values: dict[str, str]) -> Policy:
-        days = tuple(d for d in values.get("WINDOW_DAYS", "sun").split(",") if d in DAYS) or ("sun",)
-        return cls(mode=values.get("MODE", "off"), auto_scope=values.get("AUTO_SCOPE", "patch"),
+        days = tuple(d for d in values.get("WINDOW_DAYS", "").split(",") if d in DAYS) or DAYS
+        return cls(mode=values.get("MODE", "auto"), auto_scope=values.get("AUTO_SCOPE", "minor"),
                    window_days=days, window_start=values.get("WINDOW_START", "02:00"),
                    window_end=values.get("WINDOW_END", "04:00"))
 
