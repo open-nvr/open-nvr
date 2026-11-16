@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A face adapter that could never load still looked healthy.** The
+  InsightFace adapters' healthcheck only asked for HTTP 200, and their
+  /health answers 200 in every state, so Docker called an adapter whose
+  model had failed to load "healthy" and its registrar registered it.
+  On a client site the model download was reset at boot and face checks
+  failed for three hours behind a green container. The healthcheck now
+  also reads the status: "loading" (including a download being retried)
+  stays healthy, "error" is unhealthy. The registrars, Attendly and the
+  smart doorbell now treat the adapter as an optional dependency, so an
+  adapter in "error" cannot fail `start.sh up` or an update and its
+  rollback: Compose warns and starts them anyway, and face checks answer
+  with the adapter's own reason. Adapter images before ai-adapter#95
+  never report "error", so this changes nothing for them.
+
 - **Search read "chair" as "hair".** The typo reader corrects a word the
   box does not know to the closest word it does, and the captions' own
   words are part of what it knows. On a box whose captions say "hair"
