@@ -60,6 +60,7 @@ case "$1" in
             esac
         done < "$S/containers"
         ;;
+    stop) ;;
     rm) for a in "${args[@]:1}"; do case "$a" in -*) ;; *) drop "$S/containers" "$a" ;; esac; done ;;
     volume)
         case "$2" in
@@ -396,6 +397,16 @@ out=$(run_sh --yes)
 if [ "$first_ok" = 1 ] && [ ! -f "$SYSTEMD_DIR_TEST/opennvr-update.service" ] && [ ! -f "$SYSTEMD_DIR_TEST/opennvr-update.timer" ] \
    && [ ! -f "$SYSTEMD_DIR_TEST/opennvr-host.service" ] && grep -q 'systemctl disable --now opennvr-host.service' "$STATE/calls.log"; then pass
 else fail "first_ok=$first_ok: $out"; fi
+
+start_test "run_sh: containers are stopped before they are removed (a kill leaves NPU buffers behind)"
+fixture
+untyped
+out=$(run_sh --yes)
+stop_line=$(grep -n '^stop -t 20 ' "$STATE/calls.log" | head -1 | cut -d: -f1)
+rm_line=$(grep -n '^rm -f -v ' "$STATE/calls.log" | head -1 | cut -d: -f1)
+if [ -n "$stop_line" ] && [ -n "$rm_line" ] && [ "$stop_line" -lt "$rm_line" ] \
+   && grep '^stop -t 20 ' "$STATE/calls.log" | grep -q 'opennvr_core' && ! has containers opennvr_core; then pass
+else fail "stop at line '$stop_line', first rm at '$rm_line': $(grep -E '^(stop|rm) ' "$STATE/calls.log" | head -4)"; fi
 
 # The update lock: the runner's once-a-minute check holds it too.
 start_test "run_sh: a busy update runner is waited for, then the uninstall goes on"
