@@ -278,8 +278,13 @@ component.
   that deploy come from it, never from the DB row.
   `reconcile_once(store, runner, index=…)` sweeps every pending intent
   (skips `applied`, plus any id the caller's failure backoff is holding),
-  calling `docker compose up -d egress-proxy [adapters…] <id>` for
-  `installed` (the egress proxy always rides along — apps live on the
+  calling `docker compose up -d --no-recreate egress-proxy [adapters…] <id>`
+  and then `docker compose up -d --no-deps <id>` for
+  `installed` (the first creates what is missing and never recreates a
+  running container — core, MediaMTX and the accelerator adapters hash
+  differently from inside the installer's container, and an install used
+  to restart them; the second applies the app's own configuration to the
+  app alone; the egress proxy always rides along — apps live on the
   internal network and it is their only way out, see
   [APP_NETWORK.md](APP_NETWORK.md); an already-running proxy is a
   compose no-op) and `docker compose rm -s -f <id>` for `absent`

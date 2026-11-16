@@ -179,4 +179,4 @@ def test_unpinned_install_is_not_verified_and_stays_dev_only(caplog):
 def test_signing_off_skips_the_check():
     runner = _Runner(RunResult(0, "up", ""))
     status, _ = reconcile_intent(_intent(), runner, index=INDEX, signing=SigningPolicy(mode="off"))
-    assert status == "applied" and len(runner.calls) == 1
+    assert status == "applied" and len(runner.calls) == 2  # create + apply

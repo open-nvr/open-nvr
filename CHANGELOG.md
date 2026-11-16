@@ -8,6 +8,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A one-click app install restarted the application.** Installing ANPR
+  from the catalog on a Ventuno Q recreated core, MediaMTX, the yolov8
+  adapter and the egress proxy, and the web page answered 502 for about
+  a minute (0.1.12, 2026-11-16). The installer runs Compose inside its
+  own container, where the app's dependencies look changed: the
+  addresses `start.sh` detects and only exports (`OPENNVR_HOST_IP`,
+  `OPENNVR_LAN_IPS`) are empty there, and a Compose newer than the
+  host's writes `devices:` in another form, so every accelerator service
+  hashes differently. The install is now two steps: `up -d
+  --no-recreate` creates what is missing and never recreates a running
+  container, then `up -d --no-deps <id>` applies the app's own
+  configuration to the app alone. Each restart of an NPU adapter also
+  cost memory on that board, where the vendor driver keeps a stopped
+  process's NPU buffers.
+
 - **Add Camera's network discovery on Linux never started.** The LAN
   prober container asked for the host agent's lock file next to its key,
   on a filesystem and a key mount that are both read-only, failed with
