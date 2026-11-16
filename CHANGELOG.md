@@ -157,6 +157,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **"Docker is not running" when it was.** On a Linux host whose user is
+  not in the docker group, `docker info` fails with "permission denied",
+  and the installer, `./start.sh validate`, the updater and the uninstaller
+  all read that as a daemon that is down. They now say Docker is running
+  but this user may not use it, and print the `usermod -aG docker` fix
+  (not sudo, which `start.sh` refuses). The installer also checks that the
+  checkout is writable before it starts, so a folder cloned with sudo is
+  named with its `chown` fix instead of dying on
+  `cp: cannot create regular file '.env': Permission denied`.
 - **A recorder added by address took another channel's sub stream.**
   Adding an NVR with its IP and credentials picked the smallest stream
   across every channel as the camera's sub stream, so detection could

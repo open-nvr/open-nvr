@@ -21,6 +21,28 @@ info() { printf '  %s\n' "$*"; }
 ok() { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ⚠ %s\n' "$*"; }
 die() { printf '  ✗ %s\n' "$*" >&2; exit 1; }
+
+# A daemon that is down and a socket this user may not open both make the
+# docker client exit 1, and only its stderr tells them apart. The fix differs:
+# start the daemon, or join the docker group (not sudo: start.sh refuses it,
+# because the files it writes would then belong to root). Prints the headline
+# and, on later lines, the fix, and returns 0 when Docker is unusable;
+# returns 1 and prints nothing when it answers.
+docker_unavailable_reason() {
+    local err user
+    err=$(docker info 2>&1 >/dev/null) && return 1
+    user=$(id -un)
+    case "$err" in
+        *"permission denied"*|*"Permission denied"*)
+            printf 'Docker is running, but %s may not use it (permission denied on the Docker socket).\n' "$user"
+            printf '      → Join the docker group, open a new shell (or log out and back in), then re-run:\n'
+            printf '          sudo usermod -aG docker %s && newgrp docker\n' "$user"
+            printf '      → Not sudo ./start.sh: .env and the certificates would then belong to root.\n' ;;
+        *)
+            printf 'Docker is not running.\n'
+            printf '      → Start the Docker daemon, then re-run.\n' ;;
+    esac
+}
 # NOTE on `|| true` after every interactive `read`: this script runs under
 # `set -e`. A `read` returns non-zero when it hits EOF (stdin closed, or a
 # non-interactive/piped invocation that ran out of answers). Without the
@@ -220,9 +242,19 @@ detect_timezone() {
 check_prerequisites() {
     command -v docker >/dev/null 2>&1 || die "Docker is not installed. Install Docker, then re-run."
     docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required. Update Docker and re-run."
-    docker info >/dev/null 2>&1 || die "Docker is not running. Start the Docker daemon, then re-run."
+    local reason owner
+    reason=$(docker_unavailable_reason) && die "$reason"
     command -v openssl >/dev/null 2>&1 || die "openssl is required to generate credentials"
     [[ -f "$BASE_COMPOSE" ]] || die "$BASE_COMPOSE was not found in $PROJECT_ROOT"
+    # Everything below writes here (.env, certificates, data/). A checkout made
+    # with `sudo git clone` belongs to root, and the first write would die on
+    # "cp: cannot create regular file '.env': Permission denied".
+    if [[ ! -w "$PROJECT_ROOT" ]]; then
+        owner=$(ls -ld "$PROJECT_ROOT" 2>/dev/null | awk '{print $3}')
+        die "$(printf '%s is not writable by %s (it belongs to %s).\n' "$PROJECT_ROOT" "$(id -un)" "${owner:-another user}"
+              printf '      → Give the checkout to the user who runs OpenNVR, then re-run:\n'
+              printf '          sudo chown -R %s:%s "%s"' "$(id -un)" "$(id -gn)" "$PROJECT_ROOT")"
+    fi
 }
 
 env_get() {

@@ -103,6 +103,39 @@ get_env_var() {
     grep -E "^${key}=" .env 2>/dev/null | cut -d'=' -f2- | sed -E 's/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//' | tr -d '"' | tr -d "'"
 }
 
+# ── Helper: why `docker info` failed ─────────────────────
+# A daemon that is down and a socket this user may not open both make the
+# docker client exit 1, and only its stderr tells them apart. The fix differs:
+# start the daemon, or join the docker group (not sudo: start.sh refuses it,
+# because the files it writes would then belong to root). Prints the headline
+# and, on later lines, the fix, and returns 0 when Docker is unusable;
+# returns 1 and prints nothing when it answers.
+docker_unavailable_reason() {
+    local err user
+    err=$(docker info 2>&1 >/dev/null) && return 1
+    user=$(id -un)
+    case "$err" in
+        *"permission denied"*|*"Permission denied"*)
+            printf 'Docker is running, but %s may not use it (permission denied on the Docker socket).\n' "$user"
+            printf '      → Join the docker group, open a new shell (or log out and back in), then re-run:\n'
+            printf '          sudo usermod -aG docker %s && newgrp docker\n' "$user"
+            printf '      → Not sudo ./start.sh: .env and the certificates would then belong to root.\n' ;;
+        *)
+            printf 'Docker is not running.\n'
+            printf '      → Start the Docker daemon, then re-run.\n' ;;
+    esac
+}
+
+# The same, printed the way run_validate prints a failed check: the headline
+# in red, the fix below it. Returns 0 when it printed (Docker is unusable).
+report_docker_unavailable() {
+    local reason
+    reason=$(docker_unavailable_reason) || return 1
+    echo -e "  ${RED}✗ ${reason%%$'\n'*}${NC}" >&2
+    case "$reason" in *$'\n'*) printf '%s\n' "${reason#*$'\n'}" >&2 ;; esac
+    return 0
+}
+
 # ── OpenNVR Accelerate: hardware flavour ───────────────────
 # OPENNVR_ACCEL=auto|cpu|intel|qualcomm in .env (default auto). auto reads the host:
 #   intel     Linux with an Intel render node (/sys/class/drm/renderD*, 0x8086)
@@ -1128,10 +1161,8 @@ run_validate() {
     echo -e "${BRIGHT_CYAN}  Running pre-flight checks...${NC}"
     echo ""
 
-    # 1. Docker
-    if ! docker info >/dev/null 2>&1; then
-        echo -e "  ${RED}✗ Docker is not running${NC}"
-        echo "      → Start Docker and retry."
+    # 1. Docker: down, or not reachable by this user (the message says which).
+    if report_docker_unavailable; then
         errors=$((errors + 1))
     else
         echo -e "  ${GREEN}✓ Docker is running${NC}"
