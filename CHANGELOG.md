@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`./start.sh uninstall` was refused while the update runner was only
+  checking.** The runner's once-a-minute tick holds the update lock, for
+  a minute or two after a version change, and the uninstall stopped with
+  "An update is running" and no way forward (a Ventuno Q, 2026-11-16).
+  It now waits for the holder, up to three minutes, and goes on; if an
+  update really is still running it changes nothing and names
+  `./start.sh auto-update disable`. A tick that starts while the
+  questions are being answered is waited for after the runner is
+  removed. `--dry-run` does not wait. (Linux and macOS; `uninstall.ps1`
+  is unchanged.)
+- **The installer said "litertlm on the GPU".** The Gemma captioner runs
+  on the Qualcomm NPU; the line now says so.
+
 - **A one-click app install restarted the application.** Installing ANPR
   from the catalog on a Ventuno Q recreated core, MediaMTX, the yolov8
   adapter and the egress proxy, and the web page answered 502 for about
