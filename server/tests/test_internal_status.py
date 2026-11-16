@@ -57,6 +57,12 @@ NOW = datetime.now(UTC)
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
+    # "A minute ago" must be a minute before THIS test, not before the
+    # module was imported: the recording stalls after four minutes, and in
+    # a suite that took eight (CI on main, 2026-11-16) the gate read
+    # "stalled" where the test expects "recording".
+    global NOW
+    NOW = datetime.now(UTC)
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False},
                            poolclass=StaticPool)
     Base.metadata.create_all(engine, tables=[Camera.__table__, CameraMask.__table__,
