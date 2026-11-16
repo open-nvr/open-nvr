@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Uninstall killed the containers, and on a Qualcomm board that costs
+  memory until the next reboot.** `docker rm -f` on a running container
+  is a SIGKILL. Measured on a Ventuno Q (2026-11-16): an NPU adapter that
+  is killed leaves its model buffers in the kernel, 0.37 GB for Whisper,
+  0.54 GB for SigLIP and 0.78 GB for the Gemma captioner each time, and
+  one that is stopped leaves nothing. A board that was uninstalled and
+  reinstalled showed 95 % memory and "Degraded". The uninstall now stops
+  every container (20 s) before removing it.
 - **`./start.sh uninstall` was refused while the update runner was only
   checking.** The runner's once-a-minute tick holds the update lock, for
   a minute or two after a version change, and the uninstall stopped with
