@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Search read "chair" as "hair".** The typo reader corrects a word the
+  box does not know to the closest word it does, and the captions' own
+  words are part of what it knows. On a box whose captions say "hair"
+  and never "chair", a search for a chair listed thirty-six heads. A
+  correction now keeps the first letter ("persn", "trcuk" and "pikup"
+  still work; "chair" is not "hair", "rain" is not "train"), and an
+  everyday object word is never treated as a typo.
+
 - **Core refused the LAN prober's sync.** With the lock fixed the prober
   started, and every sync came back 422: it reports the role
   `lan-probe`, and core's schema allowed only `user` and `system`. So
