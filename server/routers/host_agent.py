@@ -92,7 +92,11 @@ class OnvifScan(BaseModel):
 
 class SyncReport(BaseModel):
     version: str = Field(..., max_length=100)
-    role: Literal["user", "system"] = "user"
+    # "lan-probe" is the discovery-only container on Linux (the same binary
+    # with -discovery-only). Leaving it out of this list answered every one
+    # of its syncs with 422, so multicast discovery on Linux never reached
+    # core (seen on a Ventuno Q, 2026-11-16, once the prober could start).
+    role: Literal["user", "system", "lan-probe"] = "user"
     os: str = Field(..., max_length=40)
     arch: str = Field(..., max_length=40)
     hostname: str | None = Field(None, max_length=200)
