@@ -505,6 +505,10 @@ Write-Host ""
 if ($Runner) { Remove-FolderTask $TaskName "Update runner" ".\start.ps1 auto-update disable" }
 if ($HostAgent) { Remove-FolderTask $HostTaskName "Host agent" ".\start.ps1 host-agent uninstall" }
 
+# Stop first, then remove: `docker rm -f` kills a running container, and a
+# process killed while it holds models on an accelerator can leave its
+# buffers behind (see uninstall.sh).
+if ($Found.Containers.Count -gt 0) { docker stop -t 20 @($Found.Containers) *> $null }
 foreach ($item in $Found.Containers) {
     docker rm -f -v $item *> $null
     if ($LASTEXITCODE -ne 0) { Write-Fail "could not remove container $item" }

@@ -664,6 +664,20 @@ remove_runner
 remove_host_agent
 wait_for_update
 
+# Stop first, then remove. `docker rm -f` on a running container is a
+# SIGKILL, and a process killed while it holds models on a Qualcomm NPU
+# leaves its buffers in the kernel until the next reboot: measured on a
+# Ventuno Q, 0.37 to 0.78 GB per killed adapter and nothing for one that
+# was stopped (2026-11-16). A reinstall after a kill started with gigabytes
+# of memory already gone. One `docker stop` for all of them, so they shut
+# down side by side; a container that will not stop is still removed.
+stop_list=()
+while IFS= read -r item; do
+    [ -n "$item" ] && stop_list+=("$item")
+done <<< "$CONTAINERS"
+if [ "${#stop_list[@]}" -gt 0 ]; then
+    docker stop -t 20 "${stop_list[@]}" >/dev/null 2>&1 || true
+fi
 while IFS= read -r item; do
     [ -n "$item" ] || continue
     docker rm -f -v "$item" >/dev/null 2>&1 || failed "could not remove container $item"
