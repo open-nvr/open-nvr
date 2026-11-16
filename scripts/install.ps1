@@ -880,7 +880,8 @@ function Choose-Example {
         } elseif ($enrichSuggest -eq 'true' -and -not $enrichCurrent) {
             Set-EnvValue EVENTS_CAPTION_ENRICHMENT 'true'
             Set-EnvValue EVENTS_DESCRIPTOR_ENRICHMENT 'true'
-            Ok "Visit descriptions (captions + colour/type) ON - $captionAdapter on the GPU keeps up with the visit rate"
+            $captionWhere = if ($captionAdapter -eq "litertlm") { "NPU" } else { "GPU" }
+            Ok "Visit descriptions (captions + colour/type) ON - $captionAdapter on the $captionWhere keeps up with the visit rate"
         } else {
             $enrichDefault = if ($enrichCurrent) { $enrichCurrent -eq 'true' } else { $enrichSuggest -eq 'true' }
             Write-Host ''

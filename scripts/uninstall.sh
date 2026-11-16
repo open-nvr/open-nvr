@@ -100,11 +100,36 @@ esac
 command -v docker >/dev/null 2>&1 || die "Docker is not installed, so its containers and volumes cannot be checked."
 docker info >/dev/null 2>&1 || die "Docker is not running. Start it and re-run: nothing has been changed."
 
-# An update in flight would bring the stack back up behind us.
-lock_pid=$(cat data/updates/.lock/pid 2>/dev/null || true)
-if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-    die "An update is running (pid $lock_pid). Wait for it to finish: nothing has been changed."
-fi
+# An update in flight would bring the stack back up behind us. But the lock
+# is also held by the update runner's own check, once a minute and for a
+# minute or two after a version change, and refusing on that sent an
+# operator away from a machine that was only looking for a release (a
+# Ventuno Q, 2026-11-16). So: wait for the holder, then go on; refuse only
+# if it is still there, and say how to stop the runner. A dry run changes
+# nothing and waits for nothing.
+LOCK_WAIT="${OPENNVR_UNINSTALL_LOCK_WAIT:-180}"
+update_lock_pid() {
+    local pid
+    pid=$(cat data/updates/.lock/pid 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then printf '%s' "$pid"; fi
+}
+wait_for_update() {
+    local pid waited=0
+    pid=$(update_lock_pid)
+    [ -n "$pid" ] || return 0
+    if [ "$DRY" = 1 ]; then
+        warn "The update runner is busy (pid $pid). A real uninstall waits for it first."
+        return 0
+    fi
+    say "The update runner is busy (pid $pid): its check can take a minute or two. Waiting, up to ${LOCK_WAIT} s ..."
+    while [ "$waited" -lt "$LOCK_WAIT" ]; do
+        sleep 2; waited=$((waited + 2))
+        [ -n "$(update_lock_pid)" ] || return 0
+    done
+    pid=$(update_lock_pid)
+    die "An update is still running (pid $pid) after ${LOCK_WAIT} s: nothing has been changed. If it is the update runner, stop it and run this again: ./start.sh auto-update disable"
+}
+wait_for_update
 
 env_get() {
     grep -E "^$1=" .env 2>/dev/null | tail -n 1 | cut -d= -f2- \
@@ -633,8 +658,11 @@ fi
 printf '\n'
 
 # Host services first, so no tick brings anything back while the rest goes.
+# A tick that started while the questions were being answered is waited for:
+# the runner is gone, so it is the last one.
 remove_runner
 remove_host_agent
+wait_for_update
 
 while IFS= read -r item; do
     [ -n "$item" ] || continue
