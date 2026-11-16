@@ -1634,7 +1634,7 @@ services:
     # any :latest cached keeps it for ever. Naming the version is what
     # makes an upgrade pull the image this file was written for (1.1.0
     # brings the HTTPS listener the port mapping below points at).
-    image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:1.1.0}
+    image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:1.2.0}
     # Not ${APPS_PULL_POLICY:-build}: `build` with no build section is a
     # compose error. `missing` pulls once, then keeps the local image.
     pull_policy: missing

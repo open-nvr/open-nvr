@@ -109,7 +109,9 @@ During a class window the room's worker fetches a frame from core every
 attempt interval (2 min), detects every face, recognises each crop, and
 aggregates who was seen per 10-minute slot. At the end of the class a student
 is PRESENT when seen in at least 60 % of the slots. Timing knobs are
-`ATTENDLY_*` settings in `attendly/config.py`.
+`ATTENDLY_*` settings in `attendly/config.py`; since 1.2.0 an administrator
+can also change them on the app's **Settings** page, and a value set there
+wins over the environment.
 
 Two rules keep the record honest. A slot in which the camera could not be
 looked at (no frame from core, recognition down) is recorded as *unwatched*
