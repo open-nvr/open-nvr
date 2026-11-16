@@ -65,45 +65,60 @@ func main() {
 	// During an upgrade the new agent starts while the old one is still on
 	// its way out (it exits once it sees core's new build). Wait for the lock
 	// rather than giving up at once, or the upgrade leaves no agent running.
-	lockPath := filepath.Join(filepath.Dir(*keyFile), "agent.lock")
-	var lock *os.File
-	var err error
-	for waited := 0; ; waited++ {
-		lock, err = singleton.Acquire(lockPath)
-		if err == nil {
-			break
+	//
+	// The LAN prober takes no lock: it is a container with a read-only
+	// filesystem and a read-only key mount, and Docker's container name is
+	// already what keeps it to one. Asking for the lock there failed with
+	// "read-only file system" and the prober restarted for ever (0.1.12).
+	if lockPath := lockPathFor(*keyFile, *discoveryOnly); lockPath != "" {
+		var lock *os.File
+		var err error
+		for waited := 0; ; waited++ {
+			lock, err = singleton.Acquire(lockPath)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, singleton.ErrHeld) {
+				log.Printf("cannot take the agent lock: %v", err)
+				os.Exit(1)
+			}
+			if waited == 0 {
+				log.Printf("%v; waiting up to a minute for it to stop", err)
+			}
+			if waited >= 60 {
+				log.Printf("%v; this one exits", err)
+				os.Exit(0)
+			}
+			time.Sleep(time.Second)
 		}
-		if !errors.Is(err, singleton.ErrHeld) {
-			log.Printf("cannot take the agent lock: %v", err)
-			os.Exit(1)
-		}
-		if waited == 0 {
-			log.Printf("%v; waiting up to a minute for it to stop", err)
-		}
-		if waited >= 60 {
-			log.Printf("%v; this one exits", err)
-			os.Exit(0)
-		}
-		time.Sleep(time.Second)
+		defer lock.Close()
 	}
-	defer lock.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	log.Printf("OpenNVR host agent %s starting (OpenNVR folder %s)", buildinfo.Build, *repo)
 	code := agent.Run(ctx, agent.Options{
-		Core:    *coreURL,
-		RTSPS:   *rtsps,
-		KeyFile: *keyFile,
-		Repo:    *repo,
-		FFmpeg:  *ffmpegPath,
+		Core:          *coreURL,
+		RTSPS:         *rtsps,
+		KeyFile:       *keyFile,
+		Repo:          *repo,
+		FFmpeg:        *ffmpegPath,
 		DiscoveryOnly: *discoveryOnly,
-		Logf:    log.Printf,
+		Logf:          log.Printf,
 	})
 	log.Printf("OpenNVR host agent stopped")
 	if code != 0 {
 		log.Close()
 		os.Exit(code)
 	}
+}
+
+// lockPathFor is where the one-agent-per-machine lock lives: next to the
+// key. The LAN prober ("" here) takes none; see main.
+func lockPathFor(keyFile string, discoveryOnly bool) string {
+	if discoveryOnly {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(keyFile), "agent.lock")
 }
