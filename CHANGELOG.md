@@ -6,6 +6,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Add Camera's network discovery on Linux never started.** The LAN
+  prober container asked for the host agent's lock file next to its key,
+  on a filesystem and a key mount that are both read-only, failed with
+  "cannot take the agent lock: read-only file system" and restarted for
+  ever (seen on a fresh 0.1.12 install on a Ventuno Q, 2026-11-16; adding
+  a camera by address was not affected). The prober takes no lock: its
+  container name already keeps it to one. The host agent on Docker
+  Desktop keeps its lock.
+
 ## [0.1.12] — 2026-11-16
 
 Setup, updates and apps without hand edits. `./start.sh uninstall` gives a clean slate; a new site installs releases by itself; first-time setup confirms the authenticator before it finishes; the installers offer one-click app install, search by meaning and voice search, none of which needs the Camera Agent any more. A recorder's channels are added in one go from discovery. A search result opens paused. The storage floor is 5 % of the disk (5 to 20 GB) and a full disk that rotates is not Degraded. WebRTC addresses are applied at core startup. Apps subscribe to the always-on detector by default, and the rules for building an efficient app are one guide, read by people, coding assistants and `opennvr-app validate --strict`. Adapter pins at `0.1.12`: the same adapters as `0.1.11`, renumbered so both repositories match. App SDK 0.13.0 (`sdk-v0.13.0`).
