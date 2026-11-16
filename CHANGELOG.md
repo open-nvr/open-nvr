@@ -8,6 +8,13 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Core refused the LAN prober's sync.** With the lock fixed the prober
+  started, and every sync came back 422: it reports the role
+  `lan-probe`, and core's schema allowed only `user` and `system`. So
+  multicast discovery on Linux has never reached core. The role is
+  accepted now (checked on a Ventuno Q: the prober connects and syncs
+  every five seconds with no restart).
+
 - **Uninstall killed the containers, and on a Qualcomm board that costs
   memory until the next reboot.** `docker rm -f` on a running container
   is a SIGKILL. Measured on a Ventuno Q (2026-11-16): an NPU adapter that

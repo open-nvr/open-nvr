@@ -377,6 +377,22 @@ def test_discovery_is_asked_for_and_then_answered(env):
     assert host_agent.discovery_answered(asked)
 
 
+def test_the_lan_prober_syncs_under_its_own_role(env):
+    """The Linux discovery container reports role "lan-probe" (host-agent
+    internal/agent/agent.go). Core refused that with 422 and the prober
+    never got a discovery request (0.1.12)."""
+    from services import host_agent
+    probe = {**REPORT, "role": "lan-probe", "webcams": []}
+    r = env.tc.post("/api/v1/host-agent/sync", json=probe, headers=H)
+    assert r.status_code == 200, r.text
+    asked = host_agent.request_discovery()
+    again = env.tc.post("/api/v1/host-agent/sync", json=probe, headers=H).json()
+    assert again["discover_onvif"] is True and again["discover_seq"] == asked
+    # an unknown role is still refused
+    bad = env.tc.post("/api/v1/host-agent/sync", json={**REPORT, "role": "root"}, headers=H)
+    assert bad.status_code == 422
+
+
 def test_agent_discovery_lists_only_camera_lan_devices(env, discover_app):
     env.tc.post("/api/v1/host-agent/sync", json={**REPORT, "onvif": {**SCAN, "scanned_at": time.time()}}, headers=H)
     body = discover_app.get("/api/v1/discover/agent", params={"refresh": "false"}).json()
