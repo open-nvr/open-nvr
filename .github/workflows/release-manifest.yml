@@ -8,9 +8,15 @@
 #
 # Triggered on:
 #   - a v* tag's image publishes finishing. workflow_run fires once per
-#     workflow, and the manifest needs BOTH publish-images and
-#     publish-detect-pipeline done at that commit; the first to finish
-#     finds the other still running and stops, the second does the work.
+#     workflow, and the manifest needs EVERY workflow that pushes an image
+#     the manifest pins done at that commit: publish-images and
+#     publish-detect-pipeline always, and the app-image and weights builds
+#     when the tag started them. Each one that finishes finds another
+#     still running and stops; the last does the work. The weights builds
+#     re-push `yolov8-weights:<model tag>` under a new digest, so a
+#     manifest signed before they finish pins a digest the tag no longer
+#     serves (0.1.12: signed at 01:52, weights done at 01:59; re-run by
+#     hand).
 #   - workflow_dispatch with a tag: a manifest for an existing release
 #     (the v0.1.8 backfill, so today's sites have a starting point), or a
 #     re-run. The tools come from the branch the workflow runs on; the
@@ -32,7 +38,13 @@ name: release-manifest
 
 on:
   workflow_run:
-    workflows: [publish-images, publish-detect-pipeline]
+    workflows:
+      - publish-images
+      - publish-detect-pipeline
+      - publish-app-images
+      - build-yolov8-weights
+      - build-yolo-pose-weights
+      - build-package-detection-weights
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -69,7 +81,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
           path: release-src
 
-      - name: Both image publishes done for this commit?
+      - name: Every image publish done for this commit?
         id: ready
         run: |
           set -euo pipefail
@@ -79,11 +91,24 @@ jobs:
             echo "go=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           go=true
+          state_of() {
+            gh run list --workflow "$1" --commit "$sha" --event push --limit 1 \
+              --json status,conclusion --jq 'if length == 0 then "none" else .[0] | "\(.status)/\(.conclusion)" end'
+          }
+          # Always run on a release tag: both must have succeeded.
           for wf in publish-images.yml publish-detect-pipeline.yml; do
-            state="$(gh run list --workflow "$wf" --commit "$sha" --event push --limit 1 \
-                       --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"')"
+            state="$(state_of "$wf")"
             echo "$wf: $state"
             [ "$state" = "completed/success" ] || go=false
+          done
+          # Run only when the tag started them: a run that exists must have
+          # succeeded; no run at this commit is not waited for. A failed one
+          # leaves no manifest: fix it, or dispatch this workflow by hand.
+          for wf in publish-app-images.yml build-yolov8-weights.yml \
+                    build-yolo-pose-weights.yml build-package-detection-weights.yml; do
+            state="$(state_of "$wf")"
+            echo "$wf: $state"
+            case "$state" in none|completed/success) ;; *) go=false ;; esac
           done
           echo "go=$go" >> "$GITHUB_OUTPUT"
 
@@ -143,11 +168,15 @@ jobs:
     permissions:
       contents: write
       actions: read
+    # Only the two core publishes start an edge manifest; the app-image and
+    # weights builds are in the trigger list for the release job above.
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.event == 'push'
+      github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.name == 'publish-images' ||
+       github.event.workflow_run.name == 'publish-detect-pipeline')
     env:
       GH_TOKEN: ${{ github.token }}
       SHA: ${{ github.event.workflow_run.head_sha }}
