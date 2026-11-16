@@ -348,11 +348,41 @@ def build_up_argv(
 
     The egress proxy goes first, always: without it an app on the
     internal network has no route anywhere but core and the buses.
+
+    ``--no-recreate``: this command only CREATES what is missing. Compose
+    walks the app's dependencies (core, MediaMTX, the detector's adapter)
+    and recreates any whose configuration looks different to it — and it
+    does look different from inside this container: values start.sh only
+    exported are empty here, and a Compose newer than the host's writes
+    ``devices:`` in another form, so every accelerator service hashes
+    differently. Installing ANPR on a Ventuno Q recreated core, MediaMTX
+    and the yolov8 adapter and took the application away for a minute
+    (0.1.12, 2026-11-16). An install has no business touching a container
+    that is already running; ``build_apply_argv`` then applies the app's
+    own configuration to the app alone.
     """
     services = [EGRESS_PROXY_SERVICE] + [
         adapter_service_name(a) for a in (adapters or ())
     ] + [intent.id]
-    return _compose_base(compose_files, profile) + ["up", "-d", *services]
+    return _compose_base(compose_files, profile) + [
+        "up", "-d", "--no-recreate", *services,
+    ]
+
+
+def build_apply_argv(
+    intent: Intent,
+    *,
+    compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
+    profile: str = DEFAULT_PROFILE,
+) -> list[str]:
+    """``docker compose ... up -d --no-deps <id>`` — the second step of an
+    install: bring the APP's own container to the configuration asked for
+    (a new pinned image on an app that was already there), and nothing
+    else. A container ``build_up_argv`` has just created is already right
+    and Compose leaves it alone."""
+    return _compose_base(compose_files, profile) + [
+        "up", "-d", "--no-deps", intent.id,
+    ]
 
 
 def build_down_argv(
@@ -508,10 +538,22 @@ def reconcile_intent(
             compose_files=compose_files, profile=profile,
         )
         result = runner(argv, override or None)
-        if result.returncode == 0:
-            return "applied", (result.stdout or "compose up succeeded").strip()
+        if result.returncode != 0:
+            return "failed", (
+                result.stderr or f"compose up exited {result.returncode}"
+            ).strip()
+        applied = runner(
+            build_apply_argv(
+                intent, compose_files=compose_files, profile=profile,
+            ),
+            override or None,
+        )
+        if applied.returncode == 0:
+            return "applied", (
+                applied.stdout or result.stdout or "compose up succeeded"
+            ).strip()
         return "failed", (
-            result.stderr or f"compose up exited {result.returncode}"
+            applied.stderr or f"compose up exited {applied.returncode}"
         ).strip()
 
     if intent.desired == "absent":
