@@ -2136,3 +2136,22 @@ def test_the_people_and_vehicles_an_operator_names_are_classes():
     assert parse_query("an auto", now=NOW).labels == ["car", "motorcycle"]
     assert parse_query("jeep", now=NOW).labels == ["car"]
     assert parse_query("pickup", now=NOW).labels == ["truck", "car"]
+
+
+def test_a_real_word_is_not_read_as_a_caption_word():
+    """"chair" was read as "hair" on a Ventuno Q (2026-11-16): the captions
+    there say "hair", ratio 0.89, and the search for a chair listed heads.
+    An everyday object word is never a typo, and a correction never drops
+    or changes the first letter; the slips it exists for still work."""
+    from services.search_query import correct_word, parse_query
+    vocab = {"hair", "train", "night", "person", "truck", "pickup", "camouflage", "dock", "blue", "backpack"}
+    assert correct_word("chair", vocab) is None
+    assert correct_word("rain", vocab) is None, "'rain' is not 'train'"
+    assert correct_word("light", vocab) is None, "'light' is not 'night'"
+    assert correct_word("flight", vocab | {"light"}) is None, "the first letter must match"
+    for typed, meant in (("persn", "person"), ("trcuk", "truck"), ("pikup", "pickup"),
+                         ("camoflage", "camouflage"), ("dok", "dock"), ("blu", "blue"),
+                         ("bakpack", "backpack")):
+        assert correct_word(typed, vocab) == meant, typed
+    parsed = parse_query("chair", vocab=vocab)
+    assert parsed.corrections == {} and "chair" in parsed.text

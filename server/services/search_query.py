@@ -326,7 +326,25 @@ class ParsedQuery:
 # no database extension. Rules: never touch a word the parser already
 # knows, a stop word, a number or a plate; a four-letter word needs a
 # closer match than a longer one ("cart" is not "car"); the best candidate
-# must stand clear of the second.
+# must stand clear of the second; the candidate starts with the same
+# letter; an everyday object word (_REAL_WORDS) is never a typo.
+
+#: Everyday things a camera sees that are words in their own right (the
+#: detector's COCO classes that are not search labels here, split into
+#: words). None of them is ever "corrected": on a Ventuno Q "chair" was
+#: read as "hair", a word its captions use, and the search for a chair
+#: returned thirty-six heads (2026-11-16).
+_REAL_WORDS = frozenset("""
+airplane apple backpack banana baseball bat bear bed bench bird boat book
+bottle bowl broccoli cake carrot cat chair clock couch cow cup dining
+donut dryer elephant fire fork frisbee giraffe glass glove hair handbag
+horse hot hydrant keyboard kite knife laptop light meter microwave mouse
+orange oven parking phone pizza plant potted racket refrigerator remote
+sandwich scissors sheep sign sink skateboard skis snowboard spoon sports
+stop suitcase surfboard table teddy tennis tie toaster toilet toothbrush
+traffic train umbrella vase wine zebra
+""".split())
+
 
 def _ratio(a: str, b: str) -> float:
     import difflib
@@ -335,7 +353,7 @@ def _ratio(a: str, b: str) -> float:
 
 def correct_word(word: str, vocab: set[str]) -> str | None:
     """The vocabulary word ``word`` is most likely a typo of, or None."""
-    if len(word) < 3 or word in vocab or word.isdigit() or word in _STOP:
+    if len(word) < 3 or word in vocab or word.isdigit() or word in _STOP or word in _REAL_WORDS:
         return None
     if any(ch.isdigit() for ch in word):
         return None                              # gate14, a plate, a time
@@ -348,8 +366,13 @@ def correct_word(word: str, vocab: set[str]) -> str | None:
         floor, span = 0.86, 1
     else:
         floor, span = 0.8, 2
+    # A slip of the fingers keeps the first letter ("persn", "trcuk",
+    # "pikup"). A word that only becomes a vocabulary word by losing or
+    # changing its first letter is far more often another word: "chair" is
+    # not "hair", "rain" is not "train", "light" is not "night".
     scored = sorted(
-        ((_ratio(word, v), v) for v in vocab if abs(len(v) - len(word)) <= span and len(v) >= 3),
+        ((_ratio(word, v), v) for v in vocab
+         if abs(len(v) - len(word)) <= span and len(v) >= 3 and v[0] == word[0]),
         reverse=True)
     if not scored or scored[0][0] < floor:
         return None
