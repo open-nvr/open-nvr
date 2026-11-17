@@ -41,6 +41,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from reconciler import (  # noqa: E402
+    FAILURE_MAX_CHARS,
+    FAILURE_TAIL_LINES,
     CuratedApp,
     Intent,
     RunResult,
@@ -217,7 +219,10 @@ def test_pending_installed_calls_compose_up_and_applies():
     status_, message = _reconcile(intent, runner)
 
     assert status_ == "applied"
-    assert message == "Started"
+    # A sentence for the App Catalog, not compose's output.
+    # No image in it: the App Catalog shows the intent's image on its own
+    # line, and repeating it read as noise.
+    assert message == "loitering-detection is running."
     # Two compose calls: create what is missing without recreating any
     # running container, then apply the app's own configuration to the
     # app alone.
@@ -364,7 +369,7 @@ def test_reconcile_once_skips_applied_processes_pending():
     # Only the pending one was reconciled + written back.
     assert [o[0] for o in outcomes] == ["loitering-detection"]
     assert store.updates == [
-        ("loitering-detection", "applied", "ok", "installed")
+        ("loitering-detection", "applied", "loitering-detection is running.", "installed")
     ]
     assert len(runner.calls) == 2  # create, then apply to the app alone
 
@@ -567,11 +572,11 @@ def test_teardown_message_carries_the_restart_hint():
         project_env="OPENNVR_EXAMPLE_PROFILE=loitering-detection\n",
     )
     assert status_ == "applied"
-    assert message.startswith("Removed")
+    assert message.startswith("loitering-detection removed.")
     assert "OPENNVR_EXAMPLE_PROFILE" in message
-    # Without the pick the message is compose's alone.
+    # Without the pick there is no note.
     _, plain = reconcile_intent(intent, runner, index=TEST_INDEX)
-    assert plain == "Removed"
+    assert plain == "loitering-detection removed."
 
 
 def test_an_install_never_recreates_a_running_container():
@@ -597,3 +602,48 @@ def test_a_failed_create_stops_before_the_apply_step():
     status, message = _reconcile(_lpr_intent(), runner)
     assert status == "failed" and "no such service" in message
     assert len(runner.calls) == 1
+
+
+# ── the message is for the App Catalog, not a build log ──────────────
+
+
+BUILD_LOG = "\n".join(
+    ['#0 building with "default" instance using docker driver']
+    + [f"#{n} [egress-proxy {n}/4] CACHED" for n in range(1, 40)]
+)
+
+
+def test_a_build_log_never_becomes_the_install_message():
+    """2026-11-17, a live site: installing Attendly rebuilt the egress-proxy (all
+    CACHED) and the install dialog showed the whole BuildKit log under
+    the "applied" badge."""
+    runner = FakeRunner(RunResult(0, BUILD_LOG, BUILD_LOG))
+    status, message = _reconcile(_lpr_intent(), runner)
+    assert status == "applied"
+    assert "#0 building" not in message and "CACHED" not in message
+    assert message.startswith("license-plate-recognition is running with ")
+    assert message == "license-plate-recognition is running with fast_plate_ocr."
+
+
+def test_a_failure_keeps_the_error_and_drops_the_build_progress():
+    stderr = BUILD_LOG + "\n#40 ERROR: failed to solve: no space left on device\nfailed to solve"
+    runner = FakeRunner(RunResult(1, "", stderr))
+    status, message = _reconcile(_lpr_intent(), runner)
+    assert status == "failed"
+    assert "no space left on device" in message
+    assert "CACHED" not in message
+    assert message.count("\n") < FAILURE_TAIL_LINES
+
+
+def test_a_long_failure_is_cut_from_the_front():
+    stderr = "x" * 5000 + "\nError response from daemon: pull access denied"
+    runner = FakeRunner(RunResult(1, "", stderr))
+    _, message = _reconcile(_lpr_intent(), runner)
+    assert message.endswith("pull access denied")
+    assert len(message) <= FAILURE_MAX_CHARS + 1
+
+
+def test_a_failure_with_no_output_says_how_compose_exited():
+    runner = FakeRunner(RunResult(3, "", ""))
+    _, message = _reconcile(_lpr_intent(), runner)
+    assert message == "compose up exited 3"
