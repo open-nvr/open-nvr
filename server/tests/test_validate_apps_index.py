@@ -470,6 +470,36 @@ def test_only_first_party_apps_may_be_closed_source(tmp_path, monkeypatch):
     assert any("'license' is either absent" in x for x in errs(license="MIT"))
 
 
+def test_an_app_that_releases_from_the_registry_names_its_signer_and_first_release(tmp_path, monkeypatch):
+    """docs/design/app-updates-from-registry.md: every site takes each
+    signed X.Y.Z tag, so the entry pins down who may sign one and which
+    release a fresh install starts from."""
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    image = "ghcr.io/open-nvr/sample-app:1.2.0"
+    compose = _GOOD_ENTRY["install"]["compose"].replace("ghcr.io/open-nvr/sample-app:latest", image)
+    signer = {"identity": r"^https://github\.com/open-nvr/app-sample-app/\.github/workflows/release\.yml@refs/tags/v.+$"}
+    def errs(**over):
+        e = dict(_GOOD_ENTRY, image=image, install=dict(_GOOD_ENTRY["install"], compose=compose),
+                 updates="registry", signing=signer)
+        e.update(over)
+        for k, v in list(over.items()):
+            if v is None:
+                e.pop(k, None)
+        return validator.validate_index(_write(tmp_path, [e]))[0]
+    assert errs() == []
+    assert any("needs 'signing" in x for x in errs(signing=None))  # never the org-wide default
+    assert any("X.Y.Z release in 'image'" in x
+               for x in errs(image="ghcr.io/open-nvr/sample-app:latest",
+                             install=dict(_GOOD_ENTRY["install"])))
+    assert any("released with it" in x for x in errs(build_context="examples/sample-app"))
+    assert any("absent or 'registry'" in x for x in errs(updates="auto"))
+    # Who signs the list of withdrawn releases: optional, a valid regexp, registry apps only.
+    rev = dict(signer, revocations_identity=r"^https://github\.com/open-nvr/app-sample-app/\.github/workflows/revocations\.yml@refs/heads/main$")
+    assert errs(signing=rev) == []
+    assert any("revocations_identity' is not a valid regexp" in x for x in errs(signing=dict(signer, revocations_identity="(")))
+    assert any("only for 'updates: registry'" in x for x in errs(signing=rev, updates=None))
+
+
 def test_images_outside_the_org_must_declare_their_signer(tmp_path, monkeypatch):
     """The installer verifies a Sigstore signature before a pinned
     install: org images are signed by the org's CI, anything else has

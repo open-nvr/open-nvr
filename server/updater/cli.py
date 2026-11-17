@@ -14,6 +14,12 @@ The host mounts the OpenNVR folder read-only at /repo and
 * ``due`` — exit 0 when the update found should be installed automatically
   now (updater/policy.py), 11 with the reason when not.
 * ``keygen`` — a new release signing key.
+* ``apps-check`` — which newer release each registry-updated app could move
+  to (updater/apps.py); writes apps.json, and apps-verify.txt with the
+  images the host must check with cosign.
+* ``apps-verified`` — the host records one cosign result.
+* ``apps-due`` — exit 0 with apps-due.env when an app update should be
+  installed now, 11 when none should.
 """
 
 from __future__ import annotations
@@ -236,6 +242,213 @@ def cmd_due(a: argparse.Namespace) -> int:
     return 0 if ok else NOT_DUE
 
 
+def _read_json(path: Path) -> dict:
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _write_json(path: Path, doc: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8", newline="\n")
+    tmp.replace(path)  # the app never reads half a file
+
+
+def _now_z() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cmd_apps_check(a: argparse.Namespace) -> int:
+    from updater import apps, policy as pol
+
+    work: Path = a.work
+    work.mkdir(parents=True, exist_ok=True)
+    core = a.installed_version or installed_version()
+    found, problems = apps.load_sources(a.index or apps.DEFAULT_INDEX)
+    running = apps.read_running(a.running.read_text(encoding="utf-8")) if a.running.is_file() else {}
+    # The lists of withdrawn releases the host verified (apps-revocations-*).
+    revoked_all = _read_json(a.revocations or work / "apps-revocations.json")
+    p = pol.Policy.from_env(envfile.read_env(a.policy_file)) if a.policy_file else pol.Policy()
+    verified = _read_json(work / "apps-verified.json")
+    seen = _read_json(work / "apps-seen.json")
+    registry = apps.Registry()
+
+    reports, to_verify, still_seen = [], [], {}
+    for src in found:
+        listed = revoked_all.get(src.id)
+        if p.app_mode(src.id) == "off":
+            report = apps.AppReport(id=src.id, repository=src.repository, image_key=src.image_key,
+                                    state=apps.OFF, reason="app updates are off")
+        elif isinstance(listed, dict) and "_failed" in listed:
+            # As for OpenNVR releases: a list that does not check out stops
+            # the updates, since it is not safe to guess what it withdrew.
+            report = apps.AppReport(id=src.id, repository=src.repository, image_key=src.image_key,
+                                    state=apps.ERROR,
+                                    reason=f"its list of withdrawn releases did not check out: {listed['_failed']}")
+        else:
+            revoked = revoked_all.get(src.id)
+            revoked = {str(k): str(v) for k, v in revoked.items()} if isinstance(revoked, dict) else {}
+            report = apps.check_app(src, running.get(src.id), registry=registry, platform=a.platform,
+                                    core_version=core, revoked=revoked)
+        reports.append(report)
+        for offer in report.offers:
+            key = f"{src.id} {offer.version}"
+            still_seen[key] = seen.get(key) or _now_z()
+            if not (verified.get(apps.verify_key(src.id, offer.digest)) or {}).get("ok"):
+                to_verify.append(f"{src.id} {offer.ref} {src.signer_identity} {src.signer_issuer}\n")
+        print(f"{src.id}: {report.state}: {report.reason}")
+        for line in report.skipped:
+            print(f"  - skipped {line}")
+    for line in problems:
+        print(f"! {line}", file=sys.stderr)
+
+    _write_json(work / "apps.json", {"checked_at": _now_z(), "core_version": core, "platform": a.platform,
+                                     "problems": problems, "apps": [r.to_dict() for r in reports]})
+    _write_json(work / "apps-seen.json", still_seen)
+    (work / "apps-verify.txt").write_text("".join(to_verify), encoding="utf-8", newline="\n")
+    return 0
+
+
+_APP_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def cmd_apps_revocations_list(a: argparse.Namespace) -> int:
+    """Start a fresh apps-revocations.json, and list in apps-revocations.txt
+    (``<id> <repository>:revocations <identity> <issuer>``) the apps that
+    publish a list, for the host to check with cosign. An app that names no
+    signer for one, or has not published one, has nothing withdrawn."""
+    from updater import apps
+
+    work: Path = a.work
+    work.mkdir(parents=True, exist_ok=True)
+    found, _ = apps.load_sources(a.index or apps.DEFAULT_INDEX)
+    registry = apps.Registry()
+    lists: dict[str, dict] = {}
+    lines = []
+    for src in found:
+        lists[src.id] = {}
+        if not src.revocations_identity:
+            continue
+        try:
+            published = apps.REVOCATIONS_TAG in registry.tags(src.repository)
+        except apps.RegistryError as exc:
+            lists[src.id] = {"_failed": f"could not ask the registry: {exc}"}
+            continue
+        if published:
+            lines.append(f"{src.id} {src.repository}:{apps.REVOCATIONS_TAG} {src.revocations_identity} "
+                         f"{src.signer_issuer}\n")
+    _write_json(work / "apps-revocations.json", lists)
+    (work / "apps-revocations.txt").write_text("".join(lines), encoding="utf-8", newline="\n")
+    return 0
+
+
+def cmd_apps_revocations_record(a: argparse.Namespace) -> int:
+    """The host's cosign check of one app's list: on success, read the list
+    at the digest cosign checked; on failure (or a list that cannot be read),
+    record why, which stops that app's updates."""
+    from updater import apps
+
+    if not _APP_ID.match(a.id):
+        print("apps-revocations-record: --id must be an app id", file=sys.stderr)
+        return 1
+    path = a.work / "apps-revocations.json"
+    lists = _read_json(path)
+    src = next((s for s in apps.load_sources(a.index or apps.DEFAULT_INDEX)[0] if s.id == a.id), None)
+    if src is None:
+        print(f"apps-revocations-record: {a.id} does not update from the registry", file=sys.stderr)
+        return 1
+    if a.result == "failed":
+        lists[a.id] = {"_failed": (a.message or "cosign refused it")[:300]}
+    else:
+        try:
+            digest = apps.cosign_digest(a.cosign_output.read_text(encoding="utf-8") if a.cosign_output else "")
+            lists[a.id] = apps.parse_revocations(apps.Registry().artifact_json(src.repository, digest))
+        except (OSError, apps.RegistryError) as exc:
+            lists[a.id] = {"_failed": str(exc)[:300]}
+    _write_json(path, lists)
+    if "_failed" in lists[a.id]:
+        print(f"{a.id}: {lists[a.id]['_failed']}", file=sys.stderr)
+        return 1
+    print(f"{a.id}: {len(lists[a.id])} withdrawn")
+    return 0
+
+
+def cmd_apps_verified(a: argparse.Namespace) -> int:
+    from updater import apps
+
+    if not _APP_ID.match(a.id) or not _DIGEST.match(a.digest):
+        print("apps-verified: --id must be an app id and --digest sha256:<64 hex>", file=sys.stderr)
+        return 1
+    path = a.work / "apps-verified.json"
+    doc = _read_json(path)
+    doc[apps.verify_key(a.id, a.digest)] = {"ok": a.result == "ok", "message": (a.message or "")[:500],
+                                            "at": _now_z()}
+    _write_json(path, doc)
+    return 0
+
+
+def cmd_apps_due(a: argparse.Namespace) -> int:
+    from updater import apps, policy as pol
+
+    work: Path = a.work
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "apps-due.env").unlink(missing_ok=True)
+    if a.now and not a.app:
+        print("apps-due: --now is for one app (--app)", file=sys.stderr)
+        return 1
+    p = pol.Policy.from_env(envfile.read_env(a.policy_file))
+    doc = _read_json(work / "apps.json")
+    verified = _read_json(work / "apps-verified.json")
+    seen = _read_json(work / "apps-seen.json")
+    # "<id> <version>" per line: releases the host installed and had to roll
+    # back. Never retried by themselves; Update now may still take one.
+    failed = set(_lines(work / "apps-failed.txt"))
+    seed_file = work / "site-seed"
+    if not seed_file.is_file():
+        seed_file.write_text(uuid.uuid4().hex + "\n", encoding="utf-8")
+    seed = seed_file.read_text(encoding="utf-8").strip()
+    local_now, utc_now = datetime.fromisoformat(a.local_time), datetime.now(UTC)
+
+    reports = []
+    for raw in doc.get("apps") or []:
+        try:
+            reports.append(apps.AppReport.from_dict(raw))
+        except TypeError:
+            continue  # written by another version of this updater; the next check rewrites it
+    if a.app:
+        reports = [r for r in reports if r.id == a.app]
+        if not reports:
+            print(f"{a.app}: not an app this site updates from the registry (run apps-check)")
+            return NOT_DUE
+    for report in reports:
+        offer, why = pol.choose_offer(p, report, now=a.now)
+        if offer is None:
+            print(f"{report.id}: {why}")
+            continue
+        if not a.now and f"{report.id} {offer.version}" in failed:
+            print(f"{report.id} {report.installed_version} -> {offer.version}: it did not come up healthy "
+                  "here before and was rolled back; install it by hand")
+            continue
+        record = verified.get(apps.verify_key(report.id, offer.digest))
+        check = (bool(record.get("ok")), str(record.get("message", ""))) if isinstance(record, dict) else None
+        first = seen.get(f"{report.id} {offer.version}")
+        ok, why = pol.due_app(p, report.id, offer, verified=check, local_now=local_now, utc_now=utc_now,
+                              first_seen=datetime.fromisoformat(first.replace("Z", "+00:00")) if first else None,
+                              seed=seed, now=a.now)
+        print(f"{report.id} {report.installed_version} -> {offer.version}: {why}")
+        if ok:
+            envfile.write_kv(work / "apps-due.env", {
+                "APP_ID": report.id, "IMAGE_KEY": report.image_key, "IMAGE_REF": offer.ref,
+                "VERSION": offer.version, "FROM_VERSION": report.installed_version,
+                "FROM_REF": report.installed_ref, "ROLLBACK": offer.rollback,
+            })
+            return 0  # one app per run: each gets its own backup and health check
+    return NOT_DUE
+
+
 def cmd_keygen(a: argparse.Namespace) -> int:
     import base64
 
@@ -286,6 +499,46 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--local-time", required=True, help="the site's local time, YYYY-MM-DDTHH:MM")
     d.add_argument("--installed-version")
     d.set_defaults(func=cmd_due)
+
+    ac = sub.add_parser("apps-check", help="newer releases of the apps that update from the registry")
+    ac.add_argument("--work", type=Path, default=Path("/work"))
+    ac.add_argument("--index", type=Path, default=None, help="apps_index.yml; default: this image's")
+    ac.add_argument("--running", type=Path, required=True, help="<service> <image ref> [<version label>] lines")
+    ac.add_argument("--platform", required=True)
+    ac.add_argument("--installed-version", help="the core version; default: this image's")
+    ac.add_argument("--revocations", type=Path, help="{app id: {version: reason}}, already verified; default: <work>/apps-revocations.json")
+    ac.add_argument("--policy-file", type=Path)
+    ac.set_defaults(func=cmd_apps_check)
+
+    rl = sub.add_parser("apps-revocations-list", help="which apps publish a list of withdrawn releases")
+    rl.add_argument("--work", type=Path, default=Path("/work"))
+    rl.add_argument("--index", type=Path, default=None)
+    rl.set_defaults(func=cmd_apps_revocations_list)
+
+    rr = sub.add_parser("apps-revocations-record", help="record the host's cosign check of one app's list")
+    rr.add_argument("--work", type=Path, default=Path("/work"))
+    rr.add_argument("--index", type=Path, default=None)
+    rr.add_argument("--id", required=True)
+    rr.add_argument("--result", choices=("ok", "failed"), required=True)
+    rr.add_argument("--cosign-output", type=Path, help="cosign verify's JSON output")
+    rr.add_argument("--message", default="")
+    rr.set_defaults(func=cmd_apps_revocations_record)
+
+    av = sub.add_parser("apps-verified", help="record the host's cosign check of one app image")
+    av.add_argument("--work", type=Path, default=Path("/work"))
+    av.add_argument("--id", required=True)
+    av.add_argument("--digest", required=True)
+    av.add_argument("--result", choices=("ok", "failed"), required=True)
+    av.add_argument("--message", default="")
+    av.set_defaults(func=cmd_apps_verified)
+
+    ad = sub.add_parser("apps-due", help="should an app update be installed now?")
+    ad.add_argument("--work", type=Path, default=Path("/work"))
+    ad.add_argument("--policy-file", type=Path, required=True)
+    ad.add_argument("--local-time", required=True, help="the site's local time, YYYY-MM-DDTHH:MM")
+    ad.add_argument("--app", help="only this app")
+    ad.add_argument("--now", action="store_true", help="the operator's Update now: no window, no delay")
+    ad.set_defaults(func=cmd_apps_due)
 
     k = sub.add_parser("keygen", help="a new release signing key")
     k.add_argument("--id", required=True)

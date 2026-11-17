@@ -22,7 +22,12 @@ refuse it, which is what a dry run on a fork wants.
 ``notes_url``.
 
 Images whose service has a ``build:`` section are not in the manifest:
-compose builds them from the checkout the release pins.
+compose builds them from the checkout the release pins. Nor are the images
+of apps that update from the registry (``updates: registry`` in
+server/config/apps_index.yml): each is released by its own repository, and
+the update runner moves a site to its releases on their own
+(docs/design/app-updates-from-registry.md). A release that pinned one would
+claim a version the site may already have left.
 """
 
 from __future__ import annotations
@@ -213,12 +218,31 @@ def alembic_head(versions_dir: Path) -> str:
     return alembic_graph(versions_dir)[0]
 
 
+def registry_updated() -> set[str]:
+    """The repositories of the release's apps that update from the registry.
+    A malformed entry stops the release: sites would refuse to update it."""
+    path = SOURCE / "server" / "config" / "apps_index.yml"
+    if not path.is_file():
+        return set()  # a tag from before the app catalog
+    from updater import apps
+
+    found, problems = apps.load_sources(path)
+    if problems:
+        raise SystemExit("apps_index.yml: " + "; ".join(problems))
+    return {s.repository for s in found}
+
+
 def release_images(env_pins: dict[str, str]) -> tuple[list[str], dict[str, str]]:
     """Every pulled image ref of the release (resolved), and the pins used."""
+    from updater.apps import split_ref
+
     refs, buildable = pins_lib.collect_image_refs()
+    own_releases = registry_updated()
     out, used = [], {}
     for raw in refs:
         if raw in buildable:
+            continue
+        if split_ref(pins_lib.substitute(raw, env_pins))[0] in own_releases:
             continue
         for name in re.findall(r"\$\{([A-Z0-9_]+)", raw):
             if name.endswith("_TAG") and env_pins.get(name):

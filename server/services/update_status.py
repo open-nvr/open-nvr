@@ -136,7 +136,132 @@ def status(installed_version: str, installed_commit: str | None, *, now: datetim
                             "requested_at": pending.get("REQUESTED_AT")}
         if pending.get("ID") and pending.get("ID") != done else None,
         "connected": STATE_DIR.is_dir() and REQUEST_DIR.is_dir(),
+        "apps": apps_status(),
     }
+
+
+def _json(path: Path) -> dict:
+    import json
+
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _tail(path: Path, chars: int = 4000) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")[-chars:] if path.is_file() else ""
+
+
+def app_reports() -> dict[str, dict]:
+    """The host's last app check (``apps.json``, updater/apps.py), by app id.
+    Empty before the first check, on a site without the runner, or when the
+    file cannot be read."""
+    out = {}
+    for report in _json(STATE_DIR / "apps.json").get("apps") or []:
+        if isinstance(report, dict) and isinstance(report.get("id"), str):
+            out[report["id"]] = report
+    return out
+
+
+def app_offer(report: dict) -> dict | None:
+    """The newest release *report* offers, as the app shows it: with what the
+    host's cosign check said, and whether it was rolled back here before."""
+    offers = [o for o in report.get("offers") or [] if isinstance(o, dict)]
+    if not offers:
+        return None
+    newest = offers[0]  # updater/apps.py sorts them newest first
+    verified = _json(STATE_DIR / "apps-verified.json").get(f"{report.get('id')}@{newest.get('digest')}")
+    failed = STATE_DIR / "apps-failed.txt"
+    failed_before = failed.is_file() and f"{report.get('id')} {newest.get('version')}" in {
+        line.strip() for line in failed.read_text(encoding="utf-8", errors="replace").splitlines()}
+    return {
+        "version": newest.get("version"),
+        "kind": newest.get("kind"),
+        "rollback": newest.get("rollback", "safe"),
+        "signature": "unchecked" if not isinstance(verified, dict) else "ok" if verified.get("ok") else "failed",
+        "signature_message": verified.get("message", "") if isinstance(verified, dict) else "",
+        "failed_before": failed_before,
+    }
+
+
+def apps_status() -> dict:
+    """App releases from the registry, as the host runner left them
+    (scripts/update-host.*, "apps from the registry")."""
+    doc = _json(STATE_DIR / "apps.json")
+    apps = []
+    for report in app_reports().values():
+        apps.append({
+            "id": report["id"],
+            "state": report.get("state"),
+            "reason": report.get("reason", ""),
+            "installed_version": report.get("installed_version") or None,
+            "installed_revoked": report.get("installed_revoked") or None,
+            "available": app_offer(report),
+            "skipped": [s for s in report.get("skipped") or [] if isinstance(s, str)],
+        })
+
+    check = _kv_last(STATE_DIR / "apps-check.env")
+    last_check = None
+    if check:
+        ok = check.get("CODE") == "0"
+        last_check = {"at": doc.get("checked_at"), "ok": ok,
+                      "message": "" if ok else _tail(STATE_DIR / "apps-check.log")}
+
+    run = None
+    state = _kv_last(STATE_DIR / "apps-state.env")
+    if state.get("STEP"):
+        run = {"app": state.get("APP_ID"), "from": state.get("FROM_VERSION"), "to": state.get("VERSION"),
+               "step": state["STEP"], "started": state.get("STARTED"), "finished": state.get("FINISHED"),
+               "in_progress": state["STEP"] not in FINISHED_STEPS}
+        if run["step"] in FINISHED_STEPS - {"succeeded"}:
+            run["message"] = _tail(STATE_DIR / "apps-up.log")
+
+    history = []
+    log = STATE_DIR / "apps-history.log"
+    if log.is_file():
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]:
+            parts = line.split()
+            if len(parts) >= 5:
+                history.append({"finished": parts[0], "app": parts[1], "from": parts[2], "to": parts[3],
+                                "result": parts[4]})
+    history.reverse()
+
+    pending = _kv_last(REQUEST_DIR / "app-request.env")
+    done = (STATE_DIR / "last-app-request").read_text(encoding="utf-8").strip() \
+        if (STATE_DIR / "last-app-request").is_file() else ""
+    return {
+        "apps": sorted(apps, key=lambda a: a["id"]),
+        "problems": [p for p in doc.get("problems") or [] if isinstance(p, str)],
+        "last_check": last_check,
+        "run": run,
+        "history": history,
+        "pending_request": {"app": pending.get("APP"), "requested_by": pending.get("REQUESTED_BY"),
+                            "requested_at": pending.get("REQUESTED_AT")}
+        if pending.get("ID") and pending.get("ID") != done else None,
+    }
+
+
+def request_app_update(app_id: str, username: str) -> str:
+    """Ask the host runner to install *app_id*'s newest release now (it checks
+    again, and still verifies the signature); returns the request id."""
+    REQUEST_DIR.mkdir(parents=True, exist_ok=True)
+    rid = uuid.uuid4().hex
+    tmp = REQUEST_DIR / "app-request.env.tmp"
+    envfile.write_kv(tmp, {"ID": rid, "ACTION": "app-update", "APP": app_id,
+                           "REQUESTED_BY": _token(username),
+                           "REQUESTED_AT": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    tmp.replace(REQUEST_DIR / "app-request.env")
+    return rid
+
+
+def cancel_app_request() -> bool:
+    try:
+        (REQUEST_DIR / "app-request.env").unlink()
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def request_update(version: str, username: str) -> str:
@@ -163,7 +288,15 @@ def write_policy(policy: dict) -> None:
     """Mirror the policy for the host runner (the database holds the original)."""
     REQUEST_DIR.mkdir(parents=True, exist_ok=True)
     tmp = REQUEST_DIR / "policy.env.tmp"
-    envfile.write_kv(tmp, {k.upper(): _token(str(v)) for k, v in policy.items()})
+    values = {}
+    for key, value in policy.items():
+        if key == "app_modes":
+            # One line per app, as updater/policy.py reads them: APP_<ID>_MODE.
+            for app_id, mode in (value or {}).items():
+                values[f"APP_{app_id.upper().replace('-', '_')}_MODE"] = _token(str(mode))
+        elif value != "":  # "" = follow the release setting: left out
+            values[key.upper()] = _token(str(value))
+    envfile.write_kv(tmp, values)
     tmp.replace(REQUEST_DIR / "policy.env")
 
 

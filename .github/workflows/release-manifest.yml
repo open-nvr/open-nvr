@@ -124,7 +124,7 @@ jobs:
           RELEASE_SIGNING_KEY_ID: ${{ vars.RELEASE_SIGNING_KEY_ID }}
         run: |
           set -euo pipefail
-          pip install --quiet "cryptography>=46"
+          pip install --quiet "cryptography>=46" "PyYAML>=6.0.3"
           version="${TAG#v}"
           extra=()
           [ -f "release-src/release/${version}.json" ] && extra=(--extra "release-src/release/${version}.json")
@@ -210,7 +210,7 @@ jobs:
           RELEASE_SIGNING_KEY_ID: ${{ vars.RELEASE_SIGNING_KEY_ID }}
         run: |
           set -euo pipefail
-          pip install --quiet "cryptography>=46"
+          pip install --quiet "cryptography>=46" "PyYAML>=6.0.3"
           base=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' server/main.py)
           IFS=. read -r major minor patch <<< "${base%%-*}"
           version="${major}.${minor}.$((patch + 1))-edge.${{ github.run_number }}"
