@@ -9,7 +9,15 @@ BASE_COMPOSE="docker-compose.yml"
 #   install     — fresh setup; fill missing values, keep existing ones.
 #   reconfigure — editing an existing install; re-prompt values with the
 #                 current value as the default (Enter keeps, typing changes).
-MODE="${1:-install}"
+# --install-docker answers yes to the offer to install Docker (unattended
+# provisioning); OPENNVR_INSTALL_DOCKER=1 does the same and =0 never offers.
+MODE="install"
+for arg in "$@"; do
+    case "$arg" in
+        --install-docker) OPENNVR_INSTALL_DOCKER=1 ;;
+        *) MODE="$arg" ;;
+    esac
+done
 cd "$PROJECT_ROOT"
 
 if [[ ! -t 0 ]]; then
@@ -239,8 +247,168 @@ detect_timezone() {
     printf '%s' "${tz:-UTC}"
 }
 
+# ── Docker is not installed ───────────────────────────────
+# Which of Docker's two documented installs fits this host:
+#   apt:<distro>/<codename>  Docker's apt repository (Debian, Ubuntu, and a
+#                            derivative such as Mint or 64-bit Raspberry Pi
+#                            OS under its parent's name and codename)
+#   script                   Docker's convenience script, https://get.docker.com,
+#                            which knows every distribution Docker supports
+# Neither the snap (it cannot bind-mount this folder) nor the distribution's
+# own docker.io / docker-compose-v2 (docs/REFERENCE_APPLIANCE.md: Ubuntu
+# 24.04's leaves new containers off a network) is ever chosen.
+# OPENNVR_DOCKER_INSTALL=script forces the script (a release too new for the
+# repository). OPENNVR_OS_RELEASE names another os-release file (tests).
+docker_install_method() {
+    local file="${OPENNVR_OS_RELEASE:-/etc/os-release}" id="" id_like="" codename="" ubuntu_codename=""
+    if [[ "${OPENNVR_DOCKER_INSTALL:-}" == "script" ]]; then printf 'script'; return; fi
+    if [[ -r "$file" ]]; then
+        id=$(sed -n 's/^ID=//p' "$file" | tr -d '"')
+        id_like=$(sed -n 's/^ID_LIKE=//p' "$file" | tr -d '"')
+        codename=$(sed -n 's/^VERSION_CODENAME=//p' "$file" | tr -d '"')
+        ubuntu_codename=$(sed -n 's/^UBUNTU_CODENAME=//p' "$file" | tr -d '"')
+    fi
+    if command -v apt-get >/dev/null 2>&1 && command -v dpkg >/dev/null 2>&1 && [[ "$id" != "raspbian" ]]; then
+        case " $id $id_like " in
+            *" ubuntu "*)
+                if [[ -n "${ubuntu_codename:-$codename}" ]]; then printf 'apt:ubuntu/%s' "${ubuntu_codename:-$codename}"; return; fi ;;
+            *" debian "*)
+                if [[ -n "$codename" ]]; then printf 'apt:debian/%s' "$codename"; return; fi ;;
+        esac
+    fi
+    printf 'script'
+}
+
+# Docker's own page for the chosen method.
+docker_docs_url() {
+    case "${DOCKER_INSTALL_METHOD:-}" in
+        apt:ubuntu/*) printf 'https://docs.docker.com/engine/install/ubuntu/' ;;
+        apt:debian/*) printf 'https://docs.docker.com/engine/install/debian/' ;;
+        *)            printf 'https://docs.docker.com/engine/install/' ;;
+    esac
+}
+
+# A step of the Docker install failed. Its own error is already on the
+# screen; this says which step, the usual causes, and every way out.
+docker_install_failed() {
+    local step="$1" user
+    user=$(id -un)
+    printf '\n' >&2
+    die "$(printf 'Installing Docker failed at:  %s\n' "$step"
+           printf '      The error above is that command'"'"'s own. The usual causes: no route to\n'
+           printf '      download.docker.com (offline host, a proxy to configure), a refused sudo\n'
+           printf '      password, or a distribution release Docker has no packages for yet.\n'
+           printf '      → Fix the cause and run ./start.sh again; every step is safe to repeat.\n'
+           if [[ "${DOCKER_INSTALL_METHOD:-}" == apt:* ]]; then
+               printf '      → A release too new for Docker'"'"'s repository: OPENNVR_DOCKER_INSTALL=script ./start.sh\n'
+               printf '        installs with Docker'"'"'s convenience script instead.\n'
+           fi
+           printf '      → Or install Docker by hand: %s\n' "$(docker_docs_url)"
+           printf '        then  sudo usermod -aG docker %s  , log out and back in, and run ./start.sh.\n' "$user"
+           if [[ "${DOCKER_INSTALL_METHOD:-}" == apt:* ]]; then
+               printf '      Left on this host: /etc/apt/keyrings/docker.asc and /etc/apt/sources.list.d/docker.list.\n'
+               printf '        They are Docker'"'"'s repository and key, harmless to keep; remove both with sudo rm\n'
+               printf '        and run  sudo apt-get update  to undo them.'
+           else
+               printf '      Nothing was left on this host.'
+           fi)"
+}
+
+# Prints the command, then runs it, through sudo unless already root. A
+# failure ends the installer through docker_install_failed.
+SUDO="sudo"
+DOCKER_INSTALL_METHOD=""
+elevated() {
+    info "  \$ ${SUDO:+$SUDO }$*"
+    ${SUDO} "$@" && return 0
+    docker_install_failed "${SUDO:+$SUDO }$*"
+}
+
+# On Linux the installer offers to put Docker there itself, with Docker's
+# own documented steps, one sudo command at a time and each printed before
+# it runs. Afterwards the service is enabled, the user joins the docker
+# group, and the installer re-runs itself under that group (sg), so there is
+# no logging out before the install can go on. macOS gets the Docker Desktop
+# link: it has a licence prompt and a first run of its own.
+install_docker_or_die() {
+    local user manual
+    user=$(id -un)
+    if [[ "$PLATFORM" != "Linux" ]]; then
+        die "$(printf 'Docker is not installed.\n'
+              printf '      → Install Docker Desktop (https://docs.docker.com/desktop/setup/install/mac-install/), start it, then re-run.')"
+    fi
+    DOCKER_INSTALL_METHOD=$(docker_install_method)
+    manual=$(printf 'Install Docker Engine from its repository, not a snap (%s),\n' "$(docker_docs_url)"
+             printf '        then  sudo usermod -aG docker %s  , log out and back in, and re-run.' "$user")
+    case "${OPENNVR_INSTALL_DOCKER:-}" in
+        0|no|off) die "$(printf 'Docker is not installed.\n      → %s' "$manual")" ;;
+    esac
+    if [[ "$(id -u)" == "0" ]]; then
+        SUDO=""
+    elif ! command -v sudo >/dev/null 2>&1; then
+        die "$(printf 'Docker is not installed, and there is no sudo here to install it with.\n      → %s' "$manual")"
+    fi
+    warn "Docker is not installed."
+    info "The installer can install it now, with Docker's official steps${SUDO:+ (each one through sudo)}:"
+    case "$DOCKER_INSTALL_METHOD" in
+        apt:*) info "  Docker's apt repository for ${DOCKER_INSTALL_METHOD#apt:}: docker-ce, containerd, buildx, docker-compose-plugin" ;;
+        *)     info "  Docker's convenience script, https://get.docker.com" ;;
+    esac
+    [[ -n "$SUDO" ]] && info "  then enable the service, add ${user} to the docker group and continue as that group"
+    if [[ "${OPENNVR_INSTALL_DOCKER:-}" == "1" ]]; then
+        info "Installing without asking (--install-docker / OPENNVR_INSTALL_DOCKER=1)."
+    elif ! ask_yes_no "Install Docker now?" y; then
+        die "$(printf 'Docker is needed before anything else can happen.\n      → %s' "$manual")"
+    fi
+    case "$DOCKER_INSTALL_METHOD" in
+        apt:*)
+            local distro codename arch
+            distro="${DOCKER_INSTALL_METHOD#apt:}"; distro="${distro%%/*}"; codename="${DOCKER_INSTALL_METHOD##*/}"
+            arch=$(dpkg --print-architecture)
+            elevated apt-get update -qq
+            elevated apt-get install -y -qq ca-certificates curl
+            elevated install -m 0755 -d /etc/apt/keyrings
+            elevated curl --proto '=https' --tlsv1.2 -fsSL "https://download.docker.com/linux/${distro}/gpg" -o /etc/apt/keyrings/docker.asc
+            elevated chmod a+r /etc/apt/keyrings/docker.asc
+            info "  \$ ${SUDO:+$SUDO }tee /etc/apt/sources.list.d/docker.list"
+            printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
+                "$arch" "$distro" "$codename" | ${SUDO} tee /etc/apt/sources.list.d/docker.list >/dev/null \
+                || docker_install_failed "${SUDO:+$SUDO }tee /etc/apt/sources.list.d/docker.list"
+            elevated apt-get update -qq
+            elevated apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ;;
+        *)
+            local tmp
+            tmp=$(mktemp "${TMPDIR:-/tmp}/get-docker.XXXXXX.sh")
+            info "  \$ curl -fsSL https://get.docker.com -o ${tmp}"
+            curl --proto '=https' --tlsv1.2 -fsSL https://get.docker.com -o "$tmp" \
+                || docker_install_failed "curl https://get.docker.com"
+            elevated sh "$tmp"
+            rm -f "$tmp" ;;
+    esac
+    hash -r
+    command -v docker >/dev/null 2>&1 || die "Docker was installed, but 'docker' is not on PATH. Open a new shell, then re-run."
+    if command -v systemctl >/dev/null 2>&1; then
+        elevated systemctl enable --now docker
+    fi
+    ok "Docker installed"
+    if [[ -n "$SUDO" ]]; then
+        elevated usermod -aG docker "$user"
+        ok "${user} is in the docker group (every new shell has it; log out and back in once)"
+        if ! command -v sg >/dev/null 2>&1; then
+            info "Log out and back in (the group takes effect), then run ./start.sh again."
+            exit 0
+        fi
+        info "Continuing the installer as the docker group ..."
+        printf '\n'
+        local cmd
+        cmd=$(printf '%q ' bash "${BASH_SOURCE[0]}" "$MODE")
+        exec sg docker -c "${cmd% }" \
+            || die "Could not continue as the docker group. Log out and back in, then run ./start.sh again."
+    fi
+}
+
 check_prerequisites() {
-    command -v docker >/dev/null 2>&1 || die "Docker is not installed. Install Docker, then re-run."
+    command -v docker >/dev/null 2>&1 || install_docker_or_die
     docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required. Update Docker and re-run."
     local reason owner
     reason=$(docker_unavailable_reason) && die "$reason"
@@ -253,7 +421,7 @@ check_prerequisites() {
         owner=$(ls -ld "$PROJECT_ROOT" 2>/dev/null | awk '{print $3}')
         die "$(printf '%s is not writable by %s (it belongs to %s).\n' "$PROJECT_ROOT" "$(id -un)" "${owner:-another user}"
               printf '      → Give the checkout to the user who runs OpenNVR, then re-run:\n'
-              printf '          sudo chown -R %s:%s "%s"' "$(id -un)" "$(id -gn)" "$PROJECT_ROOT")"
+              printf '          sudo chown -R %s:%s "%s"' "$(id -un)" "$(id -gn "$(id -un)")" "$PROJECT_ROOT")"
     fi
 }
 
