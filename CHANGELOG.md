@@ -111,6 +111,20 @@ Setup, updates and apps without hand edits. `./start.sh uninstall` gives a clean
 
 ### Added
 
+- **The Linux installer installs Docker.** `./start.sh` on a host without
+  Docker used to stop at "Docker is not installed". It now offers to
+  install it with Docker's own steps, each printed and run through sudo:
+  Docker's apt repository on Debian, Ubuntu and their derivatives (never
+  the snap or the distribution's `docker-compose-v2`), Docker's
+  convenience script elsewhere. It then enables the service, adds the
+  user to the docker group and carries on under that group, so the first
+  run goes from a bare machine to a running OpenNVR without logging out.
+  `--install-docker` or `OPENNVR_INSTALL_DOCKER=1` answers yes for
+  unattended provisioning; `OPENNVR_INSTALL_DOCKER=0` never offers. macOS
+  gets the Docker Desktop link. A step that fails names itself, the usual
+  causes, Docker's install page for that distribution, the by-hand route
+  and what it left on the host; `OPENNVR_DOCKER_INSTALL=script` forces the
+  convenience script for a release the repository does not carry yet.
 - **An app can ask what is on a camera now without calling a model.**
   `OpenNVR.description(camera, max_age_s=30, prefer_store=False)` (and
   its async twin) reads core's one shared live description

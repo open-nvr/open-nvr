@@ -101,7 +101,7 @@ Two Apache-2.0 SDKs: an app is your rule on the platform's events, an adapter is
 
 ## ⚡ Get it running
 
-Two commands. You need [Docker](https://docs.docker.com/get-docker/), nothing else. No account, no API key, no cloud.
+Two commands. You need [Docker](https://docs.docker.com/get-docker/), nothing else (on Linux the installer offers to install it). No account, no API key, no cloud.
 
 ```bash
 git clone https://github.com/open-nvr/open-nvr.git && cd open-nvr

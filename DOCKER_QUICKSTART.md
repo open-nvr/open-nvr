@@ -5,7 +5,9 @@ Five minutes from `git clone` to YOLOv8 detection running on your camera feed, u
 ## Prerequisites
 
 - **Docker Engine 24+** with Compose v2 (Linux) or **Docker Desktop**
-  (macOS / Windows).
+  (macOS / Windows). On a Linux host without Docker, `./start.sh` offers to
+  install it from Docker's own repository (`--install-docker` or
+  `OPENNVR_INSTALL_DOCKER=1` says yes unattended).
 - **x86-64 (amd64) or ARM64.** `opennvr-core`, `detect-pipeline`,
   `camera-agent` and `yolov8-weights` publish both. The AI adapter images
   (`yolov8-adapter`, `moondream-adapter`, `whisper-adapter`,
