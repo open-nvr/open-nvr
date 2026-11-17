@@ -9,6 +9,9 @@
   and how big an automatic update may be. Needs ``system.update``.
 * ``POST /system/update/request`` — install the update the host found.
   ``DELETE`` withdraws it until the runner picks it up. ``system.update``.
+* ``POST /system/update/apps/{id}/request`` — install an app's newest
+  release from the registry now; ``DELETE /system/update/apps/request``
+  withdraws it. ``system.update``. ``GET`` carries the apps under ``apps``.
 
 The host does the work (services/update_status.py explains the hand-off).
 These are not the OS updates of routers/firmware.py.
@@ -39,6 +42,7 @@ _update = RequirePermission("system.update")
 POLICY_KEY = "opennvr_update_policy"
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_APP_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 class UpdatePolicy(BaseModel):
@@ -53,6 +57,24 @@ class UpdatePolicy(BaseModel):
     window_days: str = "mon,tue,wed,thu,fri,sat,sun"
     window_start: str = "02:00"
     window_end: str = "04:00"
+    #: Apps released from the registry (docs/design/app-updates-from-registry.md).
+    #: "" = the same as ``mode`` / ``auto_scope`` above; ``app_modes`` sets
+    #: one app's mode over both. Same window; a shorter per-site delay.
+    apps_mode: Literal["", "off", "notify", "manual", "auto"] = ""
+    apps_auto_scope: Literal["", "patch", "minor"] = ""
+    app_modes: dict[str, Literal["off", "notify", "manual", "auto"]] = {}
+
+    @field_validator("app_modes")
+    @classmethod
+    def _app_ids(cls, v: dict[str, str]) -> dict[str, str]:
+        if len(v) > 100 or any(not _APP_ID.match(k) for k in v):
+            raise ValueError("app_modes is {app id: mode}, app ids in kebab-case")
+        return dict(sorted(v.items()))
+
+    def app_mode(self, app_id: str) -> str:
+        """This app's mode: its own, else the apps mode, else the release mode
+        (the same order as updater/policy.py)."""
+        return self.app_modes.get(app_id) or self.apps_mode or self.mode
 
     @field_validator("window_days")
     @classmethod
@@ -150,4 +172,46 @@ async def cancel_update_request(request: Request, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="No update is waiting to start.")
     audit_request(db, request, action="system.update_cancel", user_id=current_user.id,
                   entity_type="system", entity_id=None, details={})
+    return {"cancelled": True}
+
+
+@router.post("/apps/{app_id}/request", status_code=202)
+async def request_app_update(app_id: str, request: Request, db: Session = Depends(get_db),
+                             current_user: User = Depends(_update)):
+    """Install this app's newest release now (Update now). The host checks
+    again and verifies the signature itself; this only asks."""
+    if not _APP_ID.match(app_id):
+        raise HTTPException(status_code=404, detail="No such app.")
+    mode = _policy(db).app_mode(app_id)
+    if mode not in ("manual", "auto"):
+        raise HTTPException(status_code=409, detail=f"Updates for {app_id} are '{mode}' in the update policy.")
+    version, commit = _installed()
+    now = update_status.status(version, commit)
+    if not now["connected"]:
+        raise HTTPException(status_code=503, detail="This installation has no update folders mounted.")
+    if (now["run"] and now["run"]["in_progress"]) or (now["apps"]["run"] and now["apps"]["run"]["in_progress"]):
+        raise HTTPException(status_code=409, detail="An update is already running.")
+    if now["apps"]["pending_request"]:
+        raise HTTPException(status_code=409, detail="An app update is already requested.")
+    app = next((a for a in now["apps"]["apps"] if a["id"] == app_id), None)
+    if app is None or not app["available"]:
+        raise HTTPException(status_code=409, detail=f"No newer release of {app_id} was found on this site.")
+    if app["available"]["signature"] == "failed":
+        raise HTTPException(status_code=409, detail=f"{app_id} {app['available']['version']}'s signature did not "
+                            f"check out: {app['available']['signature_message']}")
+    rid = update_status.request_app_update(app_id, current_user.username)
+    audit_request(db, request, action="system.app_update_request", user_id=current_user.id,
+                  entity_type="app", entity_id=None,
+                  details={"app": app_id, "from": app["installed_version"], "to": app["available"]["version"],
+                           "request": rid})
+    return {"request": rid, "app": app_id, "to": app["available"]["version"]}
+
+
+@router.delete("/apps/request")
+async def cancel_app_update_request(request: Request, db: Session = Depends(get_db),
+                                    current_user: User = Depends(_update)):
+    if not update_status.cancel_app_request():
+        raise HTTPException(status_code=404, detail="No app update is waiting to start.")
+    audit_request(db, request, action="system.app_update_cancel", user_id=current_user.id,
+                  entity_type="app", entity_id=None, details={})
     return {"cancelled": True}

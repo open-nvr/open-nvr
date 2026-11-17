@@ -92,6 +92,38 @@ def test_the_manifest_covers_every_pulled_image(mk):
     )
 
 
+def test_apps_that_update_from_the_registry_are_left_out(mk, monkeypatch):
+    env = mk.pins_lib.load_env_pins(mk.pins_lib.ENV_EXAMPLE)
+    monkeypatch.setattr(mk, "registry_updated", lambda: set())
+    refs = {i["ref"] for i in mk.build(env["CORE_TAG"], "0" * 40, {}, FakeRegistry())["images"]}
+    attendly = {r for r in refs if r.startswith("ghcr.io/open-nvr/attendly:")}
+    assert attendly  # pulled, so pinned, unless it releases on its own
+    monkeypatch.undo()  # the shipped catalog: Attendly releases on its own
+    reg = FakeRegistry()
+    refs = {i["ref"] for i in mk.build(env["CORE_TAG"], "0" * 40, {}, reg)["images"]}
+    assert not any(r.startswith("ghcr.io/open-nvr/attendly") for r in refs)
+    assert not any("attendly" in r for r in reg.asked)  # not even resolved
+    assert f"ghcr.io/open-nvr/core:{env['CORE_TAG']}" in refs
+
+
+def test_registry_updated_reads_the_releases_own_catalog(mk, monkeypatch, tmp_path):
+    cfg = tmp_path / "server" / "config"
+    cfg.mkdir(parents=True)
+    monkeypatch.setattr(mk, "SOURCE", tmp_path)
+    assert mk.registry_updated() == set()  # a tag from before the catalog
+    (cfg / "apps_index.yml").write_text(
+        "- id: attendly\n  image: ghcr.io/open-nvr/attendly:1.2.0\n  updates: registry\n"
+        "  signing:\n    identity: '^https://github\\.com/open-nvr/x/.+$'\n"
+        "- id: line-crossing\n  image: ghcr.io/open-nvr/line-crossing:latest\n"
+    )
+    assert mk.registry_updated() == {"ghcr.io/open-nvr/attendly"}
+    (cfg / "apps_index.yml").write_text(
+        "- id: attendly\n  image: ghcr.io/open-nvr/attendly:1.2.0\n  updates: registry\n"
+    )
+    with pytest.raises(SystemExit, match=r"signing.identity"):
+        mk.registry_updated()
+
+
 def test_a_release_whose_pin_is_another_version_is_stopped(mk):
     with pytest.raises(SystemExit, match="pins CORE_TAG"):
         mk.build("99.0.0", "0" * 40, {}, FakeRegistry())

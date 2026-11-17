@@ -556,6 +556,18 @@
   # build_context and no source — the image is built and signed by
   # OpenNVR's CI in a private open-nvr repository.
   license: proprietary
+  # Released by that repository, not with OpenNVR: each X.Y.Z tag it
+  # publishes reaches every site through the update runner, with no change
+  # to this file (docs/design/app-updates-from-registry.md). `image` and
+  # `version` above are only what a fresh install starts from. Only that
+  # repository's release workflow, run for a v* tag, may sign a release;
+  # a build of its main branch is never installed. Its list of withdrawn
+  # releases (ghcr.io/open-nvr/attendly:revocations) is signed by that
+  # repository's revocations workflow on main.
+  updates: registry
+  signing:
+    identity: '^https://github\.com/open-nvr/opennvr-pro-apps/\.github/workflows/publish-images\.yml@refs/tags/v[0-9][A-Za-z0-9_.-]*$'
+    revocations_identity: '^https://github\.com/open-nvr/opennvr-pro-apps/\.github/workflows/revocations\.yml@refs/heads/main$'
   requires_tasks: [face_detection, face_recognition]
   requires_adapters: [insightface_attendly]
   emits: [hostel_in, hostel_out, gate_denied, mess_served]

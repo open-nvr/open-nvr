@@ -264,6 +264,73 @@ CI from that source.*
 
 ---
 
+## Apps released from the registry
+
+An app may release on its own, without a change to this repository and
+without an OpenNVR release: its entry says `updates: registry`. Each
+`X.Y.Z` tag its own repository's CI pushes and signs then reaches every
+site through the update runner (`scripts/update-host.sh` /
+`update-host.ps1`, the same timer that installs OpenNVR releases). The
+design is in `docs/design/app-updates-from-registry.md`.
+
+```yaml
+- id: attendly
+  image: ghcr.io/open-nvr/attendly:1.1.0   # what a fresh install starts from
+  updates: registry
+  signing:
+    identity: '^https://github\.com/open-nvr/opennvr-pro-apps/\.github/workflows/publish-images\.yml@refs/tags/v[0-9][A-Za-z0-9_.-]*$'
+```
+
+`scripts/validate_apps_index.py` holds such an entry to three rules:
+
+* **`signing.identity` is required**, never the org-wide default. Every
+  `auto` site installs what that identity signed, so it names the one
+  workflow, in the one repository, on a `v*` tag. A build of the app's
+  main branch is signed from `refs/heads/main` and never matches.
+* **`image` names an `X.Y.Z` release**: the version a new site starts
+  from. The runner moves it on within hours.
+* **no `build_context`**: an app built from this repository is released
+  with it.
+
+What a site does, every few hours: list the image's tags (plain `X.Y.Z`
+only, never `latest`, `main`, `1.2` or `sha-…`), take the newest release
+of each step size it can run (the image label
+`org.opennvr.min_core_version` skips one this core is too old for), check
+its signature with cosign against `signing`, and, when the update policy
+says so, install it: pull, stop the app, back up its writable volumes,
+write `<APP>_IMAGE=<image>@<digest>` into `.env`, start it, wait until it
+is healthy, and put it all back when it is not. A release labelled
+`org.opennvr.rollback=manual` is only installed by hand. The pin in
+`.env` survives restarts and OpenNVR releases, and a release manifest
+never pins these images (`scripts/release/make_manifest.py`).
+
+By hand: `./start.sh update --apps` lists what is available,
+`./start.sh update --apps --app <id>` installs it now (`.\start.ps1` on
+Windows). App updates follow the site's update mode unless
+`APPS_MODE` / `APPS_AUTO_SCOPE` / `APP_<ID>_MODE` in the update policy
+say otherwise; they wait up to 12 hours per site, not 72.
+
+**Withdrawing a release.** The usual fix is a new release: tag a patch,
+and sites on automatic updates take it. When a release must not be
+installed at all, the app's repository publishes a signed list,
+`<image>:revocations`, an OCI artifact holding
+`{"schema": 1, "revoked": [{"version": "1.3.0", "reason": "…"}]}`. Its
+signer is `signing.revocations_identity` in the entry (for Attendly,
+opennvr-pro-apps' `revocations.yml` on `main`). A site checks it with
+cosign before every app check and reads it at the digest cosign checked.
+A withdrawn version is never offered, and a site running one is moved to
+the newest good release, past its update scope. A list that does not
+check out stops that app's updates until it does. An app that names no
+signer for a list, or has not published one, has nothing withdrawn.
+
+**The release gate is the tag.** Pushing `vX.Y.Z` in the app's
+repository ships it to every `auto` site, so that repository restricts
+who may push `v*` tags, and renaming its publish workflow stops every
+site from updating (the check fails, and says so) until the entry here
+names the new one.
+
+---
+
 ## The reconciler
 
 `scripts/app-installer/` — the single privileged, non-network-facing

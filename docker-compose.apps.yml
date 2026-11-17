@@ -1656,6 +1656,11 @@ services:
     # any :latest cached keeps it for ever. Naming the version is what
     # makes an upgrade pull the image this file was written for (1.1.0
     # brings the HTTPS listener the port mapping below points at).
+    #
+    # It is only where a site starts: Attendly releases on its own
+    # (`updates: registry` in apps_index.yml), and the update runner moves
+    # a site on by writing ATTENDLY_IMAGE=<image>@<digest> into .env.
+    # Raising this default is not needed for a new Attendly release.
     image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:1.2.0}
     # Not ${APPS_PULL_POLICY:-build}: `build` with no build section is a
     # compose error. `missing` pulls once, then keeps the local image.

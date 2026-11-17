@@ -162,6 +162,10 @@ class IndexEntry(BaseModel):
     # ghcr.io/open-nvr images — the org's CI signs those; declared
     # ({identity: <regexp>, issuer}) for an image built elsewhere.
     signing: dict[str, str] | None = None
+    # "registry": the app's own repository releases it, and the update
+    # runner moves sites to each release (docs/design/app-updates-from-
+    # registry.md). Absent: it changes with OpenNVR releases.
+    updates: str | None = None
     # Editorial popularity rank, 0-100, set by the maintainers — NOT a
     # measured install count. OpenNVR deployments never phone home (the
     # egress proxy exists precisely so apps cannot), so there is no
@@ -899,7 +903,11 @@ async def get_apps_index(
 
     installed = {row.id: row for row in db.query(InstalledApp).all()}
     from services.hardware_profile import describe, host_profile
+    from services.update_status import app_offer, app_reports
     host = host_profile()
+    # Apps released from the registry: what the host's last check found
+    # (scripts/update-host.*, docs/design/app-updates-from-registry.md).
+    reports = app_reports()
 
     apps: list[dict[str, Any]] = []
     for entry in entries:
@@ -941,6 +949,13 @@ async def get_apps_index(
                 } if entry.install is not None else None,
                 "installed": row is not None,
                 "enabled": bool(row.enabled) if row is not None else None,
+                "updates": entry.updates,
+                # The release this site runs and the newest it may move to
+                # (None until the host has checked this app).
+                "update": {
+                    "installed_version": reports[entry.id].get("installed_version") or None,
+                    "available": app_offer(reports[entry.id]),
+                } if entry.updates == "registry" and entry.id in reports else None,
             }
         )
     return {"apps": apps}

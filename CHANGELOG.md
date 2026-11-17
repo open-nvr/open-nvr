@@ -6,8 +6,31 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Attendly updates itself, without an OpenNVR release.** An app whose
+  catalog entry says `updates: registry` is released by its own
+  repository: each `X.Y.Z` tag that repository's release workflow signs
+  reaches every site through the update runner, with no change here.
+  Every few hours a site looks for newer releases it can run, checks
+  each one's signature with cosign against the one workflow its entry
+  names (a build of the app's main branch never matches), and, when the
+  update policy allows, installs one app at a time: the new image pulled
+  while the old one still runs, the app stopped and its data backed up,
+  the release pinned by digest in `.env`, and everything put back if it
+  does not come up healthy. Apps follow the site's update mode (their own
+  with `APPS_MODE` / `APP_<ID>_MODE`) and spread over 12 hours instead of
+  72. `./start.sh update --apps --app <id>` installs one now. Attendly is
+  the first app released this way; release manifests no longer pin it.
+
 ### Fixed
 
+- **The Windows updater read the wrong compose project when the folder
+  name was not the project's.** It asked Docker through a template whose
+  quotes Windows PowerShell 5.1 does not pass on, so it always fell back
+  to the folder name, and the backup then missed the volumes of a stack
+  started under another name. A standard install (folder `open-nvr`) was
+  not affected.
 - **A face adapter that could never load still looked healthy.** The
   InsightFace adapters' healthcheck only asked for HTTP 200, and their
   /health answers 200 in every state, so Docker called an adapter whose
