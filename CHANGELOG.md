@@ -25,6 +25,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Editing a webcam camera on a Linux server offered the host agent, and
+  switching its source did nothing until core restarted.** The camera edit
+  dialog listed server webcams through the host agent on every OS, so on
+  Linux it asked for `sudo apt install ffmpeg` (MediaMTX brings its own) or
+  for an agent that is not needed there. It now decides as Add Camera does:
+  the webcams MediaMTX serves on Linux, the "webcams are off" notice when
+  they are, the host agent only on Docker Desktop. Saving a webcam camera
+  on another source (a browser tab, a server webcam, one the agent
+  streams) now re-points its MediaMTX path at once: the capture starts or
+  stops, its `-sub` path and the detection sub follow, and a server webcam
+  is checked as on create (enabled, plugged in). The camera list names a
+  Linux server webcam itself instead of asking the agent about it.
+
 - **A server's first USB webcam needed a restart, and a fresh VM was told
   to turn on webcams that were already on.** On a Linux host whose kernel
   had no video4linux yet (no webcam ever plugged in, every VM),

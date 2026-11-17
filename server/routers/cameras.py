@@ -1513,6 +1513,7 @@ async def update_camera(
         before_substream_url = camera.substream_url
         before_username = camera.username
         before_password = camera.password
+        before_source_device = camera.source_device
         old_path_name = _build_stream_name(
             settings.mediamtx_stream_prefix, camera.id, before_ip
         )
@@ -1531,6 +1532,18 @@ async def update_camera(
                 )
                 if _owner is not None:
                     raise HTTPException(status_code=409, detail=_webcam_taken_detail(_owner))
+                # A USB webcam MediaMTX serves itself: the same checks as on
+                # create, or the path would run a capture of nothing forever.
+                _dev = update_fields["source_device"]
+                if _dev != before_source_device:
+                    from services.local_webcams import available as _webcams_available, find_local_webcam, is_local_device
+                    if is_local_device(_dev):
+                        if not _webcams_available():
+                            raise HTTPException(
+                                status_code=422,
+                                detail="USB webcams are not enabled on this server (WEBCAMS=on in .env, Linux only).")
+                        if find_local_webcam(str(_dev)) is None:
+                            raise HTTPException(status_code=422, detail="That webcam is not plugged into this server.")
         elif update_fields.get("source_device"):
             raise HTTPException(
                 status_code=422,
@@ -1649,6 +1662,20 @@ async def update_camera(
             camera.rtsp_url != before_rtsp_url
             or camera.substream_url != before_substream_url
         )
+        # A webcam camera switched to another source (browser tab, a USB
+        # webcam MediaMTX serves, one the host agent streams): its path has
+        # to change with it — the capture command (runOnInit) and the -sub
+        # path come from provisioning_for. Without this the edit was stored
+        # and MediaMTX kept the old path until core restarted. The row's sub
+        # marker follows, as on create, so detection reads the small path.
+        device_changed = is_publisher(camera) and camera.source_device != before_source_device
+        if device_changed:
+            from services.local_webcams import provisioning_for, substream_marker
+            from services.stream_service import substream_name
+            if provisioning_for(camera).get("substream"):
+                camera.substream_url = substream_marker(substream_name(new_path_name))
+            else:
+                camera.substream_url = None
 
         stream_action = None
         stream_warning = None
@@ -1700,7 +1727,7 @@ async def update_camera(
             db.commit()
             db.refresh(camera)
 
-        elif now_active and (stream_changed or path_renamed) and camera.rtsp_url:
+        elif now_active and (((stream_changed or path_renamed) and camera.rtsp_url) or device_changed):
             # The source this camera streams from changed. Unlike the is_active
             # branches below, this is TRANSACTIONAL: push it to MediaMTX first
             # and only commit if it lands, so the database and the media server
@@ -1725,7 +1752,10 @@ async def update_camera(
                     camera.id,
                     camera.ip_address,
                     provision_config,
-                    transport_security=cfg.transport_security if cfg else None,
+                    # A webcam has no source URL for a transport policy to
+                    # judge (its path source is "publisher").
+                    transport_security=(cfg.transport_security
+                                        if cfg and not is_publisher(camera) else None),
                 )
             except TransportPolicyViolation as exc:
                 # Deterministic refusal (rtsps_required camera, plaintext URL).

@@ -47,7 +47,9 @@ import type { IdentityField } from '../lib/cameraIdentity'
 import { formatDuration } from '../lib/time'
 import { stopSession } from '../lib/webcamSessions'
 import { Modal } from '../components/Modal'
-import { HostWebcamPicker, useHostAgent } from '../components/HostWebcamPicker'
+import { useHostAgent } from '../components/HostWebcamPicker'
+import { ServerWebcamPicker } from '../components/ServerWebcamPicker'
+import { isLocalDevice, localDeviceLabel } from '../lib/localWebcams'
 import { describeStream } from '../lib/hostAgent'
 
 // Per-camera capability assignment ("camera 1 does LPR") — slice 1 of
@@ -251,9 +253,11 @@ export function Cameras() {
     [camsQuery.data],
   )
   const total = camsQuery.data?.total ?? 0
-  // USB webcams are streamed by the host agent: its view names their
-  // webcam and says how each stream is doing. Asked only when needed.
-  const hasUsbWebcams = cameras.some((c) => c.source_type === 'publisher' && !!c.source_device)
+  // USB webcams the host agent streams (Docker Desktop): its view names
+  // their webcam and says how each stream is doing. Asked only when needed;
+  // one MediaMTX serves itself (Linux, /dev/v4l/by-id/…) is not the agent's.
+  const hasUsbWebcams = cameras.some((c) => c.source_type === 'publisher'
+    && !!c.source_device && !isLocalDevice(c.source_device))
   const { info: hostAgent } = useHostAgent(hasUsbWebcams && canManageCameras)
   const counts = camsQuery.data?.counts
 
@@ -1446,7 +1450,11 @@ export function Cameras() {
                   </TD>
                   <TD>{activeBadge(c)}</TD>
                   {c.source_type === 'publisher' ? (
-                    c.source_device ? (() => {
+                    c.source_device && isLocalDevice(c.source_device) ? (
+                      <TD className="whitespace-nowrap truncate" title={`USB webcam on the OpenNVR server, captured by its media server (${localDeviceLabel(c.source_device)})`}>
+                        <span className="inline-flex items-center gap-1 text-[var(--text-dim)]"><Webcam size={13} /> Server · {localDeviceLabel(c.source_device)}</span>
+                      </TD>
+                    ) : c.source_device ? (() => {
                       const cam = hostAgent?.webcams.find((w) => w.id === c.source_device)
                       const st = hostAgent?.connected ? hostAgent.streams.find((s) => s.camera_id === c.id) : undefined
                       const label = hostAgent && !hostAgent.connected ? 'Host agent not running' : describeStream(st)
@@ -1578,7 +1586,7 @@ export function Cameras() {
             {editing.source_type === 'publisher' ? (
               editing.source_device ? (
                 <Field label="Webcam on the OpenNVR server">
-                  <HostWebcamPicker
+                  <ServerWebcamPicker
                     value={form.source_device || null}
                     ownCameraId={editing.id}
                     onChange={(id) => setForm({ ...form, source_device: id })}
@@ -1591,7 +1599,7 @@ export function Cameras() {
                     from a browser tab (the Webcam button on its row). To feed it
                     from a USB webcam on the OpenNVR server instead, pick one:
                   </p>
-                  <HostWebcamPicker
+                  <ServerWebcamPicker
                     value={form.source_device || null}
                     ownCameraId={editing.id}
                     onChange={(id) => setForm({ ...form, source_device: id })}
