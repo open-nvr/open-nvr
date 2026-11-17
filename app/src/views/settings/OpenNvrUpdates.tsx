@@ -56,7 +56,8 @@ export function OpenNvrUpdates() {
     // Busy: every 3 s, through the restart. Idle: once a minute.
     refetchInterval: (q) => {
       const s = q.state.data
-      return misses > 0 || s?.run?.in_progress || s?.pending_request ? 3_000 : 60_000
+      const appBusy = s?.apps?.run?.in_progress || s?.apps?.pending_request
+      return misses > 0 || s?.run?.in_progress || s?.pending_request || appBusy ? 3_000 : 60_000
     },
     retry: false,
   })
@@ -114,6 +115,47 @@ export function OpenNvrUpdates() {
       setBusy(false)
     }
   }
+  // Apps released from the registry (docs/design/app-updates-from-registry.md).
+  const apps = s.apps ?? { apps: [], problems: [], last_check: null, run: null, history: [], pending_request: null }
+  const appMode = (id: string) => s.policy.app_modes?.[id] || s.policy.apps_mode || s.policy.mode
+  const appBusy = inProgress || !!s.pending_request || !!apps.run?.in_progress || !!apps.pending_request
+  const requestAppUpdate = async (id: string, version: string) => {
+    const ok = await confirm({
+      title: t('upd.apps.confirmTitle', { app: id, version }),
+      message: t('upd.apps.confirmMessage', { app: id, version }),
+      confirmLabel: t('upd.updateNow'),
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await apiService.requestAppUpdate(id)
+      showSuccess(t('upd.apps.requested', { app: id, version }))
+      qc.invalidateQueries({ queryKey: ['opennvr-update'] })
+    } catch (e) {
+      showError(extractApiError(e, t('upd.requestFailed')))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const cancelApp = async () => {
+    setBusy(true)
+    try {
+      await apiService.cancelAppUpdateRequest()
+      qc.invalidateQueries({ queryKey: ['opennvr-update'] })
+    } catch (e) {
+      showError(extractApiError(e, t('upd.requestFailed')))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const setAppMode = (id: string, mode: string) => {
+    if (!policy) return
+    const modes = { ...(policy.app_modes ?? {}) }
+    if (mode) modes[id] = mode as UpdatePolicy['mode']
+    else delete modes[id]
+    setPolicy({ ...policy, app_modes: modes })
+  }
+
   const savePolicy = async () => {
     if (!policy) return
     setBusy(true)
@@ -223,6 +265,109 @@ export function OpenNvrUpdates() {
         )}
       </section>
 
+      {/* Apps released from the registry */}
+      {apps.apps.length > 0 && (
+        <section className="border border-[var(--border)] bg-[var(--panel-2)] p-3 space-y-3" data-testid="upd-apps">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-semibold">{t('upd.apps.title')}</h3>
+            {apps.last_check?.at && (
+              <span className="ml-auto text-[11px] text-[var(--text-dim)]">{t('upd.lastChecked', { at: fmt.dateTime(apps.last_check.at) })}</span>
+            )}
+          </div>
+          <p className="text-xs text-[var(--text-dim)]">{t('upd.apps.description')}</p>
+
+          {apps.run?.in_progress ? (
+            <Notice tone="info" icon={<RefreshCw size={15} className="animate-spin" />}>
+              <span data-testid="upd-app-progress">{t(`upd.apps.step.${apps.run.step}`, { app: apps.run.app ?? '', from: apps.run.from ?? '', to: apps.run.to ?? '' })}</span>
+            </Notice>
+          ) : apps.pending_request ? (
+            <Notice tone="info" icon={<RefreshCw size={15} />}>
+              <span className="flex-1">{t('upd.apps.pending', { app: apps.pending_request.app, who: apps.pending_request.requested_by })}</span>
+              {canUpdate && <Button size="sm" variant="ghost" onClick={cancelApp} disabled={busy}>{t('upd.cancel')}</Button>}
+            </Notice>
+          ) : null}
+
+          <ul className="divide-y divide-[var(--border)]">
+            {apps.apps.map((a) => {
+              const offer = a.available
+              const mode = appMode(a.id)
+              const mayUpdate = canUpdate && s.connected && !!offer && offer.signature !== 'failed'
+                && (mode === 'manual' || mode === 'auto') && !appBusy
+              return (
+                <li key={a.id} className="py-2 space-y-1" data-testid={`upd-app-${a.id}`}>
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="font-semibold">{a.id}</span>
+                    {a.installed_version && <span className="font-mono text-xs">{a.installed_version}</span>}
+                    {offer ? (
+                      <>
+                        <span className="text-xs">→ <span className="font-mono font-semibold">{offer.version}</span></span>
+                        <Badge variant={offer.kind === 'major' ? 'warning' : 'neutral'}>{t(`upd.apps.kind.${offer.kind}`)}</Badge>
+                        {offer.signature === 'ok' && <Badge variant="success">{t('upd.apps.signed')}</Badge>}
+                        {offer.signature === 'failed' && <Badge variant="destructive" title={offer.signature_message}>{t('upd.apps.signatureFailed')}</Badge>}
+                        {offer.signature === 'unchecked' && <Badge variant="neutral">{t('upd.apps.signatureUnchecked')}</Badge>}
+                        <span className="ml-auto">
+                          <Button variant="primary" size="sm" disabled={!mayUpdate || busy} data-testid={`upd-app-update-${a.id}`}
+                            onClick={() => requestAppUpdate(a.id, offer.version)}
+                            title={!canUpdate ? t('upd.noPermission') : mode === 'off' || mode === 'notify' ? t('upd.apps.modeBlocks', { mode: t(`upd.modeName.${mode}`) }) : undefined}>
+                            <Download size={13} /> {t('upd.updateNow')}
+                          </Button>
+                        </span>
+                      </>
+                    ) : (
+                      <span className="text-xs text-[var(--text-dim)]">{t(`upd.apps.state.${a.state}`, { reason: a.reason })}</span>
+                    )}
+                  </div>
+                  {offer?.signature === 'failed' && (
+                    <p className="text-xs text-[var(--danger)]">{t('upd.apps.signatureFailedLong', { message: offer.signature_message })}</p>
+                  )}
+                  {offer?.failed_before && <p className="text-xs text-[var(--warn)]">{t('upd.apps.failedBefore', { version: offer.version })}</p>}
+                  {offer?.rollback === 'manual' && <p className="text-xs text-[var(--warn)]">{t('upd.apps.noAutoRollback')}</p>}
+                  {offer?.kind === 'major' && <p className="text-[11px] text-[var(--text-dim)]">{t('upd.apps.majorByHand')}</p>}
+                  {a.installed_revoked && <p className="text-xs text-[var(--danger)]">{t('upd.apps.revoked', { reason: a.installed_revoked })}</p>}
+                  {a.skipped.length > 0 && (
+                    <details className="text-[11px] text-[var(--text-dim)]">
+                      <summary className="cursor-pointer">{t('upd.apps.skipped', { count: String(a.skipped.length) })}</summary>
+                      <ul className="list-disc pl-5">{a.skipped.map((x) => <li key={x}>{x}</li>)}</ul>
+                    </details>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+
+          {apps.run && !apps.run.in_progress && apps.run.step !== 'succeeded' && (
+            <Notice tone="warning" icon={<RotateCcw size={15} />}>
+              <span className="flex-1">
+                {t(`upd.apps.lastRun.${apps.run.step}`, { app: apps.run.app ?? '', from: apps.run.from ?? '', to: apps.run.to ?? '' })}
+                {apps.run.message && (
+                  <pre className="mt-1 whitespace-pre-wrap font-mono text-[11px] bg-[var(--panel)] p-2 border border-[var(--border)]">{apps.run.message}</pre>
+                )}
+              </span>
+            </Notice>
+          )}
+          {apps.last_check && !apps.last_check.ok && (
+            <details className="text-xs">
+              <summary className="cursor-pointer text-[var(--text-dim)]">{t('upd.apps.checkFailed')}</summary>
+              <pre className="mt-1 whitespace-pre-wrap font-mono text-[11px] bg-[var(--panel)] p-2 border border-[var(--border)]">{apps.last_check.message}</pre>
+            </details>
+          )}
+          {apps.problems.length > 0 && (
+            <ul className="text-xs text-[var(--warn)] list-disc pl-5">{apps.problems.map((p) => <li key={p}>{p}</li>)}</ul>
+          )}
+          {apps.history.length > 0 && (
+            <ul className="divide-y divide-[var(--border)] text-xs" data-testid="upd-apps-history">
+              {apps.history.slice(0, 5).map((h) => (
+                <li key={`${h.finished}-${h.app}-${h.to}`} className="flex items-center gap-2 py-1.5">
+                  <span className="w-40 text-[var(--text-dim)] tabular-nums">{fmt.dateTime(h.finished)}</span>
+                  <span className="font-mono">{h.app} {h.from} → {h.to}</span>
+                  <Badge variant={RESULT_BADGE[h.result] ?? 'neutral'} className="ml-auto">{t(`upd.outcome.${h.result}`)}</Badge>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+
       {/* Policy */}
       {policy && (
         <section className="border border-[var(--border)] bg-[var(--panel-2)] p-3 space-y-3" data-testid="upd-policy">
@@ -267,6 +412,40 @@ export function OpenNvrUpdates() {
                 </div>
               </fieldset>
             </>
+          )}
+          {apps.apps.length > 0 && (
+            <fieldset className="space-y-2 pt-3 border-t border-[var(--border)]" data-testid="upd-apps-policy">
+              <legend className="text-xs font-medium pt-3">{t('upd.apps.policy')}</legend>
+              <Field label={t('upd.apps.mode')} hint={t('upd.apps.modeHint')}>
+                <Select value={policy.apps_mode ?? ''} disabled={!canUpdate}
+                  onChange={(e) => setPolicy({ ...policy, apps_mode: e.target.value as UpdatePolicy['apps_mode'] })}>
+                  <option value="">{t('upd.apps.same', { mode: t(`upd.modeName.${policy.mode}`) })}</option>
+                  {(['off', 'notify', 'manual', 'auto'] as const).map((m) => <option key={m} value={m}>{t(`upd.modeName.${m}`)}</option>)}
+                </Select>
+              </Field>
+              {(policy.apps_mode || policy.mode) === 'auto' && (
+                <Field label={t('upd.scope')}>
+                  <Select value={policy.apps_auto_scope ?? ''} disabled={!canUpdate}
+                    onChange={(e) => setPolicy({ ...policy, apps_auto_scope: e.target.value as UpdatePolicy['apps_auto_scope'] })}>
+                    <option value="">{t('upd.apps.same', { mode: policy.auto_scope === 'patch' ? t('upd.scopePatch') : t('upd.scopeMinor') })}</option>
+                    <option value="patch">{t('upd.scopePatch')}</option>
+                    <option value="minor">{t('upd.scopeMinor')}</option>
+                  </Select>
+                </Field>
+              )}
+              {apps.apps.map((a) => (
+                <div key={a.id} className="flex items-center gap-2 text-xs">
+                  <span className="w-32 font-medium">{a.id}</span>
+                  <div className="flex-1">
+                    <Select value={policy.app_modes?.[a.id] ?? ''} disabled={!canUpdate} aria-label={t('upd.apps.oneApp', { app: a.id })}
+                      onChange={(e) => setAppMode(a.id, e.target.value)}>
+                      <option value="">{t('upd.apps.sameAsApps')}</option>
+                      {(['off', 'notify', 'manual', 'auto'] as const).map((m) => <option key={m} value={m}>{t(`upd.modeName.${m}`)}</option>)}
+                    </Select>
+                  </div>
+                </div>
+              ))}
+            </fieldset>
           )}
           {canUpdate && (
             <Button variant="primary" size="sm" onClick={savePolicy}

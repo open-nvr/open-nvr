@@ -673,7 +673,8 @@ configure_enrichment_flags() {
     if [[ "$suggested" == "true" && -z "$cur_c" ]]; then
         env_set EVENTS_CAPTION_ENRICHMENT true
         env_set EVENTS_DESCRIPTOR_ENRICHMENT true
-        ok "Visit descriptions (captions + colour/type) ON — ${adapter} on the GPU keeps up with the visit rate"
+        local where="GPU"; [[ "$adapter" == "litertlm" ]] && where="NPU"
+        ok "Visit descriptions (captions + colour/type) ON — ${adapter} on the ${where} keeps up with the visit rate"
         return 0
     fi
     default="n"

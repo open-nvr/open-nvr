@@ -60,6 +60,7 @@ case "$1" in
             esac
         done < "$S/containers"
         ;;
+    stop) ;;
     rm) for a in "${args[@]:1}"; do case "$a" in -*) ;; *) drop "$S/containers" "$a" ;; esac; done ;;
     volume)
         case "$2" in
@@ -396,6 +397,52 @@ out=$(run_sh --yes)
 if [ "$first_ok" = 1 ] && [ ! -f "$SYSTEMD_DIR_TEST/opennvr-update.service" ] && [ ! -f "$SYSTEMD_DIR_TEST/opennvr-update.timer" ] \
    && [ ! -f "$SYSTEMD_DIR_TEST/opennvr-host.service" ] && grep -q 'systemctl disable --now opennvr-host.service' "$STATE/calls.log"; then pass
 else fail "first_ok=$first_ok: $out"; fi
+
+start_test "run_sh: containers are stopped before they are removed (a kill leaves NPU buffers behind)"
+fixture
+untyped
+out=$(run_sh --yes)
+stop_line=$(grep -n '^stop -t 20 ' "$STATE/calls.log" | head -1 | cut -d: -f1)
+rm_line=$(grep -n '^rm -f -v ' "$STATE/calls.log" | head -1 | cut -d: -f1)
+if [ -n "$stop_line" ] && [ -n "$rm_line" ] && [ "$stop_line" -lt "$rm_line" ] \
+   && grep '^stop -t 20 ' "$STATE/calls.log" | grep -q 'opennvr_core' && ! has containers opennvr_core; then pass
+else fail "stop at line '$stop_line', first rm at '$rm_line': $(grep -E '^(stop|rm) ' "$STATE/calls.log" | head -4)"; fi
+
+# The update lock: the runner's once-a-minute check holds it too.
+start_test "run_sh: a busy update runner is waited for, then the uninstall goes on"
+fixture
+untyped
+mkdir -p "$SITE/data/updates/.lock"
+( sleep 3 ) & holder=$!
+echo "$holder" > "$SITE/data/updates/.lock/pid"
+out=$(OPENNVR_UNINSTALL_LOCK_WAIT=20 run_sh --yes)
+wait "$holder" 2>/dev/null || true
+if echo "$out" | grep -q 'update runner is busy' && ! has containers opennvr_core && [ -z "$(neighbours_missing)" ]; then pass
+else fail "$out"; fi
+
+start_test "run_sh: an update still running after the wait changes nothing and names the way out"
+fixture
+untyped
+mkdir -p "$SITE/data/updates/.lock"
+( sleep 30 ) & holder=$!
+echo "$holder" > "$SITE/data/updates/.lock/pid"
+out=$(OPENNVR_UNINSTALL_LOCK_WAIT=2 run_sh --yes); rc=$?
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+if [ "$rc" != 0 ] && echo "$out" | grep -q 'auto-update disable' && echo "$out" | grep -q 'nothing has been changed' && has containers opennvr_core; then pass
+else fail "rc=$rc: $out"; fi
+
+start_test "run_sh: --dry-run does not wait for a busy update runner"
+fixture
+untyped
+mkdir -p "$SITE/data/updates/.lock"
+( sleep 30 ) & holder=$!
+echo "$holder" > "$SITE/data/updates/.lock/pid"
+t0=$(date +%s)
+out=$(OPENNVR_UNINSTALL_LOCK_WAIT=60 run_sh --dry-run); rc=$?
+t1=$(date +%s)
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+if [ "$rc" = 0 ] && [ $((t1 - t0)) -lt 20 ] && echo "$out" | grep -q 'Dry run: nothing changed' && has containers opennvr_core; then pass
+else fail "rc=$rc after $((t1 - t0)) s: $out"; fi
 
 start_test "run_sh: Ollama's drop-in is reported, not removed, and Ollama is not restarted"
 fixture

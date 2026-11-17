@@ -151,8 +151,11 @@ export function addressBarHost(hostname: string | null | undefined): string | nu
  *
  * - The address-bar host on the ICE port (UDP + TCP), on the public ICE port
  *   when that differs, and in single-port mode on the page's own port (TCP).
- * - Every IP in the server's list on the page's port (TCP, single-port mode
- *   only): MediaMTX already advertises those on the ICE port itself.
+ * - Every IP in the server's list (rtc-config: the admin's public address
+ *   resolved, the STUN result, the launcher's LAN seed) on the same ports.
+ *   MediaMTX normally advertises these itself, but a page opened on a domain
+ *   name has no address-bar candidate, and MediaMTX's own list can be stale
+ *   (restarted before core applied it); these candidates cover both.
  */
 export function hostCandidates(opts: {
   pageHost: string | null
@@ -168,20 +171,21 @@ export function hostCandidates(opts: {
     seen.add(key)
     out.push({ ip, port, proto })
   }
-  if (pageHost) {
-    add(pageHost, extras.icePort, 'udp')
-    add(pageHost, extras.icePort, 'tcp')
+  const addHost = (ip: string) => {
+    add(ip, extras.icePort, 'udp')
+    add(ip, extras.icePort, 'tcp')
     if (extras.publicIcePort && extras.publicIcePort !== extras.icePort) {
-      add(pageHost, extras.publicIcePort, 'udp')
-      add(pageHost, extras.publicIcePort, 'tcp')
+      add(ip, extras.publicIcePort, 'udp')
+      add(ip, extras.publicIcePort, 'tcp')
     }
-    if (extras.singlePortWebrtc) add(pageHost, pagePort, 'tcp')
+    if (extras.singlePortWebrtc) add(ip, pagePort, 'tcp')
   }
-  if (extras.singlePortWebrtc) {
-    for (const h of extras.serverHosts) {
-      const ip = addressBarHost(h)
-      if (ip) add(ip, pagePort, 'tcp')
-    }
+  // The page host first: it is proven reachable from this browser, and
+  // each later candidate ranks one lower.
+  if (pageHost) addHost(pageHost)
+  for (const h of extras.serverHosts) {
+    const ip = addressBarHost(h)
+    if (ip && ip !== '127.0.0.1') addHost(ip)
   }
   return out
 }

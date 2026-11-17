@@ -69,7 +69,8 @@ def test_status_reads_the_host(env, host):  # noqa: F811
     assert [h["result"] for h in s["history"]] == ["rolled_back", "succeeded"]  # newest first
     assert s["runner"]["running"] is True and s["connected"] is True
     assert s["policy"] == {"mode": "auto", "channel": "stable", "auto_scope": "minor", "window_days": "mon,tue,wed,thu,fri,sat,sun",
-                           "window_start": "02:00", "window_end": "04:00"}  # the default: nightly, fixes and features
+                           "window_start": "02:00", "window_end": "04:00",  # the default: nightly, fixes and features
+                           "apps_mode": "", "apps_auto_scope": "", "app_modes": {}}  # apps: the same
     assert s["pending_request"] is None
 
 
@@ -206,3 +207,112 @@ def test_a_rolled_back_run_shows_what_the_check_said(env, host):  # noqa: F811
     assert s["run"]["message"].splitlines()[-1] == "  - the database is at migration x, not y"  # the candidate's, not the rollback's
     (state / "state.env").write_text("FROM=0.1.8\nTO=0.1.9\nSTEP=switching\nSTEP=succeeded\n")
     assert "message" not in env.client.get(URL, headers=env.jwt("admin")).json()["run"]
+
+
+# ── apps released from the registry ─────────────────────────────────────
+
+_DIGEST = "sha256:" + "c" * 64
+
+
+def _app_found(state, *, signature="ok", offers=True):
+    """The host's last app check (updater/apps.py) found Attendly 1.3.0."""
+    report = {"id": "attendly", "repository": "ghcr.io/open-nvr/attendly", "image_key": "ATTENDLY_IMAGE",
+              "state": "available" if offers else "up_to_date", "reason": "1.3.0 is available",
+              "installed_ref": "ghcr.io/open-nvr/attendly:1.2.0", "installed_version": "1.2.0",
+              "installed_revoked": "", "skipped": ["2.0.0: needs OpenNVR 0.3.0 (this site runs 0.1.12)"],
+              "signer_identity": "x", "signer_issuer": "https://token.actions.githubusercontent.com",
+              "offers": [{"version": "1.3.0", "kind": "minor", "digest": _DIGEST,
+                          "ref": f"ghcr.io/open-nvr/attendly@{_DIGEST}", "rollback": "safe"}] if offers else []}
+    (state / "apps.json").write_text(json.dumps({"checked_at": "2026-11-16T10:00:00Z", "core_version": "0.1.12",
+                                                 "platform": "linux/amd64", "problems": [], "apps": [report]}))
+    (state / "apps-check.env").write_text("CHECKED_EPOCH=1\nCODE=0\n")
+    if signature:
+        (state / "apps-verified.json").write_text(json.dumps(
+            {f"attendly@{_DIGEST}": {"ok": signature == "ok", "message": "no matching signatures", "at": "x"}}))
+
+
+def test_status_reads_the_apps_the_host_checked(env, host):  # noqa: F811
+    state, _ = host
+    _app_found(state)
+    (state / "apps-state.env").write_text("APP_ID=attendly\nFROM_VERSION=1.1.0\nVERSION=1.2.0\nSTEP=stopping\n"
+                                          "STEP=switching\nSTEP=verifying\nSTEP=rolling_back\nSTEP=rolled_back\n"
+                                          "FINISHED=2026-11-16T09:00:00Z\n")
+    (state / "apps-up.log").write_text("attendly is running unhealthy\n")
+    (state / "apps-history.log").write_text("2026-11-16T09:00:00Z attendly 1.1.0 1.2.0 rolled_back\n"
+                                            "2026-11-16T09:30:00Z attendly 1.1.0 1.2.0 succeeded\n")
+    (state / "apps-failed.txt").write_text("attendly 1.3.0\n")
+    a = env.client.get(URL, headers=env.jwt("admin")).json()["apps"]
+    [app] = a["apps"]
+    assert app["installed_version"] == "1.2.0" and app["state"] == "available"
+    assert app["available"] == {"version": "1.3.0", "kind": "minor", "rollback": "safe", "signature": "ok",
+                                "signature_message": "no matching signatures", "failed_before": True}
+    assert app["skipped"] == ["2.0.0: needs OpenNVR 0.3.0 (this site runs 0.1.12)"]
+    assert a["last_check"] == {"at": "2026-11-16T10:00:00Z", "ok": True, "message": ""}
+    assert a["run"]["step"] == "rolled_back" and a["run"]["in_progress"] is False
+    assert "unhealthy" in a["run"]["message"]
+    assert [h["result"] for h in a["history"]] == ["succeeded", "rolled_back"]  # newest first
+    assert a["pending_request"] is None
+
+
+def test_an_app_update_request_lands_for_the_host_and_is_audited(env, host):  # noqa: F811
+    state, req = host
+    _app_found(state)
+    r = env.client.post(f"{URL}/apps/attendly/request", headers=env.jwt("admin"))
+    assert r.status_code == 202, r.text
+    lines = dict(line.split("=", 1) for line in (req / "app-request.env").read_text().splitlines())
+    assert lines["APP"] == "attendly" and lines["ACTION"] == "app-update" and lines["ID"] == r.json()["request"]
+    assert env.client.get(URL, headers=env.jwt("admin")).json()["apps"]["pending_request"]["app"] == "attendly"
+    r = env.client.post(f"{URL}/apps/attendly/request", headers=env.jwt("admin"))
+    assert r.status_code == 409 and "already requested" in r.json()["detail"]
+    (state / "last-app-request").write_text(lines["ID"] + "\n")  # the runner took it
+    assert env.client.get(URL, headers=env.jwt("admin")).json()["apps"]["pending_request"] is None
+    assert env.client.post(f"{URL}/apps/attendly/request", headers=env.jwt("admin")).status_code == 202
+    assert env.client.delete(f"{URL}/apps/request", headers=env.jwt("admin")).status_code == 200
+    assert env.client.delete(f"{URL}/apps/request", headers=env.jwt("admin")).status_code == 404
+    sess = env.Session()
+    actions = [a for (a,) in sess.query(env.models.AuditLog.action)
+               .filter(env.models.AuditLog.action.like("system.app_update%")).all()]
+    sess.close()
+    assert sorted(actions) == ["system.app_update_cancel", "system.app_update_request", "system.app_update_request"]
+
+
+@pytest.mark.parametrize("setup, policy, app, words", [
+    (lambda s: _app_found(s, offers=False), {}, "attendly", "No newer release"),
+    (lambda s: _app_found(s, signature="failed"), {}, "attendly", "no matching signatures"),
+    (lambda s: _app_found(s), {"app_modes": {"attendly": "notify"}}, "attendly", "'notify'"),
+    (lambda s: _app_found(s), {"apps_mode": "off"}, "attendly", "'off'"),
+    (lambda s: (_app_found(s), (s / "state.env").write_text("STEP=switching\n")), {}, "attendly", "already running"),
+    (lambda s: (_app_found(s), (s / "apps-state.env").write_text("STEP=verifying\n")), {}, "attendly",
+     "already running"),
+    (lambda s: _app_found(s), {}, "gate-watch", "No newer release"),
+])
+def test_app_requests_that_cannot_go_ahead(env, host, setup, policy, app, words):  # noqa: F811
+    setup(host[0])
+    assert _policy(env, mode="auto", **policy).status_code == 200
+    r = env.client.post(f"{URL}/apps/{app}/request", headers=env.jwt("admin"))
+    assert r.status_code == 409 and words in r.json()["detail"], r.text
+    assert not (host[1] / "app-request.env").exists()
+
+
+def test_app_modes_are_validated_and_mirrored_for_the_runner(env, host):  # noqa: F811
+    from updater import envfile
+    from updater.policy import Policy
+
+    r = _policy(env, mode="auto", apps_mode="manual", app_modes={"attendly": "off", "gate-watch": "auto"})
+    assert r.status_code == 200, r.text
+    mirrored = (host[1] / "policy.env").read_text().splitlines()
+    assert "APPS_MODE=manual" in mirrored
+    assert "APP_ATTENDLY_MODE=off" in mirrored and "APP_GATE_WATCH_MODE=auto" in mirrored
+    assert not any(line.startswith(("APP_MODES", "APPS_AUTO_SCOPE")) for line in mirrored)  # "" = follow: left out
+    p = Policy.from_env(envfile.read_env(host[1] / "policy.env"))  # what the runner reads back
+    assert (p.app_mode("attendly"), p.app_mode("gate-watch"), p.app_mode("other")) == ("off", "auto", "manual")
+    for bad in ({"app_modes": {"Not_Kebab": "auto"}}, {"app_modes": {"attendly": "always"}},
+                {"apps_mode": "sometimes"}, {"apps_auto_scope": "major"}):
+        assert _policy(env, mode="auto", **bad).status_code == 422, bad
+
+
+def test_app_requests_need_system_update(env, host):  # noqa: F811
+    _app_found(host[0])
+    assert env.client.post(f"{URL}/apps/attendly/request", headers=env.jwt("vera")).status_code == 403
+    assert env.client.delete(f"{URL}/apps/request", headers=env.jwt("vera")).status_code == 403
+    assert env.client.post(f"{URL}/apps/Not_An_Id/request", headers=env.jwt("admin")).status_code == 404

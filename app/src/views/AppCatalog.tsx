@@ -58,6 +58,7 @@ import { InfoTip } from '../components/ui/InfoTip'
 import { AppHeader } from './apps/AppHeader'
 import { verticalFor } from '../lib/appVerticals'
 import { matchesCatalogFilter, sortCatalog, type CatalogSort } from '../lib/catalogFilter'
+import type { AppOffer } from '../services/updateService'
 
 export type ManifestParam = {
   name: string
@@ -344,6 +345,11 @@ type IndexApp = {
   install?: { compose?: string; command?: string } | null
   installed: boolean
   enabled: boolean | null
+  /** 'registry': released by its own repository, and sites move to each
+   * release by themselves (docs/design/app-updates-from-registry.md). */
+  updates?: 'registry' | null
+  /** What the host's last check found; null until it has checked. */
+  update?: { installed_version: string | null; available: AppOffer | null } | null
 }
 
 type CapabilitiesResp = { kai_c?: Record<string, any>; adapters?: Record<string, Record<string, any>> }
@@ -500,6 +506,23 @@ function useAppIndex() {
     },
     retry: 0,
   })
+}
+
+/** "Update available" on an installed app that releases from the registry,
+ * linking to the Updates page where it is installed (or happens by itself).
+ * Reads the catalog query the page already holds. */
+function AppUpdateBadge({ appId }: { appId: string }) {
+  const { t } = useTranslation()
+  const entry = useAppIndex().data?.find((a) => a.id === appId)
+  const offer = entry?.update?.available
+  if (!offer || offer.signature === 'failed') return null
+  return (
+    <Link to="/settings/updates" data-testid={`app-update-${appId}`}>
+      <Badge variant={offer.kind === 'major' ? 'warning' : 'info'} title={t('upd.apps.cardTitle', { version: offer.version })}>
+        {t('upd.apps.cardBadge', { version: offer.version })}
+      </Badge>
+    </Link>
+  )
 }
 
 // Best-effort like the index: an older backend without /skills (or an
@@ -1957,6 +1980,7 @@ function AppCard({ app, caps, tier0, skill }: { app: RegisteredApp; caps: Capabi
         </Link>
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
+        <AppUpdateBadge appId={app.id} />
         <PricingBadge pricing={app.manifest?.pricing} note={app.manifest?.price_note} />
         {/* enabled/disabled is STATE, not an action — it belongs beside the
             health chip, not pinned with ml-auto to the end of the button

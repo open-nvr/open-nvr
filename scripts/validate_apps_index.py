@@ -459,13 +459,51 @@ def validate_entry(
             issuer = signing.get("issuer", "https://token.actions.githubusercontent.com")
             if not isinstance(issuer, str) or not issuer.startswith("https://"):
                 errors.append(f"{label}: 'signing.issuer' must be an https:// URL")
-            unknown = set(signing) - {"identity", "issuer"}
+            # Who signs an app's list of withdrawn releases (updates: registry).
+            revocations = signing.get("revocations_identity")
+            if revocations is not None:
+                if not isinstance(revocations, str) or not revocations.strip():
+                    errors.append(f"{label}: 'signing.revocations_identity' must be a non-empty regexp")
+                else:
+                    try:
+                        re.compile(revocations)
+                    except re.error as exc:
+                        errors.append(f"{label}: 'signing.revocations_identity' is not a valid regexp ({exc})")
+                if entry.get("updates") != "registry":
+                    errors.append(f"{label}: 'signing.revocations_identity' is only for 'updates: registry'")
+            unknown = set(signing) - {"identity", "issuer", "revocations_identity"}
             if unknown:
                 errors.append(f"{label}: 'signing' has unknown keys {sorted(unknown)}")
     elif not external and image and not image.startswith("ghcr.io/open-nvr/") and entry.get("image_digest"):
         errors.append(
             f"{label}: a pinned image outside ghcr.io/open-nvr needs 'signing: "
             "{identity: <regexp>}' — the installer verifies signatures before install")
+
+    # Releases from the registry (docs/design/app-updates-from-registry.md):
+    # every site moves to each X.Y.Z tag the app's own repository publishes,
+    # with no change here. So the entry must say exactly who may sign one
+    # (the org-wide default would let any open-nvr repository ship it), and
+    # name the release a fresh install starts from.
+    updates = entry.get("updates")
+    if updates is not None:
+        if updates != "registry":
+            errors.append(f"{label}: 'updates' is absent or 'registry' (got {updates!r})")
+        elif external:
+            errors.append(f"{label}: an external listing has no image to update")
+        else:
+            if not (isinstance(signing, dict) and isinstance(signing.get("identity"), str)
+                    and signing["identity"].strip()):
+                errors.append(
+                    f"{label}: 'updates: registry' needs 'signing: {{identity: <regexp>}}' naming "
+                    "the one workflow that publishes its releases")
+            if not re.search(r":\d+\.\d+\.\d+$", image):
+                errors.append(
+                    f"{label}: 'updates: registry' needs an X.Y.Z release in 'image' "
+                    f"(what a fresh install starts from), got {image!r}")
+            if entry.get("build_context"):
+                errors.append(
+                    f"{label}: an app built from this repository ('build_context') is "
+                    "released with it, not from the registry")
 
     # Required fields present + non-empty.
     required = tuple(f for f in REQUIRED_FIELDS

@@ -22,6 +22,8 @@
 #   ./start.sh update --restore DIR   put a backup back (the escape hatch)
 #   ./start.sh update --from-queue    one tick of the runner (the timer runs it)
 #   ./start.sh update --list-images   this site's images (for make-offline-bundle.py)
+#   ./start.sh update --apps [--app ID [--yes]]   app releases from the registry
+#                                     (see "apps from the registry" below)
 #   ./start.sh auto-update enable|disable|status   that timer (asks for sudo
 #                                     on Linux; `up` installs it unless
 #                                     UPDATE_RUNNER=off in .env)
@@ -355,6 +357,338 @@ upd_switch_and_verify() {
     upd_finish
 }
 
+# ── apps from the registry ───────────────────────────────────────────
+#
+# docs/design/app-updates-from-registry.md. An app whose catalog entry says
+# `updates: registry` is released by a tag in its own repository, with no
+# change here. updater/apps.py finds newer releases (apps-check); the host
+# checks each one's signature with cosign (apps-verified); updater/policy.py
+# says when one is due (apps-due). Then one app at a time: pull (no
+# downtime yet), stop it, back up its writable volumes, pin <APP>_IMAGE in
+# .env to the digest, start it, wait until it is healthy. When it is not:
+# stop it, put the volumes and the old .env value back, start it again, and
+# never retry that release by itself (apps-failed.txt).
+#
+#   ./start.sh update --apps                     check now and list what is available
+#   ./start.sh update --apps --app attendly      install its newest release now
+#                                               (asks first; --yes does not)
+
+UPD_APPS_BACKUPS="$UPD_BACKUPS/apps"
+UPD_APPS_KEEP="${OPENNVR_APP_KEEP_BACKUPS:-2}"  # per app
+# The image that checks signatures is itself pinned by digest.
+UPD_COSIGN="ghcr.io/sigstore/cosign/cosign:v2.4.1@sha256:b03690aa52bfe94054187142fba24dc54137650682810633901767d8a3e15b31"
+
+upd_apps_state() {
+    local kv
+    for kv in "$@"; do echo "$kv" >> "$UPD_DIR/apps-state.env"; done
+}
+
+upd_apps_step() { grep -E '^STEP=' "$UPD_DIR/apps-state.env" 2>/dev/null | tail -1 | cut -d= -f2; }
+
+upd_apps_end() {
+    local finished s="$UPD_DIR/apps-state.env"
+    finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    upd_apps_state "STEP=$1" "FINISHED=$finished"
+    echo "$finished $(upd_kv "$s" APP_ID) $(upd_kv "$s" FROM_VERSION) $(upd_kv "$s" VERSION) $1" >> "$UPD_DIR/apps-history.log"
+}
+
+# `<service> <image ref> <version label>` per running container of this
+# project. The container's labels include its image's, so the release label
+# (org.opencontainers.image.version) is read from what actually runs.
+upd_apps_running() {
+    local ids
+    ids=$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT")
+    [ -n "$ids" ] || return 0
+    # shellcheck disable=SC2086
+    docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}} {{.Config.Image}} {{index .Config.Labels "org.opencontainers.image.version"}}' $ids \
+        | sed 's/<no value>//g'
+}
+
+# Each app's list of withdrawn releases (<image>:revocations), checked with
+# cosign against the signer its catalog entry names, then read at the digest
+# cosign checked. A list that does not check out stops that app's updates
+# (apps-check reports it); an app that publishes none has nothing withdrawn.
+upd_apps_revocations() {
+    local id ref identity issuer code err
+    upd_run "" apps-revocations-list </dev/null >/dev/null 2>&1 || return 0
+    [ -s "$UPD_DIR/apps-revocations.txt" ] || return 0
+    while read -r id ref identity issuer; do
+        [ -n "$issuer" ] || continue
+        code=0
+        docker run --rm "$UPD_COSIGN" verify --certificate-oidc-issuer "$issuer" \
+            --certificate-identity-regexp "$identity" "$ref" \
+            > "$UPD_DIR/apps-rev-$id.json" 2> "$UPD_DIR/apps-rev-$id.err" </dev/null || code=$?
+        if [ "$code" = 0 ]; then
+            upd_run "" apps-revocations-record --id "$id" --result ok \
+                --cosign-output "/work/apps-rev-$id.json" </dev/null >/dev/null 2>&1 || true
+        else
+            err=$(grep -v '^\s*$' "$UPD_DIR/apps-rev-$id.err" | tail -1 | cut -c1-300 || true)
+            upd_warn "$id: its list of withdrawn releases did not check out: $err"
+            upd_run "" apps-revocations-record --id "$id" --result failed \
+                --message "${err:-cosign exited $code}" </dev/null >/dev/null 2>&1 || true
+        fi
+    done < "$UPD_DIR/apps-revocations.txt"
+}
+
+upd_apps_check() {
+    upd_apps_running > "$UPD_DIR/apps-running.txt"
+    upd_apps_revocations
+    local code=0 now
+    upd_run "" apps-check --running /work/apps-running.txt --platform "$PLATFORM" \
+        --policy-file /repo/data/update-requests/policy.env </dev/null > "$UPD_DIR/apps-check.log" 2>&1 || code=$?
+    now=$(date +%s)
+    printf 'CHECKED_EPOCH=%s\nCODE=%s\n' "$now" "$code" > "$UPD_DIR/apps-check.env"
+    [ "$code" = 0 ] || { upd_fail "Checking the apps failed; see $UPD_DIR/apps-check.log"; return 1; }
+    upd_apps_verify
+}
+
+# Every release apps-check offered and cosign has not passed yet. A failure
+# (wrong signer, no signature, Sigstore unreachable) is recorded with its
+# reason and tried again on the next check.
+upd_apps_verify() {
+    local id ref identity issuer out code
+    [ -s "$UPD_DIR/apps-verify.txt" ] || return 0
+    while read -r id ref identity issuer; do
+        [ -n "$issuer" ] || continue
+        code=0
+        out=$(docker run --rm "$UPD_COSIGN" verify --certificate-oidc-issuer "$issuer" \
+            --certificate-identity-regexp "$identity" "$ref" 2>&1 >/dev/null </dev/null) || code=$?
+        if [ "$code" = 0 ]; then
+            upd_run "" apps-verified --id "$id" --digest "${ref#*@}" --result ok \
+                --message "cosign verified the signature" </dev/null >/dev/null 2>&1
+        else
+            out=$(printf '%s\n' "$out" | grep -v '^\s*$' | tail -1 | cut -c1-300)
+            upd_warn "$id ${ref#*@}: the signature did not check out: $out"
+            upd_run "" apps-verified --id "$id" --digest "${ref#*@}" --result failed \
+                --message "${out:-cosign exited $code}" </dev/null >/dev/null 2>&1
+        fi
+    done < "$UPD_DIR/apps-verify.txt"
+}
+
+# The app's own writable named volumes, as `<volume> <path>` lines. Read-only
+# mounts (another service's certificates, say) are not the app's to restore.
+upd_apps_volumes() {
+    docker inspect --format '{{range .Mounts}}{{if and (eq .Type "volume") .RW}}{{.Name}} {{.Destination}};{{end}}{{end}}' "$1" \
+        | tr ';' '\n' | { grep -v '^\s*$' || true; }
+}
+
+upd_apps_backup() {
+    local cid="$1" dir="$2" image="$3" name
+    mkdir -p "$dir" && chmod 700 "$dir" || return 1
+    upd_apps_volumes "$cid" > "$dir/volumes.txt" || return 1
+    while read -r name _; do
+        [ -n "$name" ] || continue
+        docker run --rm -v "$name:/v:ro" -v "$PWD/$dir:/b" --entrypoint tar "$image" czf "/b/$name.tgz" -C /v . </dev/null || return 1
+    done < "$dir/volumes.txt"
+    cp .env "$dir/env" || return 1
+    chmod 600 "$dir"/* 2>/dev/null || true
+}
+
+upd_apps_restore() {
+    local dir="$1" image="$2" name
+    while read -r name _; do
+        [ -n "$name" ] && [ -f "$dir/$name.tgz" ] || continue
+        docker run --rm -v "$name:/v" -v "$PWD/$dir:/b:ro" --entrypoint sh "$image" \
+            -c "find /v -mindepth 1 -delete && tar xzf /b/$name.tgz -C /v" </dev/null || return 1
+    done < "$dir/volumes.txt"
+}
+
+# Healthy: the container runs the image $2 names and its healthcheck says
+# healthy; with no healthcheck, still running 30 s later.
+upd_apps_healthy() {
+    local svc="$1" ref="$2" want cid state i up=0
+    want=$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)
+    [ -n "$want" ] || return 1
+    for ((i = 0; i < ${OPENNVR_APP_VERIFY_TIMEOUT:-300}; i += 5)); do
+        cid=$(upd_cid "$svc")
+        if [ -n "$cid" ]; then
+            state=$(docker inspect --format '{{.Image}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || true)
+            [ "${state%% *}" = "$want" ] || { upd_fail "$svc runs another image than $ref"; return 1; }
+            case "${state#* }" in
+                "running healthy") return 0 ;;
+                "running none") up=$((up + 1)); [ "$up" -ge 6 ] && return 0 ;;
+                "running unhealthy"|exited*|dead*) upd_fail "$svc is ${state#* }"; return 1 ;;
+            esac
+        fi
+        sleep 5
+    done
+    upd_fail "$svc was not healthy within ${OPENNVR_APP_VERIFY_TIMEOUT:-300} s"
+    return 1
+}
+
+upd_apps_image() { docker inspect "$(upd_cid opennvr-core)" --format '{{.Config.Image}}' 2>/dev/null || true; }
+
+upd_apps_rollback() {
+    local s="$UPD_DIR/apps-state.env" id key backup from_ref ver
+    id=$(upd_kv "$s" APP_ID); key=$(upd_kv "$s" KEY); backup=$(upd_kv "$s" BACKUP)
+    from_ref=$(upd_kv "$s" FROM_REF); ver=$(upd_kv "$s" VERSION)
+    upd_apps_state STEP=rolling_back
+    echo "$id $ver" >> "$UPD_DIR/apps-failed.txt"
+    upd_warn "Going back to $id $(upd_kv "$s" FROM_VERSION) ..."
+    # shellcheck disable=SC2086
+    docker compose $ARGS stop "$id" >> "$UPD_DIR/apps-up.log" 2>&1 || true
+    write_env_var "$key" "$(cat "$backup/env-value")"
+    ARGS=$(compose_args) || { upd_apps_end failed; return 1; }
+    if ! upd_apps_restore "$backup" "$(upd_apps_image)"; then
+        upd_apps_end failed
+        upd_fail "Could not put $id's data back. Backup: $backup"
+        return 1
+    fi
+    # shellcheck disable=SC2086
+    if ! docker compose $ARGS up -d --no-deps "$id" >> "$UPD_DIR/apps-up.log" 2>&1 || ! upd_apps_healthy "$id" "$from_ref"; then
+        upd_apps_end failed
+        upd_fail "The old $id did not come back healthy either. See $UPD_DIR/apps-up.log; backup: $backup"
+        return 1
+    fi
+    upd_apps_end rolled_back
+    upd_warn "Rolled back: $id runs $(upd_kv "$s" FROM_VERSION) again, with its data."
+}
+
+upd_apps_prune() {
+    local old
+    # shellcheck disable=SC2012
+    old=$(ls -1dt "$UPD_APPS_BACKUPS/$1"-*/ 2>/dev/null | tail -n +"$((UPD_APPS_KEEP + 1))")
+    [ -n "$old" ] || return 0
+    echo "$old" | while read -r d; do rm -rf "$d"; done
+}
+
+upd_apps_apply() {
+    local due="$UPD_DIR/apps-due.env" id key ref ver from from_ref cid backup
+    id=$(upd_kv "$due" APP_ID); key=$(upd_kv "$due" IMAGE_KEY); ref=$(upd_kv "$due" IMAGE_REF)
+    ver=$(upd_kv "$due" VERSION); from=$(upd_kv "$due" FROM_VERSION); from_ref=$(upd_kv "$due" FROM_REF)
+    cid=$(upd_cid "$id")
+    [ -n "$cid" ] || { upd_warn "$id is not running here; nothing to update."; return 0; }
+    # The report is from the last check: if the app was changed since (by
+    # hand, or by an update), it is checked again rather than overwritten.
+    if [ "$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null || true)" != "$from_ref" ]; then
+        upd_say "$id no longer runs $from_ref; checking again."
+        upd_apps_check || true
+        return 0
+    fi
+    upd_say "Updating $id $from -> $ver ..."
+    # 1. The new image onto the host first: the app is still running.
+    docker pull -q "$ref" >/dev/null </dev/null || { upd_fail "Could not pull $ref; nothing changed."; return 1; }
+
+    backup="$UPD_APPS_BACKUPS/$id-$(date +%Y%m%d-%H%M%S)-$from"
+    : > "$UPD_DIR/apps-state.env"
+    upd_apps_state "APP_ID=$id" "KEY=$key" "FROM_VERSION=$from" "VERSION=$ver" "FROM_REF=$from_ref" \
+        "TO_REF=$ref" "BACKUP=$backup" "STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" STEP=stopping
+    : > "$UPD_DIR/apps-up.log"
+    # 2. Stopped before the backup: an app writing SQLite mid-copy leaves a
+    #    backup that cannot be read back.
+    # shellcheck disable=SC2086
+    if ! docker compose $ARGS stop "$id" >> "$UPD_DIR/apps-up.log" 2>&1 \
+       || ! upd_apps_backup "$cid" "$backup" "$(upd_apps_image)"; then
+        # shellcheck disable=SC2086
+        docker compose $ARGS start "$id" >> "$UPD_DIR/apps-up.log" 2>&1 || true
+        upd_apps_end failed
+        upd_fail "The backup of $id failed; it runs $from as before."
+        return 1
+    fi
+    grep -E "^${key}=" .env | head -1 | cut -d= -f2- > "$backup/env-value"
+    # 3. The switch.
+    upd_apps_state STEP=switching
+    write_env_var "$key" "$ref"
+    if ! ARGS=$(compose_args); then upd_apps_rollback; return 1; fi
+    # shellcheck disable=SC2086
+    if ! docker compose $ARGS up -d --no-deps "$id" >> "$UPD_DIR/apps-up.log" 2>&1; then
+        upd_fail "compose up failed for $id"
+        upd_apps_rollback; return 1
+    fi
+    upd_apps_state STEP=verifying
+    upd_apps_healthy "$id" "$ref" || { upd_apps_rollback; return 1; }
+    upd_apps_end succeeded
+    upd_apps_prune "$id"
+    upd_ok "$id $ver is running and healthy."
+}
+
+# An app update interrupted part way (the host rebooted, say) is finished
+# first: kept when the new release runs healthy, else rolled back. One
+# stopped before its backup was complete only needs starting again.
+upd_apps_resume() {
+    local s="$UPD_DIR/apps-state.env" id
+    id=$(upd_kv "$s" APP_ID)
+    case "$(upd_apps_step)" in
+        stopping)
+            upd_warn "An update of $id stopped during its backup; starting it again."
+            # shellcheck disable=SC2086
+            docker compose $ARGS up -d --no-deps "$id" >> "$UPD_DIR/apps-up.log" 2>&1 || true
+            upd_apps_end failed ;;
+        switching|verifying)
+            upd_warn "An update of $id was interrupted; checking it now."
+            if upd_apps_healthy "$id" "$(upd_kv "$s" TO_REF)"; then upd_apps_end succeeded; else upd_apps_rollback; fi ;;
+        rolling_back)
+            upd_warn "A rollback of $id was interrupted; finishing it."
+            upd_apps_rollback ;;
+    esac
+}
+
+upd_apps() {
+    local tick=0 app="" now=0 yes=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --tick) tick=1; shift ;;
+            --app) app="$2"; shift 2 ;;
+            --now) now=1; shift ;;
+            --yes|-y) yes=1; shift ;;
+            *) upd_fail "unknown option for --apps: $1"; exit 1 ;;
+        esac
+    done
+    [ -f .env ] || { upd_fail "No .env here: run this from the OpenNVR folder."; exit 1; }
+    upd_lock
+    PROJECT=$(upd_project)
+    ARGS=$(compose_args) || exit 1
+    PLATFORM=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}') || { upd_fail "Docker is not running."; exit 1; }
+    upd_apps_resume
+
+    local last epoch
+    epoch=$(date +%s)
+    last=$(upd_kv "$UPD_DIR/apps-check.env" CHECKED_EPOCH)
+    if [ "$tick" = 0 ] || [ -z "$last" ] || [ $((epoch - last)) -ge "${OPENNVR_APPS_CHECK_EVERY:-21600}" ]; then
+        # A core from before app updates has no apps-check. Recorded like a
+        # check, so the runner asks again in six hours, not every minute.
+        if ! upd_run "" apps-check --help </dev/null >/dev/null 2>&1; then
+            printf 'CHECKED_EPOCH=%s\nCODE=unsupported\n' "$epoch" > "$UPD_DIR/apps-check.env"
+            [ "$tick" = 1 ] || upd_fail "The running OpenNVR ($(get_env_var CORE_TAG)) predates app updates; update OpenNVR first."
+            return 0
+        fi
+        [ "$tick" = 1 ] || upd_say "Checking the apps for new releases ..."
+        upd_apps_check || return 1
+        [ "$tick" = 1 ] || sed 's/^/  /' "$UPD_DIR/apps-check.log"
+    fi
+    # Nothing on offer: no updater container a minute.
+    grep -q '"state": "available"' "$UPD_DIR/apps.json" 2>/dev/null || return 0
+    [ "$tick" = 1 ] || [ -n "$app" ] || { upd_say "Install one with: ./start.sh update --apps --app <id>"; return 0; }
+    # On offer but perhaps not due for hours (the window, this site's delay,
+    # a major release waiting for a click): asked every five minutes at most.
+    if [ "$tick" = 1 ]; then
+        last=$(upd_kv "$UPD_DIR/apps-due-asked.env" ASKED_EPOCH)
+        [ -z "$last" ] || [ $((epoch - last)) -ge 300 ] || return 0
+        echo "ASKED_EPOCH=$epoch" > "$UPD_DIR/apps-due-asked.env"
+    fi
+
+    local due=(apps-due --policy-file /repo/data/update-requests/policy.env --local-time "$(date +%Y-%m-%dT%H:%M)")
+    [ -n "$app" ] && due+=(--app "$app")
+    [ "$now" = 1 ] || [ "$tick" = 0 ] && due+=(--now)
+    upd_run "" "${due[@]}" </dev/null > "$UPD_DIR/apps-due.log" 2>&1 || {
+        [ "$tick" = 1 ] || sed 's/^/  /' "$UPD_DIR/apps-due.log"
+        return 0
+    }
+    if [ "$tick" = 0 ] && [ "$yes" != 1 ]; then
+        echo ""
+        upd_say "$(upd_kv "$UPD_DIR/apps-due.env" APP_ID) stops for about a minute; its data is backed up first,"
+        upd_say "and if $(upd_kv "$UPD_DIR/apps-due.env" VERSION) does not come up healthy it goes back to $(upd_kv "$UPD_DIR/apps-due.env" FROM_VERSION) with its data."
+        read -rp "  Update $(upd_kv "$UPD_DIR/apps-due.env" APP_ID) now? [y/N]: " answer
+        [[ "$answer" =~ ^[Yy]$ ]] || { upd_say "Nothing changed."; return 0; }
+    fi
+    local code=0
+    upd_apps_apply || code=$?
+    # What runs now is not what the report says: refresh it, or the next
+    # tick would offer the release just installed (or rolled back) again.
+    upd_apps_check >/dev/null 2>&1 || true
+    return "$code"
+}
+
 # ── entry points ─────────────────────────────────────────────────────
 
 upd_restore_cmd() {
@@ -398,20 +732,34 @@ upd_queue() {
         run_update --to "$(upd_kv "$req" TO)" --yes
         return
     fi
+    # Update now for one app, asked for in the app: tried once, like a release.
+    local app_req=data/update-requests/app-request.env app_id
+    app_id=$(upd_kv "$app_req" ID)
+    if [ -n "$app_id" ] && [ "$app_id" != "$(cat "$UPD_DIR/last-app-request" 2>/dev/null || true)" ]; then
+        echo "$app_id" > "$UPD_DIR/last-app-request"
+        ( upd_apps --app "$(upd_kv "$app_req" APP)" --now --yes ) || true
+        return
+    fi
     local mode last now
     mode=$(upd_kv "$policy" MODE)
     mode=${mode:-auto}  # nothing saved yet: the default, install releases by itself
-    [ "$mode" != off ] || return 0
-    last=$(upd_kv "$UPD_DIR/check.env" CHECKED_EPOCH)
-    now=$(date +%s)
-    if [ -z "$last" ] || [ $((now - last)) -ge "${OPENNVR_UPDATE_CHECK_EVERY:-21600}" ]; then
-        ( run_update --dry-run ) || true
+    if [ "$mode" != off ]; then
+        last=$(upd_kv "$UPD_DIR/check.env" CHECKED_EPOCH)
+        now=$(date +%s)
+        if [ -z "$last" ] || [ $((now - last)) -ge "${OPENNVR_UPDATE_CHECK_EVERY:-21600}" ]; then
+            ( run_update --dry-run ) || true
+        fi
+        if [ "$mode" = auto ] && [ "$(upd_kv "$UPD_DIR/check.env" CODE)" = 0 ]; then
+            ARGS=$(compose_args) || return 1
+            if upd_run "" due --policy-file /repo/$policy --local-time "$(date +%Y-%m-%dT%H:%M)"; then
+                run_update --to "$(upd_kv "$UPD_DIR/plan.env" TO_VERSION)" --yes
+                return
+            fi
+        fi
     fi
-    [ "$mode" = auto ] && [ "$(upd_kv "$UPD_DIR/check.env" CODE)" = 0 ] || return 0
-    ARGS=$(compose_args) || return 1
-    if upd_run "" due --policy-file /repo/$policy --local-time "$(date +%Y-%m-%dT%H:%M)"; then
-        run_update --to "$(upd_kv "$UPD_DIR/plan.env" TO_VERSION)" --yes
-    fi
+    # Apps have their own mode (APPS_MODE, APP_<ID>_MODE; by default the
+    # one above), which updater/policy.py applies.
+    ( upd_apps --tick ) || true
 }
 
 UPD_UNIT=/etc/systemd/system/opennvr-update
@@ -545,6 +893,7 @@ run_update() {
             --channel) extra+=(--channel "$2"); shift 2 ;;
             --restore) restore="$2"; shift 2 ;;
             --from-queue) upd_queue; return ;;
+            --apps) shift; upd_apps "$@"; return ;;
             --list-images)
                 # For scripts/make-offline-bundle.py: what this site runs.
                 ARGS=$(compose_args) || exit 1

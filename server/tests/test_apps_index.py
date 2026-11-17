@@ -300,6 +300,8 @@ def test_index_response_shape_matches_contract(client):
         "install",
         "installed",
         "enabled",
+        "updates",
+        "update",
     }
     assert set(app["install"]) == {"compose", "command"}
     assert isinstance(app["requires_tasks"], list)
@@ -334,6 +336,29 @@ def test_index_flips_installed_for_registered_app(client):
             continue
         assert a["installed"] is False
         assert a["enabled"] is None
+
+
+def test_index_says_which_apps_release_on_their_own_and_what_the_host_found(client, tmp_path, monkeypatch):
+    """docs/design/app-updates-from-registry.md: Attendly releases from the
+    registry; its card shows the release this site runs and the newest the
+    host found, from the host's last check (updater/apps.py's apps.json)."""
+    import json
+
+    from services import update_status
+
+    monkeypatch.setattr(update_status, "STATE_DIR", tmp_path)
+    apps = {a["id"]: a for a in client.get("/apps/index").json()["apps"]}
+    assert apps["attendly"]["updates"] == "registry"
+    assert apps["attendly"]["update"] is None  # not checked yet
+    digest = "sha256:" + "c" * 64
+    (tmp_path / "apps.json").write_text(json.dumps({"apps": [{
+        "id": "attendly", "state": "available", "installed_version": "1.2.0",
+        "offers": [{"version": "1.3.0", "kind": "minor", "digest": digest, "rollback": "safe"}]}]}))
+    apps = {a["id"]: a for a in client.get("/apps/index").json()["apps"]}
+    update = apps["attendly"]["update"]
+    assert update["installed_version"] == "1.2.0"
+    assert update["available"]["version"] == "1.3.0" and update["available"]["signature"] == "unchecked"
+    assert all(a["update"] is None and a["updates"] is None for i, a in apps.items() if i != "attendly")
 
 
 def test_index_enabled_tracks_stored_flag(client):

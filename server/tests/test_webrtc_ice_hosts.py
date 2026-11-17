@@ -489,3 +489,104 @@ async def test_saving_null_clears_the_public_address_and_port(db: FakeDB, monkey
     assert out["public_ice_port"] is None
     assert db.webrtc()["public_address"] is None
     assert pushed and "nvr.example.org" not in pushed[-1]
+
+
+# ------------------------------------------------- startup apply + rtc-config
+
+
+@pytest.mark.asyncio
+async def test_startup_apply_retries_until_mediamtx_takes_the_list(db: FakeDB, monkeypatch) -> None:
+    """Core's own startup pushes the list (the MediaMTX hook cannot: compose
+    starts core after MediaMTX, so the hook's request finds no core yet).
+    A MediaMTX still coming up is retried, not given up on."""
+    import contextlib
+
+    from services import webrtc_ice_host_service as mod
+
+    db.set_webrtc(public_address="171.78.153.53", stun_servers=[])
+    calls: list[list[str]] = []
+
+    async def flaky_set(hosts):
+        calls.append(list(hosts))
+        return {"status": "ok"} if len(calls) >= 3 else {"status": "error", "error": "connect refused"}
+
+    @contextlib.contextmanager
+    def fake_session():
+        yield db
+
+    slept: list[float] = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr(MediaMtxAdminService, "set_webrtc_additional_hosts", staticmethod(flaky_set))
+    monkeypatch.setattr("core.database.SessionLocal", fake_session)
+    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+
+    assert await WebRTCIceHostService.apply_on_startup(attempts=5, delay=0.5) is True
+    assert len(calls) == 3 and calls[-1] == ["171.78.153.53"]
+    assert slept == [0.5, 0.5], "waits between failed attempts only"
+
+
+@pytest.mark.asyncio
+async def test_startup_apply_gives_up_loudly_after_the_attempts(db: FakeDB, monkeypatch, caplog) -> None:
+    import contextlib
+    import logging
+
+    from services import webrtc_ice_host_service as mod
+
+    async def never(hosts):
+        raise ConnectionError("mediamtx down")
+
+    @contextlib.contextmanager
+    def fake_session():
+        yield db
+
+    async def fake_sleep(s):
+        pass
+
+    monkeypatch.setattr(MediaMtxAdminService, "set_webrtc_additional_hosts", staticmethod(never))
+    monkeypatch.setattr("core.database.SessionLocal", fake_session)
+    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+
+    with caplog.at_level(logging.WARNING):
+        assert await WebRTCIceHostService.apply_on_startup(attempts=3, delay=0) is False
+    assert "not applied after 3 attempts" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rtc_config_sends_the_resolved_hosts_in_every_mode(db: FakeDB, monkeypatch) -> None:
+    """A page opened on a domain name has no address-bar candidate, so the
+    player relies on this list (on the ICE port) - not only in single-port
+    mode as before."""
+    import types
+
+    from routers import webrtc as webrtc_router
+
+    db.set_webrtc(public_address="nvr.example.org", stun_servers=[])
+    monkeypatch.setattr(settings, "webrtc_single_port", False, raising=False)
+    monkeypatch.setattr(settings, "mediamtx_webrtc_hosts", "192.168.2.51", raising=False)
+
+    async def fake_lookup(cls, host):
+        return ["171.78.153.53"] if host == "nvr.example.org" else []
+
+    monkeypatch.setattr(WebRTCIceHostService, "_lookup", classmethod(fake_lookup))
+    out = await webrtc_router.get_client_rtc_config(db=db, current_user=types.SimpleNamespace(id=1))
+    assert out.serverHosts == ["171.78.153.53", "192.168.2.51"]
+    assert out.singlePortWebrtc is False
+
+
+@pytest.mark.asyncio
+async def test_rtc_config_survives_a_resolver_failure(db: FakeDB, monkeypatch) -> None:
+    import types
+
+    from routers import webrtc as webrtc_router
+
+    db.set_webrtc(stun_servers=[])
+
+    async def boom(cls, db_):
+        raise RuntimeError("dns")
+
+    monkeypatch.setattr(WebRTCIceHostService, "resolved_ips", classmethod(boom))
+    out = await webrtc_router.get_client_rtc_config(db=db, current_user=types.SimpleNamespace(id=1))
+    assert out.serverHosts == []

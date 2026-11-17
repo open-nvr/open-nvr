@@ -246,14 +246,17 @@ async def get_client_rtc_config(
     from services.webrtc_ice_host_service import WebRTCIceHostService
 
     ice_port = int(settings.webrtc_ice_port or 8189)
-    # The server list is only consumed in single-port mode (candidates on the
-    # page's own port); outside it, do not resolve a DNS name on every tile.
-    server_hosts: list[str] = []
-    if settings.webrtc_single_port:
-        try:
-            server_hosts = await WebRTCIceHostService.resolved_ips(db)
-        except Exception:
-            server_hosts = []
+    # Always sent: the player adds these on the ICE port(s) as well as, in
+    # single-port mode, on the page's own port. MediaMTX normally advertises
+    # the same addresses itself, but when the page was opened on a domain
+    # name the address bar yields no candidate, and if MediaMTX's list is
+    # stale (a restart before the apply landed) this is the only way the
+    # browser learns the public address. A DNS name is resolved here, cached
+    # (RESOLVE_CACHE_S), never on every tile.
+    try:
+        server_hosts = await WebRTCIceHostService.resolved_ips(db)
+    except Exception:
+        server_hosts = []
     return WebRTCClientConfig(
         iceServers=ice_servers,
         iceTransportPolicy=settings_obj.transport_policy,

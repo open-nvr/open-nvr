@@ -109,7 +109,9 @@ During a class window the room's worker fetches a frame from core every
 attempt interval (2 min), detects every face, recognises each crop, and
 aggregates who was seen per 10-minute slot. At the end of the class a student
 is PRESENT when seen in at least 60 % of the slots. Timing knobs are
-`ATTENDLY_*` settings in `attendly/config.py`.
+`ATTENDLY_*` settings in `attendly/config.py`; since 1.2.0 an administrator
+can also change them on the app's **Settings** page, and a value set there
+wins over the environment.
 
 Two rules keep the record honest. A slot in which the camera could not be
 looked at (no frame from core, recognition down) is recorded as *unwatched*
@@ -185,6 +187,27 @@ Attendly keeps no users. OpenNVR's roles map to three tiers: **viewer** reads
 reports, **operator** enrols students and staff, plans classes, books meals and
 configures gates, **admin** also deletes students, staff, gates and
 departments and re-finalises classes.
+
+## Updates
+
+Attendly is released on its own, not with OpenNVR. A site checks for a new
+release every few hours and installs it the way it installs OpenNVR
+releases: by itself in the maintenance window when updates are automatic
+(the default), usually within a day of the release. Only a release signed by
+Attendly's own release workflow is installed. Before the switch Attendly's
+data is backed up, and if the new version does not come up healthy the site
+goes back to the old one with that data.
+
+To update now, from the OpenNVR folder:
+
+```
+./start.sh update --apps                    # what is available
+./start.sh update --apps --app attendly     # install it (.\start.ps1 on Windows)
+```
+
+`ATTENDLY_IMAGE` in `.env` is written by the update; set it by hand only to
+run a build of your own (`opennvr/attendly:local-build`), which updates then
+leave alone.
 
 ## Configuration
 

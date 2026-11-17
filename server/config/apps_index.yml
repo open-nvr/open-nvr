@@ -550,12 +550,24 @@
   name: Attendly
   summary: Attendance by face on your cameras — classroom rosters from a weekly timetable, hostel and mess flap barriers (or in/out alerts without one), meal bookings, and staff check-in/out per department. A full application with its own web UI (opens in a new tab) and OpenNVR login.
   category: attendance
-  version: "1.1.0"
-  image: ghcr.io/open-nvr/attendly:1.1.0
+  version: "1.2.0"
+  image: ghcr.io/open-nvr/attendly:1.2.0
   # First-party, closed source (docs/APP_LISTING_TERMS.md §1): no
   # build_context and no source — the image is built and signed by
   # OpenNVR's CI in a private open-nvr repository.
   license: proprietary
+  # Released by that repository, not with OpenNVR: each X.Y.Z tag it
+  # publishes reaches every site through the update runner, with no change
+  # to this file (docs/design/app-updates-from-registry.md). `image` and
+  # `version` above are only what a fresh install starts from. Only that
+  # repository's release workflow, run for a v* tag, may sign a release;
+  # a build of its main branch is never installed. Its list of withdrawn
+  # releases (ghcr.io/open-nvr/attendly:revocations) is signed by that
+  # repository's revocations workflow on main.
+  updates: registry
+  signing:
+    identity: '^https://github\.com/open-nvr/opennvr-pro-apps/\.github/workflows/publish-images\.yml@refs/tags/v[0-9][A-Za-z0-9_.-]*$'
+    revocations_identity: '^https://github\.com/open-nvr/opennvr-pro-apps/\.github/workflows/revocations\.yml@refs/heads/main$'
   requires_tasks: [face_detection, face_recognition]
   requires_adapters: [insightface_attendly]
   emits: [hostel_in, hostel_out, gate_denied, mess_served]
@@ -573,7 +585,7 @@
       services:
         attendly:
           profiles: [apps]
-          image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:1.1.0}
+          image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:1.2.0}
           restart: unless-stopped
           environment:
             - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}

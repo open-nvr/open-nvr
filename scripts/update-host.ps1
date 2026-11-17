@@ -10,6 +10,7 @@
 #   .\start.ps1 update [--to 0.1.9] [--bundle F.tar] [--dry-run] [--yes]
 #                      [--adopt] [--accept-manual] [--channel edge] [--restore DIR]
 #   .\start.ps1 update --list-images   this site's images (for make-offline-bundle.py)
+#   .\start.ps1 update --apps [--app ID [--yes]]   app releases from the registry
 #
 # Written for Windows PowerShell 5.1: no &&, no ternary, and every native
 # command is checked through $LASTEXITCODE. `up` runs in a child PowerShell
@@ -77,8 +78,15 @@ function Get-UpdCid([string]$Service) {
 function Get-UpdProject {
     $cid = Get-UpdCid "opennvr-core"
     if ($cid) {
-        $p = docker inspect $cid --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>$null
-        if ($p) { return $p }
+        # From the JSON, not a --format template: the template's double
+        # quotes do not survive 5.1's argument passing (docker exits 64), and
+        # this silently fell back to the folder name.
+        $json = (docker inspect $cid 2>$null) -join "`n"
+        if ($LASTEXITCODE -eq 0 -and $json) {
+            $c = @(ConvertFrom-Json -InputObject $json)
+            $p = if ($c.Count -gt 0 -and $c[0].Config.Labels) { $c[0].Config.Labels.'com.docker.compose.project' } else { "" }
+            if ($p) { return $p }
+        }
     }
     if ($env:COMPOSE_PROJECT_NAME) { return $env:COMPOSE_PROJECT_NAME }
     return ((Split-Path -Leaf (Get-Location).Path).ToLower() -replace '[^a-z0-9_-]', '')
@@ -86,7 +94,7 @@ function Get-UpdProject {
 
 # Run the updater in a core image; $Tag (when set) picks the image through
 # CORE_TAG, which wins over .env for compose's interpolation.
-function Invoke-Updater([string]$Tag, [string[]]$UpdArgs, [switch]$Quiet) {
+function Invoke-Updater([string]$Tag, [string[]]$UpdArgs, [switch]$Quiet, [string]$LogFile) {
     $here = (Get-Location).Path
     $pass = @()
     # A mirror: the shell's UPDATE_SOURCE_URL wins over the one in .env.
@@ -106,6 +114,12 @@ function Invoke-Updater([string]$Tag, [string[]]$UpdArgs, [switch]$Quiet) {
         # To the screen, not the pipeline: a function returns everything its
         # commands print, and the caller wants only the exit code. (Never
         # 2>&1 here: Windows PowerShell turns each stderr line into an error.)
+        if ($LogFile) {
+            $lines = @(docker compose @run 2>$null)
+            $code = $LASTEXITCODE
+            [IO.File]::WriteAllLines((Join-Path $here $LogFile), [string[]]$lines, $Utf8NoBom)
+            return $code
+        }
         if ($Quiet) { docker compose @run 2>$null | Out-Null }
         else { docker compose @run | Out-Host }
         return $LASTEXITCODE
@@ -404,19 +418,36 @@ function Invoke-UpdateQueue {
         Invoke-Update -UpdateArgs @("--to", (Get-UpdKV $req TO), "--yes")
         return
     }
+    # Update now for one app, asked for in the app: tried once, like a release.
+    $appReq = "data\update-requests\app-request.env"
+    $appId = Get-UpdKV $appReq ID
+    $appHandled = if (Test-Path "$UpdDir\last-app-request") { (Get-Content "$UpdDir\last-app-request" -Raw).Trim() } else { "" }
+    if ($appId -and $appId -ne $appHandled) {
+        [IO.File]::WriteAllText((Join-Path $here "$UpdDir\last-app-request"), "$appId`n", $Utf8NoBom)
+        Invoke-UpdApps @("--app", (Get-UpdKV $appReq APP), "--now", "--yes")
+        return
+    }
     $mode = Get-UpdKV $policy MODE
     if (-not $mode) { $mode = "auto" }  # nothing saved yet: the default, install releases by itself
-    if ($mode -eq "off") { return }
-    $last = Get-UpdKV "$UpdDir\check.env" CHECKED_EPOCH
-    $every = if ($env:OPENNVR_UPDATE_CHECK_EVERY) { [long]$env:OPENNVR_UPDATE_CHECK_EVERY } else { 21600 }
-    if (-not $last -or ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$last) -ge $every) {
-        Invoke-Update -UpdateArgs @("--dry-run")
+    if ($mode -ne "off") {
+        $last = Get-UpdKV "$UpdDir\check.env" CHECKED_EPOCH
+        $every = if ($env:OPENNVR_UPDATE_CHECK_EVERY) { [long]$env:OPENNVR_UPDATE_CHECK_EVERY } else { 21600 }
+        if (-not $last -or ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$last) -ge $every) {
+            Invoke-Update -UpdateArgs @("--dry-run")
+        }
+        if ($mode -eq "auto" -and (Get-UpdKV "$UpdDir\check.env" CODE -Last) -eq "0") {
+            $script:UpdCa = Get-ComposeArgs
+            $due = Invoke-Updater "" @("due", "--policy-file", "/repo/data/update-requests/policy.env",
+                                       "--local-time", (Get-Date -Format "yyyy-MM-ddTHH:mm"))
+            if ($due -eq 0) {
+                Invoke-Update -UpdateArgs @("--to", (Get-UpdKV "$UpdDir\plan.env" TO_VERSION), "--yes")
+                return
+            }
+        }
     }
-    if ($mode -ne "auto" -or (Get-UpdKV "$UpdDir\check.env" CODE -Last) -ne "0") { return }
-    $script:UpdCa = Get-ComposeArgs
-    $due = Invoke-Updater "" @("due", "--policy-file", "/repo/data/update-requests/policy.env",
-                               "--local-time", (Get-Date -Format "yyyy-MM-ddTHH:mm"))
-    if ($due -eq 0) { Invoke-Update -UpdateArgs @("--to", (Get-UpdKV "$UpdDir\plan.env" TO_VERSION), "--yes") }
+    # Apps have their own mode (APPS_MODE, APP_<ID>_MODE; by default the
+    # one above), which updater/policy.py applies.
+    Invoke-UpdApps @("--tick")
 }
 
 # Called by `up`. The runner is on unless .env says UPDATE_RUNNER=off, so a
@@ -488,6 +519,392 @@ function Set-AutoUpdate([string]$Action) {
     }
 }
 
+# ── apps from the registry ───────────────────────────────────────────
+# Same steps, files and rules as "apps from the registry" in
+# update-host.sh (read that for the story): check, cosign, due, then one app
+# at a time: pull, stop, back up its writable volumes, pin <APP>_IMAGE in
+# .env, start, wait for healthy, and put it all back when it is not.
+#
+# Docker is read as JSON (docker inspect) rather than through Go templates,
+# and docker itself runs through Start-Process: a template's double quotes do
+# not survive Windows PowerShell 5.1's native argument passing, and a native
+# command's stderr redirected in 5.1 comes back wrapped in error records.
+
+$UpdAppsBackups = Join-Path $UpdBackups "apps"
+$UpdAppsKeep    = if ($env:OPENNVR_APP_KEEP_BACKUPS) { [int]$env:OPENNVR_APP_KEEP_BACKUPS } else { 2 }
+# The image that checks signatures is itself pinned by digest.
+$UpdCosign      = "ghcr.io/sigstore/cosign/cosign:v2.4.1@sha256:b03690aa52bfe94054187142fba24dc54137650682810633901767d8a3e15b31"
+
+function Add-UpdAppsState([string[]]$Pairs) {
+    [IO.File]::AppendAllText((Join-Path (Get-Location).Path "$UpdDir\apps-state.env"), (($Pairs -join "`n") + "`n"), $Utf8NoBom)
+}
+
+function Complete-UpdApps([string]$Result) {
+    $s = "$UpdDir\apps-state.env"
+    $finished = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    Add-UpdAppsState @("STEP=$Result", "FINISHED=$finished")
+    $line = "$finished $(Get-UpdKV $s APP_ID) $(Get-UpdKV $s FROM_VERSION) $(Get-UpdKV $s VERSION) $Result`n"
+    [IO.File]::AppendAllText((Join-Path (Get-Location).Path "$UpdDir\apps-history.log"), $line, $Utf8NoBom)
+}
+
+# docker, its output and errors appended to a log; returns the exit code.
+# Start-Process hands docker one command line made by joining the arguments
+# with spaces, so an argument with a space in it (a folder name, sh -c's
+# script) is quoted here; none of ours contains a double quote.
+function Invoke-UpdDocker([string[]]$DArgs, [string]$Log) {
+    $here = (Get-Location).Path
+    $o = Join-Path $here "$UpdDir\docker.out"; $e = Join-Path $here "$UpdDir\docker.err"
+    $line = @($DArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } })
+    $p = Start-Process -FilePath (Get-Command docker).Source -ArgumentList $line -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $o -RedirectStandardError $e
+    if ($Log) {
+        foreach ($f in $o, $e) {
+            if (Test-Path $f) { [IO.File]::AppendAllText((Join-Path $here $Log), [IO.File]::ReadAllText($f), $Utf8NoBom) }
+        }
+    }
+    $script:UpdDockerOut = if (Test-Path $o) { [IO.File]::ReadAllText($o) } else { "" }
+    $script:UpdDockerErr = if (Test-Path $e) { [IO.File]::ReadAllText($e) } else { "" }
+    Remove-Item $o, $e -ErrorAction SilentlyContinue
+    return $p.ExitCode
+}
+
+function Get-UpdInspect([string[]]$Ids) {
+    $Ids = @($Ids | Where-Object { $_ })
+    if ($Ids.Count -eq 0) { return }
+    $json = (docker inspect @Ids 2>$null) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or -not $json) { return }
+    return (ConvertFrom-Json -InputObject $json)
+}
+
+function Get-UpdLabel($Container, [string]$Name) {
+    $labels = $Container.Config.Labels
+    if (-not $labels) { return "" }
+    $p = $labels.PSObject.Properties[$Name]
+    if ($p) { return [string]$p.Value }
+    return ""
+}
+
+function Write-UpdAppsRunning {
+    $ids = @(docker ps -q --filter "label=com.docker.compose.project=$script:UpdProject")
+    $out = @(foreach ($c in @(Get-UpdInspect $ids)) {
+        ("$(Get-UpdLabel $c 'com.docker.compose.service') $($c.Config.Image) $(Get-UpdLabel $c 'org.opencontainers.image.version')").TrimEnd()
+    })
+    [IO.File]::WriteAllLines((Join-Path (Get-Location).Path "$UpdDir\apps-running.txt"), [string[]]$out, $Utf8NoBom)
+}
+
+# Each app's list of withdrawn releases, checked with cosign against the
+# signer its catalog entry names, then read at the digest cosign checked
+# (see upd_apps_revocations in update-host.sh).
+function Invoke-UpdAppsRevocations {
+    $here = (Get-Location).Path
+    if ((Invoke-Updater "" @("apps-revocations-list") -Quiet) -ne 0) { return }
+    $f = Join-Path $here "$UpdDir\apps-revocations.txt"
+    if (-not (Test-Path $f)) { return }
+    foreach ($line in [IO.File]::ReadAllLines($f, $Utf8NoBom)) {
+        $p = $line -split ' '
+        if ($p.Count -lt 4) { continue }
+        $id = $p[0]; $ref = $p[1]; $identity = $p[2]; $issuer = $p[3]
+        $code = Invoke-UpdDocker @("run", "--rm", $UpdCosign, "verify", "--certificate-oidc-issuer", $issuer,
+                                   "--certificate-identity-regexp", $identity, $ref) ""
+        if ($code -eq 0) {
+            [IO.File]::WriteAllText((Join-Path $here "$UpdDir\apps-rev-$id.json"), $script:UpdDockerOut, $Utf8NoBom)
+            $null = Invoke-Updater "" @("apps-revocations-record", "--id", $id, "--result", "ok",
+                                        "--cosign-output", "/work/apps-rev-$id.json") -Quiet
+        } else {
+            $why = @($script:UpdDockerErr -split "\r?\n" | Where-Object { $_.Trim() }) | Select-Object -Last 1
+            if (-not $why) { $why = "cosign exited $code" }
+            $why = ($why -replace '"', "'")
+            if ($why.Length -gt 300) { $why = $why.Substring(0, 300) }
+            $why = $why.TrimEnd('\')
+            Write-UpdWarn "${id}: its list of withdrawn releases did not check out: $why"
+            $null = Invoke-Updater "" @("apps-revocations-record", "--id", $id, "--result", "failed", "--message", $why) -Quiet
+        }
+    }
+}
+
+function Invoke-UpdAppsCheck {
+    Write-UpdAppsRunning
+    Invoke-UpdAppsRevocations
+    $code = Invoke-Updater "" @("apps-check", "--running", "/work/apps-running.txt", "--platform", $script:UpdPlatform,
+                                "--policy-file", "/repo/data/update-requests/policy.env") -LogFile "$UpdDir\apps-check.log"
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    [IO.File]::WriteAllText((Join-Path (Get-Location).Path "$UpdDir\apps-check.env"), "CHECKED_EPOCH=$now`nCODE=$code`n", $Utf8NoBom)
+    if ($code -ne 0) { Write-UpdFail "Checking the apps failed; see $UpdDir\apps-check.log"; return $false }
+    Invoke-UpdAppsVerify
+    return $true
+}
+
+# Every release apps-check offered and cosign has not passed yet; a failure
+# is recorded with its reason and tried again on the next check.
+function Invoke-UpdAppsVerify {
+    $f = Join-Path (Get-Location).Path "$UpdDir\apps-verify.txt"
+    if (-not (Test-Path $f)) { return }
+    foreach ($line in [IO.File]::ReadAllLines($f, $Utf8NoBom)) {
+        $p = $line -split ' '
+        if ($p.Count -lt 4) { continue }
+        $id = $p[0]; $ref = $p[1]; $identity = $p[2]; $issuer = $p[3]
+        $digest = ($ref -split '@', 2)[1]
+        $code = Invoke-UpdDocker @("run", "--rm", $UpdCosign, "verify", "--certificate-oidc-issuer", $issuer,
+                                   "--certificate-identity-regexp", $identity, $ref) ""
+        if ($code -eq 0) {
+            $null = Invoke-Updater "" @("apps-verified", "--id", $id, "--digest", $digest, "--result", "ok",
+                                        "--message", "cosign verified the signature") -Quiet
+        } else {
+            $why = @($script:UpdDockerErr -split "\r?\n" | Where-Object { $_.Trim() }) | Select-Object -Last 1
+            if (-not $why) { $why = "cosign exited $code" }
+            # One plain argument for docker compose under 5.1: no double
+            # quote, and no backslash before the quote 5.1 wraps it in.
+            $why = ($why -replace '"', "'")
+            if ($why.Length -gt 300) { $why = $why.Substring(0, 300) }
+            $why = $why.TrimEnd('\')
+            Write-UpdWarn "$id ${digest}: the signature did not check out: $why"
+            $null = Invoke-Updater "" @("apps-verified", "--id", $id, "--digest", $digest, "--result", "failed",
+                                        "--message", $why) -Quiet
+        }
+    }
+}
+
+# The app's own writable named volumes; read-only mounts (another service's
+# certificates, say) are not the app's to restore.
+function Get-UpdAppVolumes([string]$Cid) {
+    $c = @(Get-UpdInspect @($Cid))
+    if ($c.Count -eq 0) { return }
+    foreach ($m in @($c[0].Mounts)) {
+        if ($m.Type -eq "volume" -and $m.RW) { "$($m.Name) $($m.Destination)" }
+    }
+}
+
+function Backup-UpdApp([string]$Cid, [string]$Dir, [string]$Image) {
+    New-Item -ItemType Directory -Force $Dir | Out-Null
+    $abs = (Resolve-Path $Dir).Path
+    $vols = @(Get-UpdAppVolumes $Cid)
+    [IO.File]::WriteAllLines((Join-Path $abs "volumes.txt"), [string[]]$vols, $Utf8NoBom)
+    foreach ($v in $vols) {
+        $name = ($v -split ' ')[0]
+        $code = Invoke-UpdDocker @("run", "--rm", "-v", "${name}:/v:ro", "-v", "${abs}:/b", "--entrypoint", "tar", $Image,
+                                   "czf", "/b/$name.tgz", "-C", "/v", ".") "$UpdDir\apps-up.log"
+        if ($code -ne 0) { return $false }
+    }
+    Copy-Item .env (Join-Path $abs "env")
+    icacls $abs /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null
+    return $true
+}
+
+function Restore-UpdApp([string]$Dir, [string]$Image) {
+    $abs = (Resolve-Path $Dir).Path
+    foreach ($v in [IO.File]::ReadAllLines((Join-Path $abs "volumes.txt"), $Utf8NoBom)) {
+        $name = ($v -split ' ')[0]
+        if (-not $name -or -not (Test-Path (Join-Path $abs "$name.tgz"))) { continue }
+        $code = Invoke-UpdDocker @("run", "--rm", "-v", "${name}:/v", "-v", "${abs}:/b:ro", "--entrypoint", "sh", $Image,
+                                   "-c", "find /v -mindepth 1 -delete && tar xzf /b/$name.tgz -C /v") "$UpdDir\apps-up.log"
+        if ($code -ne 0) { return $false }
+    }
+    return $true
+}
+
+# Healthy: the container runs the image $Ref names and its healthcheck says
+# healthy; with no healthcheck, still running 30 s later.
+function Test-UpdAppHealthy([string]$Service, [string]$Ref) {
+    $want = docker image inspect --format '{{.Id}}' $Ref 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $want) { return $false }
+    $timeout = if ($env:OPENNVR_APP_VERIFY_TIMEOUT) { [int]$env:OPENNVR_APP_VERIFY_TIMEOUT } else { 300 }
+    $up = 0
+    for ($i = 0; $i -lt $timeout; $i += 5) {
+        $c = @(Get-UpdInspect @(Get-UpdCid $Service))
+        if ($c.Count -gt 0) {
+            if ($c[0].Image -ne $want) { Write-UpdFail "$Service runs another image than $Ref"; return $false }
+            $health = if ($c[0].State.Health) { $c[0].State.Health.Status } else { "none" }
+            $state = "$($c[0].State.Status) $health"
+            if ($state -eq "running healthy") { return $true }
+            if ($state -eq "running none") { $up++; if ($up -ge 6) { return $true } }
+            if ($state -eq "running unhealthy" -or $c[0].State.Status -in "exited", "dead") {
+                Write-UpdFail "$Service is $state"; return $false }
+        }
+        Start-Sleep -Seconds 5
+    }
+    Write-UpdFail "$Service was not healthy within $timeout s"
+    return $false
+}
+
+function Get-UpdCoreImage { return (docker inspect (Get-UpdCid "opennvr-core") --format '{{.Config.Image}}' 2>$null) }
+
+function Invoke-UpdAppsRollback {
+    $s = "$UpdDir\apps-state.env"
+    $id = Get-UpdKV $s APP_ID; $key = Get-UpdKV $s KEY; $backup = Get-UpdKV $s BACKUP
+    Add-UpdAppsState @("STEP=rolling_back")
+    [IO.File]::AppendAllText((Join-Path (Get-Location).Path "$UpdDir\apps-failed.txt"), "$id $(Get-UpdKV $s VERSION)`n", $Utf8NoBom)
+    Write-UpdWarn "Going back to $id $(Get-UpdKV $s FROM_VERSION) ..."
+    $null = Invoke-UpdDocker (@("compose") + $script:UpdCa + @("stop", $id)) "$UpdDir\apps-up.log"
+    $old = [IO.File]::ReadAllText((Join-Path (Get-Location).Path "$backup\env-value"), $Utf8NoBom).TrimEnd("`r", "`n")
+    Set-DotEnvVar $key $old
+    $script:UpdCa = Get-ComposeArgs
+    if (-not (Restore-UpdApp $backup (Get-UpdCoreImage))) {
+        Complete-UpdApps "failed"; Write-UpdFail "Could not put $id's data back. Backup: $backup"; return $false }
+    $code = Invoke-UpdDocker (@("compose") + $script:UpdCa + @("up", "-d", "--no-deps", $id)) "$UpdDir\apps-up.log"
+    if ($code -ne 0 -or -not (Test-UpdAppHealthy $id (Get-UpdKV $s FROM_REF))) {
+        Complete-UpdApps "failed"
+        Write-UpdFail "The old $id did not come back healthy either. See $UpdDir\apps-up.log; backup: $backup"
+        return $false
+    }
+    Complete-UpdApps "rolled_back"
+    Write-UpdWarn "Rolled back: $id runs $(Get-UpdKV $s FROM_VERSION) again, with its data."
+    return $true
+}
+
+function Remove-OldUpdAppBackups([string]$Id) {
+    if (-not (Test-Path $UpdAppsBackups)) { return }
+    Get-ChildItem $UpdAppsBackups -Directory -Filter "$Id-*" | Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip $UpdAppsKeep | ForEach-Object { Remove-Item $_.FullName -Recurse -Force }
+}
+
+function Invoke-UpdAppsApply {
+    $due = "$UpdDir\apps-due.env"
+    $id = Get-UpdKV $due APP_ID; $key = Get-UpdKV $due IMAGE_KEY; $ref = Get-UpdKV $due IMAGE_REF
+    $ver = Get-UpdKV $due VERSION; $from = Get-UpdKV $due FROM_VERSION
+    $cid = Get-UpdCid $id
+    if (-not $cid) { Write-UpdWarn "$id is not running here; nothing to update."; return $true }
+    # The report is from the last check: if the app was changed since (by
+    # hand, or by an update), it is checked again rather than overwritten.
+    $c = @(Get-UpdInspect @($cid))
+    if ($c.Count -eq 0 -or $c[0].Config.Image -ne (Get-UpdKV $due FROM_REF)) {
+        Write-UpdSay "$id no longer runs $(Get-UpdKV $due FROM_REF); checking again."
+        $null = Invoke-UpdAppsCheck
+        return $true
+    }
+    Write-UpdSay "Updating $id $from -> $ver ..."
+    # 1. The new image onto the host first: the app is still running.
+    if ((Invoke-UpdDocker @("pull", "-q", $ref) "") -ne 0) { Write-UpdFail "Could not pull $ref; nothing changed."; return $false }
+
+    $backup = Join-Path $UpdAppsBackups "$id-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$from"
+    [IO.File]::WriteAllText((Join-Path (Get-Location).Path "$UpdDir\apps-state.env"), "", $Utf8NoBom)
+    [IO.File]::WriteAllText((Join-Path (Get-Location).Path "$UpdDir\apps-up.log"), "", $Utf8NoBom)
+    Add-UpdAppsState @("APP_ID=$id", "KEY=$key", "FROM_VERSION=$from", "VERSION=$ver", "FROM_REF=$(Get-UpdKV $due FROM_REF)",
+                       "TO_REF=$ref", "BACKUP=$backup", "STARTED=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))",
+                       "STEP=stopping")
+    # 2. Stopped before the backup: an app writing SQLite mid-copy leaves a
+    #    backup that cannot be read back.
+    $stopped = (Invoke-UpdDocker (@("compose") + $script:UpdCa + @("stop", $id)) "$UpdDir\apps-up.log") -eq 0
+    if (-not $stopped -or -not (Backup-UpdApp $cid $backup (Get-UpdCoreImage))) {
+        $null = Invoke-UpdDocker (@("compose") + $script:UpdCa + @("start", $id)) "$UpdDir\apps-up.log"
+        Complete-UpdApps "failed"
+        Write-UpdFail "The backup of $id failed; it runs $from as before."
+        return $false
+    }
+    $old = ""
+    foreach ($l in [IO.File]::ReadAllLines((Join-Path (Get-Location).Path ".env"), $Utf8NoBom)) {
+        if ($l -match "^$key=") { $old = ($l -split '=', 2)[1]; break }
+    }
+    [IO.File]::WriteAllText((Join-Path (Resolve-Path $backup).Path "env-value"), "$old`n", $Utf8NoBom)
+    # 3. The switch.
+    Add-UpdAppsState @("STEP=switching")
+    Set-DotEnvVar $key $ref
+    $script:UpdCa = Get-ComposeArgs
+    if ((Invoke-UpdDocker (@("compose") + $script:UpdCa + @("up", "-d", "--no-deps", $id)) "$UpdDir\apps-up.log") -ne 0) {
+        Write-UpdFail "compose up failed for $id"
+        $null = Invoke-UpdAppsRollback
+        return $false
+    }
+    Add-UpdAppsState @("STEP=verifying")
+    if (-not (Test-UpdAppHealthy $id $ref)) {
+        $null = Invoke-UpdAppsRollback
+        return $false
+    }
+    Complete-UpdApps "succeeded"
+    Remove-OldUpdAppBackups $id
+    Write-UpdOk "$id $ver is running and healthy."
+    return $true
+}
+
+# An app update interrupted part way is finished first (see update-host.sh).
+function Resume-UpdApps {
+    $s = "$UpdDir\apps-state.env"
+    $id = Get-UpdKV $s APP_ID
+    $step = Get-UpdKV $s STEP -Last
+    if ($step -eq "stopping") {
+        Write-UpdWarn "An update of $id stopped during its backup; starting it again."
+        $null = Invoke-UpdDocker (@("compose") + $script:UpdCa + @("up", "-d", "--no-deps", $id)) "$UpdDir\apps-up.log"
+        Complete-UpdApps "failed"
+    } elseif ($step -in "switching", "verifying") {
+        Write-UpdWarn "An update of $id was interrupted; checking it now."
+        if (Test-UpdAppHealthy $id (Get-UpdKV $s TO_REF)) { Complete-UpdApps "succeeded" } else { $null = Invoke-UpdAppsRollback }
+    } elseif ($step -eq "rolling_back") {
+        Write-UpdWarn "A rollback of $id was interrupted; finishing it."
+        $null = Invoke-UpdAppsRollback
+    }
+}
+
+#   .\start.ps1 update --apps                  check now and list what is available
+#   .\start.ps1 update --apps --app attendly   install its newest release now (asks; --yes does not)
+function Invoke-UpdApps([string[]]$AppsArgs) {
+    $tick = $false; $app = ""; $now = $false; $yes = $false
+    for ($i = 0; $i -lt $AppsArgs.Count; $i++) {
+        switch ($AppsArgs[$i]) {
+            "--tick" { $tick = $true }
+            "--app"  { $app = $AppsArgs[++$i] }
+            "--now"  { $now = $true }
+            { $_ -in "--yes", "-y" } { $yes = $true }
+            default  { Write-UpdFail "unknown option for --apps: $($AppsArgs[$i])"; return }
+        }
+    }
+    if (-not (Test-Path .env)) { Write-UpdFail "No .env here: run this from the OpenNVR folder."; return }
+    Lock-Update
+    try {
+        $script:UpdCa = Get-ComposeArgs
+        $script:UpdProject = Get-UpdProject
+        $script:UpdPlatform = docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
+        if ($LASTEXITCODE -ne 0) { Write-UpdFail "Docker is not running."; return }
+        Resume-UpdApps
+
+        $here = (Get-Location).Path
+        $epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $last = Get-UpdKV "$UpdDir\apps-check.env" CHECKED_EPOCH
+        $every = if ($env:OPENNVR_APPS_CHECK_EVERY) { [long]$env:OPENNVR_APPS_CHECK_EVERY } else { 21600 }
+        if (-not $tick -or -not $last -or ($epoch - [long]$last) -ge $every) {
+            # A core from before app updates has no apps-check. Recorded like a
+            # check, so the runner asks again in six hours, not every minute.
+            if ((Invoke-Updater "" @("apps-check", "--help") -Quiet) -ne 0) {
+                [IO.File]::WriteAllText((Join-Path $here "$UpdDir\apps-check.env"), "CHECKED_EPOCH=$epoch`nCODE=unsupported`n", $Utf8NoBom)
+                if (-not $tick) { Write-UpdFail "The running OpenNVR ($(Get-EnvVar CORE_TAG)) predates app updates; update OpenNVR first." }
+                return
+            }
+            if (-not $tick) { Write-UpdSay "Checking the apps for new releases ..." }
+            if (-not (Invoke-UpdAppsCheck)) { return }
+            if (-not $tick) { Get-Content "$UpdDir\apps-check.log" | ForEach-Object { Write-Host "  $_" } }
+        }
+        # Nothing on offer: no updater container a minute.
+        $report = Join-Path $here "$UpdDir\apps.json"
+        if (-not (Test-Path $report) -or -not ([IO.File]::ReadAllText($report) -match '"state": "available"')) { return }
+        if (-not $tick -and -not $app) { Write-UpdSay "Install one with: .\start.ps1 update --apps --app <id>"; return }
+        # On offer but perhaps not due for hours: asked every five minutes at most.
+        if ($tick) {
+            $asked = Get-UpdKV "$UpdDir\apps-due-asked.env" ASKED_EPOCH
+            if ($asked -and ($epoch - [long]$asked) -lt 300) { return }
+            [IO.File]::WriteAllText((Join-Path $here "$UpdDir\apps-due-asked.env"), "ASKED_EPOCH=$epoch`n", $Utf8NoBom)
+        }
+        $dueArgs = @("apps-due", "--policy-file", "/repo/data/update-requests/policy.env", "--local-time", (Get-Date -Format "yyyy-MM-ddTHH:mm"))
+        if ($app) { $dueArgs += @("--app", $app) }
+        if ($now -or -not $tick) { $dueArgs += "--now" }
+        if ((Invoke-Updater "" $dueArgs -LogFile "$UpdDir\apps-due.log") -ne 0) {
+            if (-not $tick) { Get-Content "$UpdDir\apps-due.log" | ForEach-Object { Write-Host "  $_" } }
+            return
+        }
+        $due = "$UpdDir\apps-due.env"
+        if (-not $tick -and -not $yes) {
+            Write-Host ""
+            Write-UpdSay "$(Get-UpdKV $due APP_ID) stops for about a minute; its data is backed up first,"
+            Write-UpdSay "and if $(Get-UpdKV $due VERSION) does not come up healthy it goes back to $(Get-UpdKV $due FROM_VERSION) with its data."
+            $answer = Read-Host "  Update $(Get-UpdKV $due APP_ID) now? [y/N]"
+            if ($answer -notmatch '^[Yy]$') { Write-UpdSay "Nothing changed."; return }
+        }
+        $null = Invoke-UpdAppsApply
+        # What runs now is not what the report says: refresh it, or the next
+        # tick would offer the release just installed (or rolled back) again.
+        $null = Invoke-UpdAppsCheck
+    } finally {
+        Unlock-Update
+    }
+}
+
 # ── entry point ──────────────────────────────────────────────────────
 
 function Invoke-Update([string[]]$UpdateArgs) {
@@ -503,6 +920,11 @@ function Invoke-Update([string[]]$UpdateArgs) {
             "--channel"       { $extra += @("--channel", $UpdateArgs[++$i]) }
             "--restore"       { $restore = $UpdateArgs[++$i] }
             "--from-queue"    { Invoke-UpdateQueue; return }
+            "--apps"          {
+                $rest = if ($i + 1 -lt $UpdateArgs.Count) { $UpdateArgs[($i + 1)..($UpdateArgs.Count - 1)] } else { @() }
+                Invoke-UpdApps $rest
+                return
+            }
             "--list-images"   {
                 # For scripts\make-offline-bundle.py: what this site runs.
                 $ca = Get-ComposeArgs

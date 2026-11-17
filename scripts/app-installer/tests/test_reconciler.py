@@ -45,6 +45,7 @@ from reconciler import (  # noqa: E402
     Intent,
     RunResult,
     build_down_argv,
+    build_apply_argv,
     build_up_argv,
     image_env_key,
     load_curated_index,
@@ -217,8 +218,14 @@ def test_pending_installed_calls_compose_up_and_applies():
 
     assert status_ == "applied"
     assert message == "Started"
-    # Exactly one compose call, with the right argv.
-    assert len(runner.calls) == 1
+    # Two compose calls: create what is missing without recreating any
+    # running container, then apply the app's own configuration to the
+    # app alone.
+    assert len(runner.calls) == 2
+    assert runner.calls[1] == [
+        "docker", "compose", "up", "-d", "--no-deps", "loitering-detection",
+    ]
+    assert runner.calls[1] == build_apply_argv(intent)
     argv = runner.calls[0]
     assert argv[:2] == ["docker", "compose"]
     # No -f and no --profile by default: the reconciler runs in the
@@ -226,7 +233,10 @@ def test_pending_installed_calls_compose_up_and_applies():
     # Naming the plain files replaced that set and recreated core and
     # MediaMTX from them.
     assert "-f" not in argv and "--profile" not in argv
-    assert argv == ["docker", "compose", "up", "-d", "egress-proxy", "loitering-detection"]
+    assert argv == [
+        "docker", "compose", "up", "-d", "--no-recreate",
+        "egress-proxy", "loitering-detection",
+    ]
     assert argv == build_up_argv(intent)
     # A digest-bearing index entry → the runner is handed the pinned
     # image override env so compose actually deploys the pinned ref.
@@ -356,7 +366,7 @@ def test_reconcile_once_skips_applied_processes_pending():
     assert store.updates == [
         ("loitering-detection", "applied", "ok", "installed")
     ]
-    assert len(runner.calls) == 1
+    assert len(runner.calls) == 2  # create, then apply to the app alone
 
 
 def test_reconcile_once_writes_failed_status():
@@ -387,7 +397,7 @@ def test_reconcile_once_honors_backoff_skip_ids():
     )
 
     assert [o[0] for o in outcomes] == ["occupancy-counting"]
-    assert len(runner.calls) == 1
+    assert len(runner.calls) == 2  # create, then apply to the app alone
 
 
 def test_status_write_is_guarded_on_acted_desired():
@@ -430,7 +440,7 @@ def test_install_ups_required_adapters_ahead_of_the_app():
     status, _ = _reconcile(_lpr_intent(), runner)
     assert status == "applied"
     argv = runner.calls[0]
-    up_at = argv.index("-d")
+    up_at = argv.index("--no-recreate")
     services = argv[up_at + 1:]
     # The adapter service is upped in the same command, BEFORE the app —
     # an already-running adapter is a compose no-op (reuse), a missing
@@ -520,7 +530,12 @@ def test_named_compose_files_and_profile_are_passed_when_given():
         "docker", "compose", "-f", "docker-compose.yml",
         "-f", "docker-compose.apps.yml", "--profile", "apps",
     ][:7]
-    assert argv[-4:] == ["up", "-d", "egress-proxy", "loitering-detection"]
+    assert argv[-5:] == [
+        "up", "-d", "--no-recreate", "egress-proxy", "loitering-detection",
+    ]
+    apply_ = build_apply_argv(intent, compose_files=("a.yml",), profile="p")
+    assert apply_ == ["docker", "compose", "-f", "a.yml", "--profile", "p",
+                      "up", "-d", "--no-deps", "loitering-detection"]
     down = build_down_argv(intent, compose_files=("a.yml",), profile="p")
     assert down == ["docker", "compose", "-f", "a.yml", "--profile", "p",
                     "rm", "-s", "-f", "loitering-detection"]
@@ -557,3 +572,28 @@ def test_teardown_message_carries_the_restart_hint():
     # Without the pick the message is compose's alone.
     _, plain = reconcile_intent(intent, runner, index=TEST_INDEX)
     assert plain == "Removed"
+
+
+def test_an_install_never_recreates_a_running_container():
+    """0.1.12 on a Ventuno Q: installing ANPR recreated core, MediaMTX and
+    the yolov8 adapter (their configuration hashes differently from inside
+    the installer's container) and the application was gone for a minute.
+    The create step must carry --no-recreate, and the only step that may
+    recreate anything names the app and nothing else, with --no-deps."""
+    runner = FakeRunner(RunResult(0, "ok", ""))
+    status, _ = _reconcile(_lpr_intent(), runner)
+    assert status == "applied"
+    create, apply_ = runner.calls
+    assert "--no-recreate" in create and "--no-deps" not in create
+    assert "fast-plate-ocr-adapter" in create
+    assert apply_[apply_.index("--no-deps") + 1:] == ["license-plate-recognition"]
+    assert "--no-recreate" not in apply_
+    # the pinned image reaches both steps
+    assert runner.envs[0] == runner.envs[1]
+
+
+def test_a_failed_create_stops_before_the_apply_step():
+    runner = FakeRunner(RunResult(1, "", "no such service"))
+    status, message = _reconcile(_lpr_intent(), runner)
+    assert status == "failed" and "no such service" in message
+    assert len(runner.calls) == 1
