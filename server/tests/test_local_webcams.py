@@ -30,11 +30,27 @@ def fake_devices(tmp_path, monkeypatch):
 def test_lists_capture_nodes_with_sysfs_names(fake_devices):
     cams = lw.list_local_webcams()
     assert [c.name for c in cams] == ["HD Pro Webcam C920: HD Pro Webcam C920", "Integrated Camera: Integrated C"]
-    assert cams[0].id.endswith("C920_ABCDEF-video-index0") and cams[0].node == "video0"
+    assert cams[0].id == "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_ABCDEF-video-index0", \
+        "the id is the path MediaMTX opens, not the directory core listed (/host/dev in the overlay)"
+    assert cams[0].node == "video0"
+    assert all(lw.is_local_device(c.id) for c in cams)
     assert all("index1" not in c.id for c in cams), "the metadata node is not a camera"
     assert lw.available() is True
     assert lw.find_local_webcam(cams[1].id) == cams[1]
     assert lw.find_local_webcam("/dev/v4l/by-id/usb-nope-video-index0") is None
+
+
+def test_the_host_dev_mount_is_found_without_an_env_var(monkeypatch, tmp_path):
+    """The overlay mounts the host's /dev at /host/dev and sets no
+    WEBCAM_BY_ID_DIR (an older core would turn that into ids MediaMTX cannot
+    open). Core looks for the mount itself and falls back to /dev/v4l."""
+    monkeypatch.delenv(lw.BY_ID_DIR_ENV, raising=False)
+    monkeypatch.setattr(lw, "HOST_DEV_DIR", str(tmp_path / "host-dev"))
+    assert lw.by_id_dir() == lw.DEFAULT_BY_ID_DIR
+    (tmp_path / "host-dev").mkdir()
+    assert lw.by_id_dir() == os.path.join(str(tmp_path / "host-dev"), "v4l", "by-id")
+    monkeypatch.setenv(lw.BY_ID_DIR_ENV, "/elsewhere")
+    assert lw.by_id_dir() == "/elsewhere"
 
 
 def test_nothing_without_the_overlay(monkeypatch, tmp_path):
