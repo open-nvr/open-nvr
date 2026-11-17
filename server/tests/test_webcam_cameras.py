@@ -435,13 +435,22 @@ def env(monkeypatch):
         raise AssertionError("a webcam must not be provisioned as an RTSP stream")
 
     monkeypatch.setattr(cs.MediaMtxAdminService, "push_rtsp_stream", staticmethod(_no_rtsp))
+
+    upserted: list[dict] = []
+
+    async def _upsert_path(camera_id, camera_ip, config, transport_security=None):
+        upserted.append({"camera_id": camera_id, "config": config,
+                         "transport_security": transport_security})
+        return {"status": "ok", "action": "replaced"}
+
+    monkeypatch.setattr(cs.MediaMtxAdminService, "upsert_path", staticmethod(_upsert_path))
     import services.camera_identity as ci
     import services.skill_assignments as sa
 
     monkeypatch.setattr(ci, "protect_camera_dir", lambda *a, **k: "fresh")
     monkeypatch.setattr(sa, "adopt_new_camera", lambda *a, **k: False)
 
-    def _token(camera_id, camera_path, expiry_minutes=1440):
+    def _token(camera_id, camera_path, expiry_minutes=1440, **_):
         # Stand-in for the RSA-signed JWT: the claims the real one carries.
         return json.dumps({"perm": [{"action": "publish", "path": camera_path}],
                            "camera_id": camera_id, "minutes": expiry_minutes})
@@ -490,7 +499,8 @@ def env(monkeypatch):
     app.dependency_overrides[core_auth.get_current_active_user] = lambda: current["user"]
     with TestClient(app) as tc:
         yield SimpleNamespace(tc=tc, current=current, users=users,
-                              SessionLocal=SessionLocal, provisioned=provisioned)
+                              SessionLocal=SessionLocal, provisioned=provisioned,
+                              upserted=upserted)
 
 
 def _add_webcam(env, name="Desk"):
@@ -559,6 +569,78 @@ def test_editing_a_webcam_with_the_form_keeps_its_path(env):
     assert r.status_code == 200, r.text
     assert r.json()["name"] == "Desk (renamed)"
     assert r.json()["stream_action"] in (None, "none")
+
+
+LOCAL_DEVICE = "/dev/v4l/by-id/usb-HP_HD_Camera_0001-video-index0"
+
+
+@pytest.fixture
+def plugged_in(monkeypatch):
+    """A Linux server with the webcam overlay and one USB webcam plugged in."""
+    from services import local_webcams as lw
+
+    plugged = {LOCAL_DEVICE}
+    monkeypatch.setattr(lw, "available", lambda: True)
+    monkeypatch.setattr(lw, "find_local_webcam",
+                        lambda d: lw.LocalWebcam(id=d, name="HP HD Camera", node="video0") if d in plugged else None)
+    return plugged
+
+
+def test_a_browser_webcam_switched_to_a_server_webcam_starts_its_capture(env, plugged_in):
+    """The edit used to be stored and nothing else: MediaMTX kept a path
+    waiting for a browser, and the USB webcam was captured only after core
+    restarted. The path is re-pushed with the capture command and its sub,
+    and the row gets the sub marker so detection reads the small path."""
+    cam = _add_webcam(env)
+    r = env.tc.put(f"/api/v1/cameras/{cam['id']}", json={"source_device": LOCAL_DEVICE})
+    assert r.status_code == 200, r.text
+    assert r.json()["stream_action"] == "reprovision"
+    assert len(env.upserted) == 1
+    pushed = env.upserted[0]
+    assert pushed["config"]["source_type"] == "publisher"
+    assert LOCAL_DEVICE in pushed["config"]["run_on_init"]
+    assert pushed["config"]["substream"] is True
+    assert pushed["transport_security"] is None
+    s = env.SessionLocal()
+    row = s.get(Camera, cam["id"])
+    assert row.source_device == LOCAL_DEVICE
+    assert row.substream_url and row.substream_url.endswith(f"cam-{cam['id']}-sub")
+    s.close()
+
+
+def test_a_server_webcam_switched_back_to_the_browser_stops_its_capture(env, plugged_in):
+    cam = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk", "source_device": LOCAL_DEVICE}).json()
+    r = env.tc.put(f"/api/v1/cameras/{cam['id']}", json={"source_device": ""})
+    assert r.status_code == 200, r.text
+    pushed = env.upserted[-1]["config"]
+    assert "run_on_init" not in pushed and not pushed.get("substream")
+    s = env.SessionLocal()
+    row = s.get(Camera, cam["id"])
+    assert row.source_device is None and row.substream_url is None
+    s.close()
+
+
+def test_switching_to_a_server_webcam_is_checked_as_on_create(env, plugged_in, monkeypatch):
+    cam = _add_webcam(env)
+    r = env.tc.put(f"/api/v1/cameras/{cam['id']}",
+                   json={"source_device": "/dev/v4l/by-id/usb-Not_Here-video-index0"})
+    assert r.status_code == 422 and "not plugged" in r.json()["detail"]
+    from services import local_webcams as lw
+    monkeypatch.setattr(lw, "available", lambda: False)
+    r = env.tc.put(f"/api/v1/cameras/{cam['id']}", json={"source_device": LOCAL_DEVICE})
+    assert r.status_code == 422 and "not enabled" in r.json()["detail"]
+    assert env.upserted == []
+
+
+def test_resaving_a_webcam_on_the_same_device_touches_nothing(env, plugged_in):
+    """The edit form re-sends source_device on every save, and the device
+    may be unplugged at that moment: an unchanged one is neither checked
+    nor re-pushed."""
+    cam = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk", "source_device": LOCAL_DEVICE}).json()
+    plugged_in.clear()
+    r = env.tc.put(f"/api/v1/cameras/{cam['id']}", json={"name": "Desk 2", "source_device": LOCAL_DEVICE})
+    assert r.status_code == 200, r.text
+    assert env.upserted == []
 
 
 def test_whip_session_is_a_short_publish_only_token_for_this_path(env):
