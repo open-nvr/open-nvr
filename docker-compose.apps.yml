@@ -1475,7 +1475,13 @@ services:
       - opennvr_internal
       - opennvr_apps
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9005/health', timeout=2).status_code == 200 else 1)"]
+      # Healthy while the model loads, or while its download is being
+      # retried (/health "loading"); unhealthy once the adapter says it
+      # can never load (/health "error": fetching off and no pack, a
+      # model onnxruntime cannot build, a bad det size). /health answers
+      # 200 in every state, so a status-code check alone called a dead
+      # adapter healthy. Images before ai-adapter#95 never say "error".
+      test: ["CMD", "python", "-c", "import httpx, sys; r = httpx.get('http://127.0.0.1:9005/health', timeout=2); sys.exit(0 if r.status_code == 200 and r.json().get('status') != 'error' else 1)"]
       interval: 15s
       timeout: 5s
       start_period: 180s
@@ -1496,6 +1502,11 @@ services:
         condition: service_healthy
       insightface-adapter:
         condition: service_healthy
+        # Optional: a face adapter that cannot load must not fail the
+        # whole `up`, which start.sh and the updater (and its rollback)
+        # stop on. Compose warns and starts this service anyway, and
+        # callers get the adapter's own 503 with its reason.
+        required: false
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
     command:
@@ -1558,7 +1569,13 @@ services:
       - opennvr_internal
       - opennvr_apps
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9005/health', timeout=2).status_code == 200 else 1)"]
+      # Healthy while the model loads, or while its download is being
+      # retried (/health "loading"); unhealthy once the adapter says it
+      # can never load (/health "error": fetching off and no pack, a
+      # model onnxruntime cannot build, a bad det size). /health answers
+      # 200 in every state, so a status-code check alone called a dead
+      # adapter healthy. Images before ai-adapter#95 never say "error".
+      test: ["CMD", "python", "-c", "import httpx, sys; r = httpx.get('http://127.0.0.1:9005/health', timeout=2); sys.exit(0 if r.status_code == 200 and r.json().get('status') != 'error' else 1)"]
       interval: 15s
       timeout: 5s
       start_period: 180s
@@ -1575,6 +1592,11 @@ services:
         condition: service_healthy
       insightface-attendly-adapter:
         condition: service_healthy
+        # Optional: a face adapter that cannot load must not fail the
+        # whole `up`, which start.sh and the updater (and its rollback)
+        # stop on. Compose warns and starts this service anyway, and
+        # callers get the adapter's own 503 with its reason.
+        required: false
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
     command:
@@ -1653,6 +1675,11 @@ services:
         condition: service_started
       insightface-attendly-adapter:
         condition: service_healthy
+        # Optional: a face adapter that cannot load must not fail the
+        # whole `up`, which start.sh and the updater (and its rollback)
+        # stop on. Compose warns and starts this service anyway, and
+        # callers get the adapter's own 503 with its reason.
+        required: false
       insightface-attendly-register:
         condition: service_completed_successfully
       # The certificate the HTTPS listener serves: OpenNVR's own.
@@ -1769,6 +1796,11 @@ services:
         condition: service_started
       insightface-adapter:
         condition: service_healthy
+        # Optional: a face adapter that cannot load must not fail the
+        # whole `up`, which start.sh and the updater (and its rollback)
+        # stop on. Compose warns and starts this service anyway, and
+        # callers get the adapter's own 503 with its reason.
+        required: false
       insightface-register:
         condition: service_completed_successfully
     environment:
