@@ -614,6 +614,9 @@ function InstallWatcher({ id, onSettled }: { id: string; onSettled: () => void }
   return null
 }
 
+/** Longer than this, an install message is folded behind a toggle. */
+const LONG_INSTALL_MESSAGE = 160
+
 function InstallStatusNote({ status }: { status: InstallStatusResp }) {
   const variant: BadgeVariant =
     status.status === 'applied' ? 'success' : status.status === 'failed' ? 'destructive' : 'warning'
@@ -625,11 +628,28 @@ function InstallStatusNote({ status }: { status: InstallStatusResp }) {
         : status.status === 'pending'
           ? 'pending'
           : status.status
+  // The installer stores one sentence on success and the end of the
+  // output on failure, but rows written before that hold compose's whole
+  // build log — show anything long or multi-line folded, never inline.
+  const message = (status.message ?? '').trim()
+  const long = message.length > LONG_INSTALL_MESSAGE || message.includes('\n')
   return (
-    <div className="flex flex-wrap items-center gap-2 text-sm">
-      <Badge variant={variant}>{label}</Badge>
-      {status.message && <span className="text-[var(--text-dim)]">{status.message}</span>}
-      {status.image && <code className="text-xs text-[var(--text-dim)]">{status.image}</code>}
+    <div className="flex flex-col gap-1 text-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={variant}>{label}</Badge>
+        {message && !long && <span className="text-[var(--text-dim)]">{message}</span>}
+        {status.image && <code className="text-xs text-[var(--text-dim)]">{status.image}</code>}
+      </div>
+      {long && (
+        <details className="text-[var(--text-dim)]">
+          <summary className="cursor-pointer select-none">
+            {status.status === 'failed' ? 'What went wrong' : 'Installer output'}
+          </summary>
+          <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-[var(--bg-2)] p-2 text-xs">
+            {message}
+          </pre>
+        </details>
+      )}
     </div>
   )
 }
@@ -2219,20 +2239,31 @@ function InstallModal({
 
   const command = app.install?.command?.trim()
   const compose = app.install?.compose?.trim()
+  // Once the reconciler reports the app running, there is nothing left to
+  // install: no second Install button, no "or run this command" — just
+  // the outcome and where to find the app.
+  const installed = pollActive && status === 'applied'
 
   return (
-    <Modal open title={`Install ${app.name}`} onClose={onClose} widthClassName="w-[640px]">
+    <Modal open title={installed ? `${app.name} installed` : `Install ${app.name}`} onClose={onClose} widthClassName="w-[640px]">
       <div className="space-y-4">
         {/* Primary path: one-click install (opt-in + RBAC gated server-side). */}
         <div className="border border-[var(--border)] bg-[var(--bg-2)] p-3 space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Button variant="primary" onClick={() => installMutation.mutate()} disabled={inFlight}>
-              <Download size={14} /> {inFlight ? 'Installing…' : 'Install (one-click)'}
-            </Button>
-            <span className="text-xs text-[var(--text-dim)]">
-              The backend enforces opt-in and permissions; if it's disabled, use the command below.
-            </span>
-          </div>
+          {installed ? (
+            <div className="text-sm">
+              {app.name} is installed. It is listed under Installed, where you open and
+              configure it.
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="primary" onClick={() => installMutation.mutate()} disabled={inFlight}>
+                <Download size={14} /> {inFlight ? 'Installing…' : 'Install (one-click)'}
+              </Button>
+              <span className="text-xs text-[var(--text-dim)]">
+                The backend enforces opt-in and permissions; if it's disabled, use the command below.
+              </span>
+            </div>
+          )}
           {forbidden && <div className="text-sm text-[var(--warn)]">{forbidden}</div>}
           {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
           {pollActive && statusQuery.data && <InstallStatusNote status={statusQuery.data} />}
@@ -2245,18 +2276,22 @@ function InstallModal({
           )}
         </div>
 
-        <div className="text-sm text-[var(--text-dim)]">
-          Or run this in the OpenNVR checkout on your host, then the app self-registers and
-          appears under Installed. The checkout's .env carries the compose files the stack
-          runs with, so the command names none.
-        </div>
+        {!installed && (
+          <>
+            <div className="text-sm text-[var(--text-dim)]">
+              Or run this in the OpenNVR checkout on your host, then the app self-registers and
+              appears under Installed. The checkout's .env carries the compose files the stack
+              runs with, so the command names none.
+            </div>
 
-        {command && <CopyBlock label="Command" text={command} />}
+            {command && <CopyBlock label="Command" text={command} />}
 
-        {compose && <CopyBlock label="docker-compose.yml" text={compose} tall />}
+            {compose && <CopyBlock label="docker-compose.yml" text={compose} tall />}
 
-        {!command && !compose && (
-          <div className="text-sm text-[var(--text-dim)]">This entry provides no install instructions.</div>
+            {!command && !compose && (
+              <div className="text-sm text-[var(--text-dim)]">This entry provides no install instructions.</div>
+            )}
+          </>
         )}
       </div>
 

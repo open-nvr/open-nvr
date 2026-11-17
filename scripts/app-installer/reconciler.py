@@ -37,7 +37,9 @@ Design (desired-state + reconciler):
   ``docker compose ... up -d <id>`` and, when the INDEX carries a
   digest, pin the image to ``image@sha256:...``; on success mark
   ``status="applied"``, on non-zero exit mark ``status="failed"`` with
-  the stderr in ``message``.
+  the end of its output in ``message``. A success stores a sentence
+  ("<app> is running (<image>).") for the App Catalog; compose's full
+  output goes to this container's log.
 * For a ``desired="absent"`` row → run ``docker compose ... down`` /
   ``stop+rm`` for that service and mark ``status="applied"`` (removed).
   Teardown only needs the kebab-case id check (an app de-listed from
@@ -325,6 +327,54 @@ def restart_hint(app_id: str, env_text: str) -> str:
     return ""
 
 
+# The intent's ``message`` is what the App Catalog shows an operator, so
+# it is a sentence, not compose's output. Compose prints a BuildKit log
+# for every service in the command that builds from the checkout (the
+# egress-proxy, an app's config-init), all of it CACHED on a normal
+# install; stored verbatim it filled the install dialog with build steps
+# under an "applied" badge. The full output goes to the installer's own
+# log (``docker logs opennvr_app_installer``) instead.
+
+#: How much of a failed command's output the message keeps. Compose and
+#: BuildKit print the error last, so the tail is the part worth reading.
+FAILURE_TAIL_LINES = 12
+FAILURE_MAX_CHARS = 1500
+
+#: A BuildKit progress line: ``#7 [egress-proxy 2/4] RUN …``.
+_BUILDKIT_STEP = re.compile(r"^#\d+ ")
+
+
+def log_compose_output(app_id: str, step: str, result: "RunResult") -> None:
+    """Keep compose's full output where an operator debugging an install
+    looks for it: the installer's container log."""
+    output = "\n".join(
+        part.strip() for part in (result.stdout, result.stderr) if part and part.strip()
+    )
+    if output:
+        logger.info("app %r: compose %s output:\n%s", app_id, step, output)
+
+
+def failure_message(output: str | None, fallback: str) -> str:
+    """The end of a failed command's output, without BuildKit progress
+    lines unless they carry the error (``#11 ERROR: …``)."""
+    lines = [line.rstrip() for line in (output or "").splitlines() if line.strip()]
+    kept = [
+        line for line in lines
+        if not _BUILDKIT_STEP.match(line) or "error" in line.lower()
+    ] or lines
+    text = "\n".join(kept[-FAILURE_TAIL_LINES:]).strip()
+    if len(text) > FAILURE_MAX_CHARS:
+        text = "…" + text[-FAILURE_MAX_CHARS:]
+    return text or fallback
+
+
+def installed_message(app_id: str, adapters: tuple[str, ...]) -> str:
+    """What a successful install tells the operator. No image: the App
+    Catalog already shows the intent's image on its own line."""
+    with_adapters = f" with {', '.join(adapters)}" if adapters else ""
+    return f"{app_id} is running{with_adapters}."
+
+
 def build_up_argv(
     intent: Intent,
     *,
@@ -538,23 +588,27 @@ def reconcile_intent(
             compose_files=compose_files, profile=profile,
         )
         result = runner(argv, override or None)
+        log_compose_output(intent.id, "up", result)
         if result.returncode != 0:
-            return "failed", (
-                result.stderr or f"compose up exited {result.returncode}"
-            ).strip()
+            return "failed", failure_message(
+                result.stderr or result.stdout,
+                f"compose up exited {result.returncode}",
+            )
         applied = runner(
             build_apply_argv(
                 intent, compose_files=compose_files, profile=profile,
             ),
             override or None,
         )
+        log_compose_output(intent.id, "apply", applied)
         if applied.returncode == 0:
-            return "applied", (
-                applied.stdout or result.stdout or "compose up succeeded"
-            ).strip()
-        return "failed", (
-            applied.stderr or f"compose up exited {applied.returncode}"
-        ).strip()
+            return "applied", installed_message(
+                intent.id, curated.requires_adapters,
+            )
+        return "failed", failure_message(
+            applied.stderr or applied.stdout,
+            f"compose up exited {applied.returncode}",
+        )
 
     if intent.desired == "absent":
         # Decision 7 refcount: release this app's adapters, but only the
@@ -572,12 +626,15 @@ def reconcile_intent(
         )
         # No image override on teardown — ``rm`` doesn't resolve the image.
         result = runner(argv, None)
+        log_compose_output(intent.id, "rm", result)
         if result.returncode == 0:
-            message = (result.stdout or "compose down succeeded").strip()
+            released = f" and {', '.join(release)}" if release else ""
+            message = f"{intent.id}{released} removed."
             return "applied", message + restart_hint(intent.id, project_env)
-        return "failed", (
-            result.stderr or f"compose down exited {result.returncode}"
-        ).strip()
+        return "failed", failure_message(
+            result.stderr or result.stdout,
+            f"compose down exited {result.returncode}",
+        )
 
     return "failed", f"unknown desired state {intent.desired!r}"
 
