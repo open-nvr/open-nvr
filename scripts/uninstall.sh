@@ -75,6 +75,28 @@ die()  { printf '  ✗ %s\n' "$*" >&2; exit 1; }
 failed() { printf '  ✗ %s\n' "$*" >&2; FAILED=$((FAILED + 1)); }
 indent() { sed 's/^/      /'; }
 
+# A daemon that is down and a socket this user may not open both make the
+# docker client exit 1, and only its stderr tells them apart. The fix differs:
+# start the daemon, or join the docker group (not sudo: start.sh refuses it,
+# because the files it writes would then belong to root). Prints the headline
+# and, on later lines, the fix, and returns 0 when Docker is unusable;
+# returns 1 and prints nothing when it answers.
+docker_unavailable_reason() {
+    local err user
+    err=$(docker info 2>&1 >/dev/null) && return 1
+    user=$(id -un)
+    case "$err" in
+        *"permission denied"*|*"Permission denied"*)
+            printf 'Docker is running, but %s may not use it (permission denied on the Docker socket).\n' "$user"
+            printf '      → Join the docker group, open a new shell (or log out and back in), then re-run:\n'
+            printf '          sudo usermod -aG docker %s && newgrp docker\n' "$user"
+            printf '      → Not sudo ./start.sh: .env and the certificates would then belong to root.\n' ;;
+        *)
+            printf 'Docker is not running.\n'
+            printf '      → Start the Docker daemon, then re-run.\n' ;;
+    esac
+}
+
 usage() { sed -n '5,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
@@ -98,7 +120,8 @@ case "$(uname -s)" in
 esac
 [ -f docker-compose.yml ] && [ -f start.sh ] || die "$ROOT is not an OpenNVR folder"
 command -v docker >/dev/null 2>&1 || die "Docker is not installed, so its containers and volumes cannot be checked."
-docker info >/dev/null 2>&1 || die "Docker is not running. Start it and re-run: nothing has been changed."
+docker_reason=$(docker_unavailable_reason) && die "$docker_reason
+      Nothing has been changed."
 
 # An update in flight would bring the stack back up behind us. But the lock
 # is also held by the update runner's own check, once a minute and for a

@@ -917,7 +917,10 @@ run_update() {
     upd_lock
     PROJECT=$(upd_project)
     ARGS=$(compose_args) || exit 1
-    PLATFORM=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}') || { upd_fail "Docker is not running."; exit 1; }
+    PLATFORM=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null) || {
+        report_docker_unavailable || upd_fail "Docker did not answer 'docker version'."
+        exit 1
+    }
 
     # An update that was interrupted after the switch is finished first.
     local step

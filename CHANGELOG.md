@@ -331,6 +331,15 @@ Setup, updates and apps without hand edits. `./start.sh uninstall` gives a clean
 
 ### Fixed
 
+- **"Docker is not running" when it was.** On a Linux host whose user is
+  not in the docker group, `docker info` fails with "permission denied",
+  and the installer, `./start.sh validate`, the updater and the uninstaller
+  all read that as a daemon that is down. They now say Docker is running
+  but this user may not use it, and print the `usermod -aG docker` fix
+  (not sudo, which `start.sh` refuses). The installer also checks that the
+  checkout is writable before it starts, so a folder cloned with sudo is
+  named with its `chown` fix instead of dying on
+  `cp: cannot create regular file '.env': Permission denied`.
 - **Live video from outside after a cold start.** MediaMTX's start-up
   hook pushed the WebRTC address list before core existed, failed on the
   name lookup and never retried, so a fresh install or a full restart
