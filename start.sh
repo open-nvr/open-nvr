@@ -209,15 +209,16 @@ accel_args() {
 # ── USB webcams on this machine (docs/WEBCAM.md) ───────────
 # WEBCAMS=on (the .env.example default) adds docker-compose.webcams.yml,
 # where MediaMTX captures the webcam itself. Linux only: Docker Desktop
-# cannot see USB, and there the host agent does the job. The overlay also
-# bind-mounts /sys/class/video4linux into core, and Docker cannot create a
-# missing path under /sys ("mkdir ... operation not permitted"), so on a
-# kernel that has not loaded video4linux yet (no webcam ever plugged in, a
-# cloud VM) the overlay would stop core from starting at all. Then it is
-# left out until the next `up` after a webcam appears.
+# cannot see USB, and there the host agent does the job. Nothing else is
+# checked: the overlay mounts only paths every Linux host has (/dev), so it
+# goes in also on a machine that has never seen a webcam, and the first one
+# plugged in shows up without another `up`. (It used to need
+# /sys/class/video4linux, which exists only once a webcam driver loaded;
+# without it the overlay was left out and a fresh VM's Add Camera said
+# "set WEBCAMS=on" to an install that already had it.)
 webcams_usable() {
     [[ "$(get_env_var WEBCAMS)" == "on" && "$(uname -s)" == "Linux" \
-        && -d /sys/class/video4linux && -f docker-compose.webcams.yml ]]
+        && -f docker-compose.webcams.yml ]]
 }
 
 # What core needs to know about the host, persisted to .env for the same
@@ -235,8 +236,6 @@ apply_host_env() {
     [[ "$(get_env_var WEBCAMS)" == "on" && "$host_os" == linux ]] || return 0
     if [[ ! -f docker-compose.webcams.yml ]]; then
         echo -e "${YELLOW}Webcams:${NC} WEBCAMS=on but docker-compose.webcams.yml is missing — USB webcams stay off." >&2
-    elif [[ ! -d /sys/class/video4linux ]]; then
-        echo -e "${YELLOW}Webcams:${NC} this kernel has no video4linux yet (/sys/class/video4linux) — USB webcams stay off. Plug a webcam in, then run ./start.sh up again." >&2
     else
         local vgid; vgid=$(getent group video 2>/dev/null | cut -d: -f3)
         [[ -n "$vgid" && "$(get_env_var VIDEO_GID)" != "$vgid" ]] && set_env_var VIDEO_GID "$vgid"

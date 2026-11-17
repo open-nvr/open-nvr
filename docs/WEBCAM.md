@@ -61,13 +61,13 @@ unplugged and plugged back). No host agent, no sudo, nothing outside Docker.
 1. Nothing to switch on: `WEBCAMS=on` is the default in `.env` (an older
    `.env` that says `off` keeps it; change it and run `./start.sh up`).
    `./start.sh` adds `docker-compose.webcams.yml`: MediaMTX gets the host's
-   video devices and an ffmpeg, core gets the stable device names
+   video devices and an ffmpeg, core reads the stable device names
    (`/dev/v4l/by-id`) to list them. `VIDEO_GID` is filled in from the
-   host's `video` group. On a kernel that has not loaded video4linux yet
-   (no `/sys/class/video4linux`: no webcam ever plugged in, a cloud VM),
-   `start.sh` leaves the overlay out and says so, since Docker cannot mount
-   a missing `/sys` path and core would not start. Plug the webcam in and
-   run `./start.sh up` again.
+   host's `video` group. This happens on every Linux host, also one that
+   has never had a webcam (a VM, a server with no camera driver loaded):
+   a webcam plugged in later, even the very first one, shows up in the
+   dialog within a few seconds, with no restart. A virtual machine sees a
+   webcam only once the hypervisor passes the USB device through to it.
 2. **Add Camera → Manual → Webcam**, source **OpenNVR server**. The webcams
    plugged into the machine are listed by name. Pick one, name the camera,
    click **Add webcam**. It is live within a few seconds.

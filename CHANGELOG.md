@@ -25,6 +25,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A server's first USB webcam needed a restart, and a fresh VM was told
+  to turn on webcams that were already on.** On a Linux host whose kernel
+  had no video4linux yet (no webcam ever plugged in, every VM),
+  `./start.sh` left the webcam overlay out, so Add Camera → Server webcam
+  said "set `WEBCAMS=on`" to an install that already had it, and a webcam
+  plugged in later stayed invisible until the next `up`. The overlay no
+  longer mounts a path that exists only once a webcam is present: core
+  reads `/sys` through its own (the host kernel's) and the device names
+  through the host's `/dev`, read-only. So it always goes in, and the
+  first webcam shows up within seconds. This also fixes a server that
+  had a webcam at start: unplugging the last webcam made udev remove
+  `/dev/v4l`, core's mount of it went stale, and no webcam was listed
+  again until restart.
+
 - **The Windows updater read the wrong compose project when the folder
   name was not the project's.** It asked Docker through a template whose
   quotes Windows PowerShell 5.1 does not pass on, so it always fell back

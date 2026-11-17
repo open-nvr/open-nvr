@@ -13,9 +13,11 @@ Docker Desktop on macOS and Windows cannot see USB; there the host agent
 
 Two things live here:
 
-* **Enumeration.** Core reads ``/dev/v4l/by-id`` (mounted read-only by the
-  overlay) for the stable, port-independent device names and
-  ``/sys/class/video4linux/<node>/name`` for the human name. A webcam
+* **Enumeration.** Core reads the host's ``/dev/v4l/by-id`` (the overlay
+  mounts the host's ``/dev`` read-only at ``/host/dev``, because udev
+  removes ``/dev/v4l`` on the last unplug) for the stable, port-independent
+  device names and ``/sys/class/video4linux/<node>/name`` (the container's
+  own sysfs, which is the host kernel's) for the human name. A webcam
   exposes two nodes (capture and metadata); only the capture one
   (``index0``) is a camera.
 * **The ffmpeg command** MediaMTX runs: one capture, two outputs — the
@@ -33,11 +35,18 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
-#: Where the overlay mounts the host's stable device names and the sysfs
-#: names into the core container. Overridable for tests.
+#: Where core finds the host's stable device names and the sysfs names.
+#: Overridable for tests.
 BY_ID_DIR_ENV = "WEBCAM_BY_ID_DIR"
 SYSFS_DIR_ENV = "WEBCAM_SYSFS_DIR"
 DEFAULT_BY_ID_DIR = "/dev/v4l/by-id"
+#: The overlay mounts the host's /dev here (it used to mount /dev/v4l at
+#: /dev/v4l). Found by looking, not set by the overlay through
+#: WEBCAM_BY_ID_DIR: an older core reading that variable would hand out ids
+#: under /host/dev, which MediaMTX cannot open. This way an older core with
+#: the new overlay lists nothing, and this core with the old overlay still
+#: reads /dev/v4l.
+HOST_DEV_DIR = "/host/dev"
 DEFAULT_SYSFS_DIR = "/sys/class/video4linux"
 
 #: ``source_device`` of a webcam served by MediaMTX starts with this; the
@@ -74,7 +83,12 @@ def is_local_device(device: str | None) -> bool:
 
 
 def by_id_dir() -> str:
-    return os.environ.get(BY_ID_DIR_ENV, "").strip() or DEFAULT_BY_ID_DIR
+    explicit = os.environ.get(BY_ID_DIR_ENV, "").strip()
+    if explicit:
+        return explicit
+    if os.path.isdir(HOST_DEV_DIR):
+        return os.path.join(HOST_DEV_DIR, "v4l", "by-id")
+    return DEFAULT_BY_ID_DIR
 
 
 def sysfs_dir() -> str:
@@ -146,7 +160,9 @@ def list_local_webcams(*, by_id: str | None = None, sysfs: str | None = None) ->
                 name = ""
         # sysfs names often carry the node's role: "C920: HD Pro Webcam C920 (usb-…)"
         name = re.sub(r"\s*\(usb-[^)]*\)\s*$", "", name).strip()
-        out.append(LocalWebcam(id=link, name=name or _pretty_from_id(entry), node=node))
+        # The id is the path MediaMTX opens, whatever directory core read it
+        # from (the overlay lists them under /host/dev).
+        out.append(LocalWebcam(id=LOCAL_DEVICE_PREFIX + entry, name=name or _pretty_from_id(entry), node=node))
     return sorted(out, key=lambda w: (w.name.lower(), w.id))
 
 

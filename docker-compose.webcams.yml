@@ -1,10 +1,10 @@
 # USB webcams served by MediaMTX itself — Linux only (docs/WEBCAM.md).
 #
 # `./start.sh` adds this overlay when WEBCAMS=on in .env (the default) on a
-# Linux host whose kernel has video4linux (/sys/class/video4linux: core
-# mounts it, and Docker cannot create a missing /sys path, so without it
-# core would not start — start.sh leaves the overlay out and says so).
-# It gives MediaMTX the host's video devices and an ffmpeg, so a
+# Linux host — always, also on one that has never seen a webcam (a VM, a
+# kernel with no video4linux loaded): nothing here depends on a path that
+# exists only once a webcam is plugged in, so the first webcam ever plugged
+# in shows up without another `up`. It gives MediaMTX the host's video devices and an ffmpeg, so a
 # webcam camera's path runs its own capture (runOnInit, restarted on
 # unplug/replug) — no host install, no sudo, nothing outside Docker. Docker
 # Desktop on macOS/Windows cannot see USB; there the host agent does this job.
@@ -17,8 +17,16 @@
 #             webcam plugged in AFTER the container started is still there,
 #             and a cgroup rule admits only video4linux devices (major 81).
 #             The container runs as 1000:1000 plus the host's `video` group.
-#   core      sees the stable device names (/dev/v4l/by-id) and their sysfs
-#             names, read-only, to list them in Add Camera → Webcam.
+#   core      lists the webcams in Add Camera → Webcam from the host's stable
+#             device names (/dev/v4l/by-id) and their sysfs names. It mounts
+#             the host's whole /dev read-only at /host/dev, not /dev/v4l:
+#             udev creates /dev/v4l on the first plug and REMOVES it on the
+#             last unplug, and a bind of /dev/v4l keeps the deleted
+#             directory, so core never saw a webcam again until restarted
+#             (and a missing one could not be mounted at all). /dev itself
+#             never goes away. Read-only, and the device cgroup still lets
+#             core open no device node through it. The sysfs names need no
+#             mount: a container's own /sys is the host kernel's, live.
 services:
   mediamtx:
     # Its own image name. Without one, this build and the shell-less one in
@@ -46,8 +54,11 @@ services:
       - "${VIDEO_GID:-44}"
   opennvr-core:
     volumes:
-      - /dev/v4l:/dev/v4l:ro
-      - /sys/class/video4linux:/sys/class/video4linux:ro
+      - /dev:/host/dev:ro
+    # Core finds /host/dev by itself (services/local_webcams.py); no
+    # WEBCAM_BY_ID_DIR here, which an older core would turn into ids under
+    # /host/dev that MediaMTX cannot open. A webcam's id stays
+    # /dev/v4l/by-id/<name>.
     environment:
       # This overlay is in place: the dialog lists local webcams (or says
       # none is plugged in) rather than offering the host agent. The device

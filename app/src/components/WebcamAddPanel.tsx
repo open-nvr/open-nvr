@@ -89,9 +89,11 @@ function useLocalWebcams(enabled: boolean): LocalWebcams {
   return state
 }
 
-/** A Linux server with USB webcams switched off (WEBCAMS=off, or a kernel
- *  with no video4linux yet). The host agent is not the answer there —
- *  MediaMTX serves the webcam once WEBCAMS is on (#904). */
+/** A Linux server with USB webcams switched off (WEBCAMS=off, or set but
+ *  not applied since). The host agent is not the answer there — MediaMTX
+ *  serves the webcam once WEBCAMS is on (#904). A server that merely has no
+ *  webcam (a VM) does not land here: the overlay goes in anyway and the
+ *  picker says "plug one in". */
 function WebcamsOffNotice() {
   return (
     <div className="p-3 border border-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_10%,transparent)] text-sm space-y-1">
@@ -104,7 +106,7 @@ function WebcamsOffNotice() {
       <code className="block mt-1 px-2 py-1 text-xs font-mono bg-[var(--bg-2)] border border-[var(--border)] select-all break-all">WEBCAMS=on</code>
       <code className="block mt-1 px-2 py-1 text-xs font-mono bg-[var(--bg-2)] border border-[var(--border)] select-all break-all">./start.sh up</code>
       <div className="text-xs text-[var(--text-dim)]">
-        Already on? The server's kernel had no video4linux when OpenNVR started: plug the webcam in, then run <code className="font-mono">./start.sh up</code> again.
+        Already set? Run <code className="font-mono">./start.sh up</code> once so it takes effect.
       </div>
     </div>
   )
