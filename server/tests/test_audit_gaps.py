@@ -102,6 +102,13 @@ def _one(rows, action):
 # ── PTZ ─────────────────────────────────────────────────────────────────
 
 
+class _DB:
+    """A session the PTZ routes hand back (release) before the camera call."""
+
+    def close(self):
+        pass
+
+
 def _ptz_setup(monkeypatch):
     from routers import cameras as cameras_router
     from services.camera_service import CameraService
@@ -123,7 +130,7 @@ def _ptz_setup(monkeypatch):
 def test_ptz_move_is_audited(monkeypatch, audited):
     r = _ptz_setup(monkeypatch)
     asyncio.run(r.ptz_move(camera_id=3, x=0.5, y=-0.25, z=0.0, request=REQ,
-                           db=object(), current_user=ADMIN))
+                           db=_DB(), current_user=ADMIN))
     row = _one(audited, "ptz.move")
     assert row["entity_type"] == "camera" and row["entity_id"] == 3
     assert row["user_id"] == 1
@@ -132,7 +139,7 @@ def test_ptz_move_is_audited(monkeypatch, audited):
 
 def test_ptz_stop_is_audited(monkeypatch, audited):
     r = _ptz_setup(monkeypatch)
-    asyncio.run(r.ptz_stop(camera_id=3, request=REQ, db=object(),
+    asyncio.run(r.ptz_stop(camera_id=3, request=REQ, db=_DB(),
                            current_user=ADMIN))
     assert _one(audited, "ptz.stop")["details"] == {"success": True}
 
