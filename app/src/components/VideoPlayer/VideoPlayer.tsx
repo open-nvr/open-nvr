@@ -1436,8 +1436,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       return () => window.removeEventListener('keydown', handleKeyDown)
     }, [isPlaying, isMuted, isLive, currentTime, duration, volume, chrome])
 
-    // Double-click for fullscreen
-    const handleDoubleClick = () => handleFullscreen()
+    // Double-click on the picture toggles fullscreen. Not on a control drawn
+    // over it: tapping a button twice quickly (a PTZ pad arrow, snapshot, mute)
+    // is two presses, not a request to go fullscreen.
+    const handleDoubleClick = (e: React.MouseEvent) => {
+      if ((e.target as Element | null)?.closest?.('button, a, input, select, textarea, [role="group"], [role="slider"]')) return
+      handleFullscreen()
+    }
     const bare = chrome === 'none'
     const compact = chrome !== 'full'
 
