@@ -142,8 +142,12 @@ Three more jobs on the same cameras and the same face database:
   *mess* admits a student only inside a meal window and only with an unused
   booking for that meal; passing consumes the booking, so the QR code at the
   counter is replaced by the face at the barrier.
-* **Staff attendance.** The **Staff** page enrols staff from photos (their
-  own `ST` codes, their own category in the face database) and defines
+* **Staff attendance.** The **Staff** page enrols staff the way students are
+  enrolled since 1.3.0: details and consent first, then guided webcam capture
+  or chosen photos (their own `ST` codes, their own category in the face
+  database). Staff enrolled before 1.3.0 have no consent on record; their
+  faces keep working, and adding photos for them asks for consent first. It
+  also defines
   departments: a camera plus a working window. Inside the window the camera
   is checked every minute; the first sighting of the day is the check-in,
   the last one the check-out. **Staff Attendance** shows the day per
