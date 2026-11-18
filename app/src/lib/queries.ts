@@ -61,6 +61,8 @@ export type CameraItem = {
   /** The escalation proposal (weak evidence on the sub stream → detect on
    *  main?) or the decision in force; absent when there is nothing to show. */
   escalation?: { status: 'proposed' | 'accepted' | 'dismissed'; reasons: string[]; review_due: boolean } | null
+  /** Can pan/tilt/zoom: false hides PTZ controls; null/absent = not known yet. */
+  ptz_supported?: boolean | null
 }
 
 /** What a video surface needs to render a camera at the right shape. A named

@@ -897,6 +897,12 @@ class CameraResponse(CameraBase):
     # detecting on the main stream, or a decision about that is in force.
     # None = nothing to show. Only the camera list computes it.
     escalation: dict[str, Any] | None = None
+    # Whether the camera can pan/tilt/zoom: True / False once known (from a
+    # device-settings probe, or from a PTZ command it took or refused),
+    # None when nothing has asked it yet. The UI hides PTZ controls on
+    # False only, so a camera nobody has probed keeps them. Only the camera
+    # list computes it.
+    ptz_supported: bool | None = None
     # Live connectivity from the in-memory tracker (CameraStatusService:
     # MediaMTX path ready AND bytes flowing). None means UNKNOWN, not offline:
     # the backend restarted and the first reconcile pass has not landed yet,

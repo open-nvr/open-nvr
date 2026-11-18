@@ -34,6 +34,7 @@ import { useTranslation, useDateFormat, type DateFormatters } from '../../i18n'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useConfirm } from '../../components/ui/ConfirmDialog'
+import { PtzPad } from '../../components/PtzPad'
 
 type CameraLite = { id: number; name: string }
 
@@ -414,71 +415,7 @@ function UsersTab({ cameraId }: { cameraId: number }) {
 }
 
 function PtzTab({ cameraId }: { cameraId: number }) {
-  const { t } = useTranslation()
-  const { showError } = useSnackbar()
-  const move = async (x: number, y: number, z = 0) => {
-    try {
-      await apiService.ptzMove(cameraId, x, y, z)
-    } catch (e: any) {
-      showError(extractApiError(e, t('device.ptzError')))
-    }
-  }
-  const stop = async () => {
-    try {
-      await apiService.ptzStop(cameraId)
-    } catch {
-      /* stop is best-effort */
-    }
-  }
-  const Pad = ({
-    x,
-    y,
-    z,
-    label,
-    className = '',
-  }: {
-    x: number
-    y: number
-    z?: number
-    label: string
-    className?: string
-  }) => (
-    <button
-      className={`px-3 py-3 bg-[var(--panel-2)] border border-[var(--border)]  hover:bg-[var(--panel)] ${className}`}
-      onMouseDown={() => move(x, y, z || 0)}
-      onMouseUp={stop}
-      onMouseLeave={stop}
-    >
-      {label}
-    </button>
-  )
-  return (
-    <div className="space-y-4">
-      <p className="text-xs text-[var(--text-dim)]">
-        Hold a control to move the camera; release to stop.
-      </p>
-      <div className="grid grid-cols-3 gap-2 max-w-[220px]">
-        <div />
-        <Pad x={0} y={0.5} label="▲" />
-        <div />
-        <Pad x={-0.5} y={0} label="◀" />
-        <button
-          className="px-3 py-3 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--panel)]"
-          onClick={stop}
-        >
-          ■
-        </button>
-        <Pad x={0.5} y={0} label="▶" />
-        <div />
-        <Pad x={0} y={-0.5} label="▼" />
-        <div />
-      </div>
-      <div className="flex gap-2">
-        <Pad x={0} y={0} z={0.5} label="Zoom +" className="!py-2" />
-        <Pad x={0} y={0} z={-0.5} label="Zoom −" className="!py-2" />
-      </div>
-    </div>
-  )
+  return <PtzPad cameraId={cameraId} variant="panel" />
 }
 
 type DetectionSource = 'opennvr' | 'camera' | 'both'

@@ -37,6 +37,7 @@ import hashlib
 import html
 import re
 import secrets
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -144,6 +145,29 @@ _WSSE_PREFERRED_HOSTS: set[str] = set()
 def _auth_key(url: str) -> str:
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+#: One ``httpx.DigestAuth`` per host and credential pair, kept so a request
+#: can answer the camera's last Digest challenge up front. A fresh
+#: DigestAuth knows no challenge: it sends the request bare, takes the 401
+#: and sends it again, so every ONVIF call cost two round trips. PTZ felt
+#: that most: a press is a move, a release a stop, and each paid it. A
+#: challenge the camera has since retired is answered by a new 401, which
+#: DigestAuth meets the same way it always did. Keyed by a hash of the
+#: password, never the password, so a changed password starts afresh.
+_DIGEST_AUTHS: dict[tuple[str, str, str], httpx.DigestAuth] = {}
+
+
+def _digest_auth(auth_key: str, username: str, password: str, *, fresh: bool = False) -> httpx.DigestAuth:
+    key = (auth_key, username, hashlib.sha256(password.encode()).hexdigest())
+    auth = None if fresh else _DIGEST_AUTHS.get(key)
+    if auth is None:
+        auth = _DIGEST_AUTHS[key] = httpx.DigestAuth(username, password)
+    return auth
+
+
+def _has_challenge(auth: httpx.DigestAuth | None) -> bool:
+    return bool(auth is not None and getattr(auth, "_last_challenge", None))
 
 
 #: Camera clock minus this host's clock, in seconds, per ``_auth_key`` host:
@@ -279,11 +303,12 @@ async def _onvif_request(
     auth_key = _auth_key(url)
     wsse_first = has_credentials and auth_key in _WSSE_PREFERRED_HOSTS
 
-    def _digest_request():
+    def _digest_request(fresh: bool = False):
         return {
             "content": _soap_envelope(body_xml),
             "headers": headers,
-            "auth": httpx.DigestAuth(username, password) if has_credentials else None,
+            "auth": _digest_auth(auth_key, username, password, fresh=fresh)
+            if has_credentials else None,
         }
 
     def _wsse_request(clock_offset_s: float | None = None):
@@ -299,7 +324,16 @@ async def _onvif_request(
     async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
         try:
             first = _wsse_request() if wsse_first else _digest_request()
+            reused_challenge = _has_challenge(first.get("auth"))
             response = await client.post(url, **first)
+            if reused_challenge and (
+                response.status_code == 401 or _is_auth_fault(response.text)
+            ):
+                # The remembered challenge was refused in a way DigestAuth
+                # could not recover from on its own. Start over exactly as a
+                # first-ever request would, so a camera that dislikes reused
+                # challenges behaves as it did before they were reused.
+                response = await client.post(url, **_digest_request(fresh=True))
             if not (has_credentials and _is_auth_fault(response.text)):
                 return response.status_code, response.text
 
@@ -866,6 +900,28 @@ async def connect_and_get_profiles(
 # PTZ operations using HTTP Digest
 
 
+#: PTZ service XAddr per control endpoint, learned from GetCapabilities.
+#: Looked up before every move and stop until this existed, which was a
+#: GetCapabilities round trip in front of each one. A camera that answered
+#: with no PTZ service is cached as None for a while only, in case its
+#: firmware or settings change.
+_PTZ_URLS: dict[tuple[str, str, int], tuple[str | None, float]] = {}
+NO_PTZ_RECHECK_S = 600.0
+
+#: Raised by every PTZ call to a camera that advertises no PTZ service. 409,
+#: not 404: the camera exists, it just cannot do this, and the UI hides its
+#: PTZ controls when it sees it.
+NO_PTZ_DETAIL = "This camera has no PTZ"
+
+
+def _no_ptz() -> HTTPException:
+    return HTTPException(status_code=409, detail=NO_PTZ_DETAIL)
+
+
+def forget_ptz_service_url(ip: str, port: int, scheme: str = "http") -> None:
+    _PTZ_URLS.pop((scheme, ip, port), None)
+
+
 async def get_ptz_service_url(
     ip: str,
     username: str,
@@ -873,13 +929,21 @@ async def get_ptz_service_url(
     port: int = 80,
     scheme: str = "http",
 ) -> str | None:
-    """Get PTZ service URL from device capabilities."""
+    """Get PTZ service URL from device capabilities (cached per endpoint)."""
+    key = (scheme, ip, port)
+    hit = _PTZ_URLS.get(key)
+    if hit is not None:
+        url, at = hit
+        if url is not None or time.monotonic() - at < NO_PTZ_RECHECK_S:
+            return url
     try:
         capabilities = await get_capabilities(ip, username, password, port, scheme)
-        return capabilities.get("ptz")
     except Exception:
-        # Fallback to common paths
+        # Fallback to common paths; not cached, so the next call asks again.
         return f"{scheme}://{ip}:{port}/onvif/ptz_service"
+    url = capabilities.get("ptz")
+    _PTZ_URLS[key] = (url, time.monotonic())
+    return url
 
 
 async def ptz_continuous_move_digest(
@@ -896,7 +960,7 @@ async def ptz_continuous_move_digest(
     """PTZ continuous move using HTTP Digest auth."""
     ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
     if not ptz_url:
-        raise HTTPException(status_code=404, detail="PTZ service not available")
+        raise _no_ptz()
 
     body = f'''<tptz:ContinuousMove>
       <tptz:ProfileToken>{profile_token}</tptz:ProfileToken>
@@ -925,7 +989,7 @@ async def ptz_stop_digest(
     """PTZ stop using HTTP Digest auth."""
     ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
     if not ptz_url:
-        raise HTTPException(status_code=404, detail="PTZ service not available")
+        raise _no_ptz()
 
     body = f"""<tptz:Stop>
       <tptz:ProfileToken>{profile_token}</tptz:ProfileToken>
@@ -985,7 +1049,7 @@ async def ptz_get_presets_digest(
     """The camera's stored PTZ presets for a media profile."""
     ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
     if not ptz_url:
-        raise HTTPException(status_code=404, detail="PTZ service not available")
+        raise _no_ptz()
     body = f"""<tptz:GetPresets>
       <tptz:ProfileToken>{html.escape(profile_token)}</tptz:ProfileToken>
     </tptz:GetPresets>"""
@@ -1008,7 +1072,7 @@ async def ptz_goto_preset_digest(
     preset_token = _checked_preset_token(preset_token)
     ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
     if not ptz_url:
-        raise HTTPException(status_code=404, detail="PTZ service not available")
+        raise _no_ptz()
     body = f"""<tptz:GotoPreset>
       <tptz:ProfileToken>{html.escape(profile_token)}</tptz:ProfileToken>
       <tptz:PresetToken>{preset_token}</tptz:PresetToken>
@@ -1036,7 +1100,7 @@ async def ptz_set_preset_digest(
         token_xml = f"<tptz:PresetToken>{_checked_preset_token(preset_token)}</tptz:PresetToken>"
     ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
     if not ptz_url:
-        raise HTTPException(status_code=404, detail="PTZ service not available")
+        raise _no_ptz()
     body = f"""<tptz:SetPreset>
       <tptz:ProfileToken>{html.escape(profile_token)}</tptz:ProfileToken>
       <tptz:PresetName>{html.escape(name)}</tptz:PresetName>
