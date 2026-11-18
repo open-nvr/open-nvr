@@ -115,7 +115,6 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
   const redrawRef = useRef<() => void>(() => {})
-  const frameRef = useRef<OverlayFrame | null>(null)
   // Latest frame per source: a detector frame never retires an app's
   // boxes, nor the other way round.
   const framesRef = useRef<Map<string, OverlayFrame>>(new Map())
@@ -219,10 +218,12 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
         const fadeOut = s.lostAt == null ? 1 : Math.max(0, 1 - (now - s.lostAt) / FADE_OUT_MS)
         const alpha = fadeIn * fadeOut * (calibrating && s.source === TIER0_SOURCE ? 0.6 : 1)
         if (s.lostAt == null) alive++
-        const z = zoomRef.current
-        drawTrack(ctx, z && z.s > 1 ? zoomed(s, z, canvas.clientWidth || 1, canvas.clientHeight || 1) : s, W, H, alpha)
+        // One draw per box: mapped through the zoom, wearing an app's label
+        // when an app named this track.
         const wearer = plan.labelled.get(key)
-        drawTrack(ctx, s, W, H, alpha, wearer ? wearLabel(s.track, wearer.track) : undefined)
+        const z = zoomRef.current
+        drawTrack(ctx, z && z.s > 1 ? zoomed(s, z, canvas.clientWidth || 1, canvas.clientHeight || 1) : s, W, H, alpha,
+          wearer ? wearLabel(s.track, wearer.track) : undefined)
       }
       if (badge && anyFresh) drawBadge(ctx, W, alive, fpsRef.current.fps)
       if (shown.size) requestTick()
