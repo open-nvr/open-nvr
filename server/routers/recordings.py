@@ -55,7 +55,11 @@ from services import mediamtx_client
 from services.cloud_recording_service import CloudRecordingService
 from services.retention_service import RetentionService
 from services.storage_service import (
+    PATH_CONTAINER_LAYER,
+    PATH_OTHER_MOUNT,
     RecordingPathError,
+    recordings_mount,
+    recordings_path_status,
     safe_recording_path,
     storage_service,
 )
@@ -481,13 +485,25 @@ async def get_storage(
         val = json.loads(row.json_value or "{}")
     except Exception:
         val = {}
-    obj = RecordingStorageSettings(**{**RecordingStorageSettings().model_dump(), **val})
+    try:
+        obj = RecordingStorageSettings(
+            **{**RecordingStorageSettings().model_dump(), **val}
+        )
+    except ValueError:
+        # A stored value today's validator refuses must not lock the operator
+        # out of the page that fixes it.
+        obj = RecordingStorageSettings()
     result = obj.model_dump()
-    if (
-        not result.get("recordings_base_path")
-        or result.get("recordings_base_path") == "recordings"
-    ):
-        result["recordings_base_path"] = settings.recordings_base_path
+    stored = val.get("recordings_base_path") or val.get("root_path")
+    if not stored or stored == "recordings":
+        stored = None
+    result["recordings_base_path"] = stored or settings.recordings_base_path
+    # Where recordings land on the host and whether the saved path gets
+    # there, so the page can say "set RECORDINGS_PATH in .env" instead of
+    # offering a path box that silently records into the container (#976).
+    result.update(recordings_mount())
+    result["custom_path"] = stored
+    result["path_status"] = recordings_path_status(stored)
     # Disk usage of the effective volume, so the settings UI can show a
     # capacity gauge next to the path (fields absent on stat failure).
     try:
@@ -537,7 +553,29 @@ async def update_storage(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
-    """Update recording storage settings and sync to MediaMTX."""
+    """Update recording storage settings and sync to MediaMTX.
+
+    A blank or missing path resets to the default. Under Docker, a path
+    that would land in the containers' own layers is refused: the host
+    location is ``RECORDINGS_PATH`` in ``.env`` (#976).
+    """
+    status = recordings_path_status(payload.recordings_base_path)
+    if status == PATH_CONTAINER_LAYER:
+        mount = recordings_mount()
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"'{payload.recordings_base_path}' is inside the OpenNVR "
+                "containers, not on this machine's disk: recordings saved "
+                "there are lost when the containers are recreated. To store "
+                "recordings in another folder or drive, set RECORDINGS_PATH "
+                "in .env (currently "
+                f"'{mount['host_path']}') and run ./start.sh up (.\\start.ps1 "
+                f"up on Windows). Leave this setting at "
+                f"{mount['container_path']}."
+            ),
+        )
+
     # Update DB
     row = _get_or_init(db, "recordings_storage", RecordingStorageSettings())
     obj = RecordingStorageSettings(**payload.model_dump())
@@ -551,11 +589,20 @@ async def update_storage(
     if not effective_path or effective_path == "recordings":
         effective_path = settings.recordings_base_path
     result["recordings_base_path"] = effective_path
+    result.update(recordings_mount())
+    result["custom_path"] = obj.recordings_base_path
+    result["path_status"] = status
 
-    # Sync to MediaMTX if path changed or just to ensure consistency
-    if payload.recordings_base_path:
-        sync_result = await _sync_storage_to_mediamtx(db, effective_path)
-        result.update(sync_result)
+    # Always re-point MediaMTX, including on a reset to the default: skipping
+    # the sync for a blank path left MediaMTX recording to the old one.
+    sync_result = await _sync_storage_to_mediamtx(db, effective_path)
+    result.update(sync_result)
+    if status == PATH_OTHER_MOUNT:
+        result["warning"] = (
+            f"'{effective_path}' is a volume mounted into the core container. "
+            "MediaMTX writes the recordings, so it needs the same mount at "
+            "the same path, or recordings will not reach that volume."
+        )
 
     return result
 
