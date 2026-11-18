@@ -253,8 +253,10 @@ class OccupancyHeatmap(TypedPayload):
 class OverlayBoxes(TypedPayload):
     """``overlay.boxes.v1`` — boxes an app wants drawn over the live video.
 
-    ``boxes`` entries are ``{"label", "box": [x, y, w, h], "score"?, "id"?}``
-    with ``box`` normalized to 0..1 of the frame — an app never knows the
+    ``boxes`` entries are ``{"label", "box": [x, y, w, h], "score"?, "id"?,
+    "track"?}`` with ``box`` normalized to 0..1 of the frame. ``track`` is
+    the Tier-0 track id the box labels: the live view then draws ``label``
+    on that track's own box (see EVENT_CONTRACTS.md) — an app never knows the
     resolution the operator is watching at, and core draws over streams
     of every size. Send ``frame: {w, h}`` if your boxes are in pixels and
     core will normalize; send nothing drawable and nothing is drawn.

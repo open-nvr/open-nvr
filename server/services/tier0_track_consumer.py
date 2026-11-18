@@ -183,13 +183,20 @@ def to_overlay_payload(
         box = normalize_box(t.get("box"), fw, fh)
         if box is None:
             continue
-        tracks_out.append({
+        row = {
             "id": t.get("id"),
             "label": str(t.get("label") or "object"),
             "score": round(score, 3),
             "box": box,
             "stationary": bool(t.get("stationary", False)),
-        })
+        }
+        # An app box may name the Tier-0 track it labels (overlay.boxes.v1
+        # ``track``): the live view then draws the app's label on that
+        # track's own box instead of a second box over the same object.
+        ref = t.get("track")
+        if isinstance(ref, (int, str)) and not isinstance(ref, bool) and str(ref).strip():
+            row["track"] = ref
+        tracks_out.append(row)
     if not tracks_out:
         return None
     return {
@@ -433,7 +440,8 @@ async def _handle_app_message(msg) -> None:
                # xywh straight in silently produced boxes of the wrong size.
                "tracks": [{"id": b.get("id"), "label": b.get("label"),
                            "score": b.get("score", 1.0),
-                           "box": _xywh_to_xyxy(b.get("box"))}
+                           "box": _xywh_to_xyxy(b.get("box")),
+                           "track": b.get("track")}
                           for b in (payload.get("boxes") or []) if isinstance(b, dict)]}
         out = to_overlay_payload(raw, min_score=0.0)
         if out is None:
