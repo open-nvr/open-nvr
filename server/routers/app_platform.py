@@ -44,7 +44,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from core.config import settings
-from core.database import get_db
+from core.database import get_db, release
 from models import AppAlert, AppState, Camera, InstalledApp
 from routers.internal_camera_agent import (
     _app_roster, _require_internal_key,
@@ -113,10 +113,14 @@ async def app_camera_description(
     model run on a camera nobody pointed it at.
     """
     cam = _camera_in_roster(db, principal, camera_id)
+    cam_id = int(cam.id)
+    # A look can take as long as a capture plus a model call; the roster
+    # check was the last query, so the connection goes back first.
+    release(db)
     from services.camera_description import describe
 
     max_age_s = max(0.0, min(3600.0, float(max_age_s)))
-    return await describe(int(cam.id), max_age_s, prefer_store=bool(prefer_store))
+    return await describe(cam_id, max_age_s, prefer_store=bool(prefer_store))
 
 
 @router.get("/cameras/{camera_id}/snapshot")
@@ -127,14 +131,22 @@ async def app_camera_snapshot(
 ):
     """The camera's current frame as JPEG (via the KAI-C capture pool —
     the same path the zone editor's snapshot uses). 503 when no frame
-    can be captured."""
+    can be captured, and for a disabled camera without trying."""
     cam = _camera_in_roster(db, principal, camera_id)
+    if not cam.is_active:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Camera is disabled")
     if not cam.rtsp_url:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="Camera has no stream URL configured")
+    rtsp_url, cam_id = cam.rtsp_url, int(cam.id)
+    # The capture waits up to its stream timeout (30 s) on a slow or dead
+    # camera. Holding the roster query's transaction through that wait let
+    # one app polling one bad camera pin the whole pool and hang /health.
+    release(db)
     from services.kai_c_service import get_kai_c_service
 
-    jpeg = await get_kai_c_service().capture_frame_bytes(cam.rtsp_url, cam.id)
+    jpeg = await get_kai_c_service().capture_frame_bytes(rtsp_url, cam_id)
     if not jpeg:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="Could not capture a frame (camera offline?)")

@@ -550,6 +550,63 @@ def test_snapshot_and_recordings_follow_the_roster(platform):
     assert url.startswith("http://mediamtx:9996/get?") and "duration=60" in url
 
 
+def test_the_snapshot_gives_its_connection_back_before_the_capture_waits(platform, monkeypatch):
+    """A capture waits out a 30 s stream timeout on a slow camera. The
+    route used to hold the roster query's transaction through that wait,
+    so one app polling one flaky camera every few seconds filled the
+    pool (20 + 10) and hung /health on a live site. The connection must
+    be released before the capture starts, for the description route too.
+    """
+    from routers import app_platform as plat_router
+
+    tc, ids, _, key = platform
+    order: list[str] = []
+    real_release = plat_router.release
+    monkeypatch.setattr(plat_router, "release",
+                        lambda db: (order.append("release"), real_release(db)))
+
+    class _Kai:
+        async def capture_frame_bytes(self, rtsp_url, camera_id):
+            order.append("capture")
+            return b"\xff\xd8snap"
+
+    import services.kai_c_service as kcs
+    monkeypatch.setattr(kcs, "get_kai_c_service", lambda: _Kai())
+    r = tc.get(f"/internal/app/cameras/{ids['gate']}/snapshot", headers=_app(key))
+    assert r.status_code == 200
+    assert order == ["release", "capture"]
+
+    order.clear()
+
+    async def _describe(camera_id, max_age_s, prefer_store=False):
+        order.append("describe")
+        return {"camera_id": camera_id}
+
+    import services.camera_description as cd
+    monkeypatch.setattr(cd, "describe", _describe)
+    r = tc.get(f"/internal/app/cameras/{ids['gate']}/description", headers=_app(key))
+    assert r.status_code == 200 and r.json() == {"camera_id": ids["gate"]}
+    assert order == ["release", "describe"]
+
+
+def test_a_disabled_camera_is_not_captured(platform, monkeypatch):
+    """Disabling a camera is how an operator stops a bad one; the app
+    snapshot route ignored the flag and kept paying the capture timeout."""
+    tc, ids, SessionLocal, key = platform
+    with SessionLocal() as s:
+        s.get(Camera, ids["gate"]).is_active = False
+        s.commit()
+
+    class _Kai:
+        async def capture_frame_bytes(self, rtsp_url, camera_id):
+            raise AssertionError("captured a disabled camera")
+
+    import services.kai_c_service as kcs
+    monkeypatch.setattr(kcs, "get_kai_c_service", lambda: _Kai())
+    r = tc.get(f"/internal/app/cameras/{ids['gate']}/snapshot", headers=_app(key))
+    assert r.status_code == 503 and r.json()["detail"] == "Camera is disabled"
+
+
 def test_the_playback_url_carries_a_credential_for_that_one_path(platform):
     """The roster check decides which camera an app may ASK about; the
     URL it is handed decides which camera it can actually FETCH. Those

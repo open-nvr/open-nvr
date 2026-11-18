@@ -3274,9 +3274,11 @@ async def get_camera_snapshot(
         )
 
     # A webcam has no URL; "" makes the capture read its MediaMTX path.
-    jpeg = await get_kai_c_service().capture_frame_bytes(
-        camera.rtsp_url or "", camera.id
-    )
+    rtsp_url, cam_id = camera.rtsp_url or "", int(camera.id)
+    # The capture can wait out a 30 s stream timeout; the connection must
+    # not sit idle in transaction for it.
+    release(db)
+    jpeg = await get_kai_c_service().capture_frame_bytes(rtsp_url, cam_id)
     if not jpeg:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
