@@ -294,22 +294,34 @@ export function PtzPad({
           )}
         </div>
       </div>
-      <div className={clsx('mt-2 flex items-center gap-1', big ? 'text-xs' : 'text-[10px]')}>
-        <span className="text-[var(--text-dim)] mr-1">{t('ptz.speed')}</span>
-        {SPEEDS.map((_, i) => (
-          <button
-            key={i}
-            type="button"
-            aria-pressed={speed === i}
-            className={clsx(
-              'px-2 py-0.5 border border-[var(--border)]',
-              speed === i ? 'bg-[var(--accent)] text-white' : 'bg-[var(--panel-2)] hover:bg-[var(--panel)]',
-            )}
-            onClick={() => { setSpeed(i); saveSpeed(i) }}
-          >
-            {t(['ptz.speedSlow', 'ptz.speedMedium', 'ptz.speedFast'][i])}
-          </button>
-        ))}
+      {/* Speed: as wide as the buttons above and never wider. `w-0 min-w-full`
+          keeps the row out of the pad's own width, so a longer label or
+          translation can't push it past the pad's edge; each button takes its
+          word's width plus a share of the rest. The visible "Speed"
+          label is gone for room; the group and each button still say it. */}
+      <div
+        role="group"
+        aria-label={t('ptz.speed')}
+        className={clsx('mt-2 flex w-0 min-w-full gap-1', big ? 'text-xs' : 'text-[10px]')}
+      >
+        {SPEEDS.map((_, i) => {
+          const label = t(['ptz.speedSlow', 'ptz.speedMedium', 'ptz.speedFast'][i])
+          return (
+            <button
+              key={i}
+              type="button"
+              aria-pressed={speed === i}
+              title={`${t('ptz.speed')}: ${label}`}
+              className={clsx(
+                'min-w-0 flex-auto truncate px-1 py-0.5 border border-[var(--border)]',
+                speed === i ? 'bg-[var(--accent)] text-white' : 'bg-[var(--panel-2)] hover:bg-[var(--panel)]',
+              )}
+              onClick={() => { setSpeed(i); saveSpeed(i) }}
+            >
+              {label}
+            </button>
+          )
+        })}
       </div>
       {(unsupported || error) && (
         <div role="status" className={clsx('mt-1 max-w-[220px]', big ? 'text-xs' : 'text-[10px]', 'text-[var(--danger)]')}>
