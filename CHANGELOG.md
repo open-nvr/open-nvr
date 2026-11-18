@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Try a workflow on recent events.** `POST /api/v1/workflows/{id}/try`
+  replays up to 20 of the last days' inbox alerts the workflow's trigger
+  matches (or an unsaved draft's) through its steps as a Test run would go:
+  AI steps for real, actions "would have", Ask a person its default. It
+  returns at once; `GET /api/v1/workflows/tries/{try_id}` gives progress
+  and each event's steps with the AI trace. A trial is not a run: it never
+  shows among the workflow's runs or counts against its limits (RFC #620,
+  "try on recent events"; #773).
 - **An app can read the frame a plate was read from.** A visit's evidence
   photo is the best view of the track. When two vehicles follow each other
   closely the tracker can carry one track across both, and that photo is
