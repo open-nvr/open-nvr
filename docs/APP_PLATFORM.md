@@ -57,6 +57,7 @@ caps   = nvr.ai.capabilities()                    # adapters, tasks, health
 | `camera.stream(cam)`, `stream_grant(cam)` | `GET /internal/app/cameras/{id}/stream` | roster |
 | `recordings(cam).list/url/frame_at` | `GET /internal/app/recordings/{id}[/url]`, `/internal/camera-agent/recordings/frame` | roster |
 | `timeline.search/evidence` | `GET /internal/camera-agent/events[/{id}/evidence]` | roster |
+| `timeline.plate_frame/plate_crop` | `GET /internal/camera-agent/events/{id}/plate-frame`, `.../plate-evidence` — the frame a plate was read from, and the plate cut out of it | roster |
 | `timeline.find(text)` | `GET /internal/app/search` | roster |
 | `timeline.plate_stats/summary/sessions` | `GET /internal/app/plates/*` | roster |
 | `timeline.plates_inside()` | `GET /internal/app/plates/inside` | roster |
