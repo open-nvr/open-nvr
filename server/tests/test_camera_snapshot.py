@@ -91,6 +91,14 @@ def _call(monkeypatch, *, camera=_camera(), jpeg=JPEG, get_by_id_raises=None):
 
     calls: list = []
 
+    class _Session:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    db = _Session()
+
     def _get_by_id(db, camera_id, user_id):
         if get_by_id_raises is not None:
             raise get_by_id_raises
@@ -98,6 +106,9 @@ def _call(monkeypatch, *, camera=_camera(), jpeg=JPEG, get_by_id_raises=None):
 
     class _StubKaiC:
         async def capture_frame_bytes(self, rtsp_url, camera_id):
+            # The capture can wait out a 30 s stream timeout; the request's
+            # connection must already be back in the pool by then.
+            assert db.closed, "the DB session was held through the capture"
             calls.append((rtsp_url, camera_id))
             return jpeg
 
@@ -110,7 +121,7 @@ def _call(monkeypatch, *, camera=_camera(), jpeg=JPEG, get_by_id_raises=None):
 
     resp = asyncio.run(
         cameras_router.get_camera_snapshot(
-            camera_id=getattr(camera, "id", 7), db=object(), current_user=_user()
+            camera_id=getattr(camera, "id", 7), db=db, current_user=_user()
         )
     )
     return resp, calls
