@@ -49,6 +49,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The §889 security check no longer reports a camera as ZTE because its
+  name or maker contains the letters "zte".** The covered-vendor match was a
+  plain substring, so a camera named "Aztec Gate" or made by Aztech came up
+  as NDAA §889 covered equipment. A brand of four letters or fewer now has to
+  stand on its own ("ZTE F660", "zte-cam-2"); the longer names match as
+  before. The vendor list moved from an undated dict to
+  `server/config/covered_vendors.json`, which gives each vendor's §889 and
+  FCC Covered List listing date and source, and the check's result names the
+  list release it used (`covered_list`). `server/scripts/refresh_covered_vendors.py`
+  regenerates the file from a hash-checked daily release of the public lists
+  and stops if §889 ever names a vendor the check has no brand string for.
+  The check still reads only local files.
+
 - **An app upgrade that asks for a new event scope is no longer refused on
   the apps bus.** What an app may publish and subscribe to on the apps bus
   is written from its manifest, but only when core issued the app its key

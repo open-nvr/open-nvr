@@ -23,8 +23,9 @@ credential config). Nothing is scanned, nothing leaves the box — it just reads
 what OpenNVR already knows and flags the obvious problems, with a focus on the
 NDAA §889 / FCC Covered-List covered-vendor question.
 
-Scope is deliberately *lite*: it uses the small, **public** FCC Covered List of
-named vendors and a few widely-documented affiliate brands. It is NOT a formal
+Scope is deliberately *lite*: it uses the small, **public** §889 / FCC Covered
+List of named vendors (``config/covered_vendors.json``, dated and sourced) and
+a few widely-documented affiliate brands. It is NOT a formal
 assessment — it does not resolve unlabelled OEM rebrands, cross-reference CVEs,
 probe the network, or produce a signed, audit-ready attestation. Those are the
 job of the full **OpenNVR Scout** assessment, which this check points to when it
@@ -36,33 +37,54 @@ unit-testable without a database.
 from __future__ import annotations
 
 import ipaddress
+import json
+import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
-# Public FCC Covered List / NDAA §889 named vendors, plus a few widely-documented
-# consumer/OEM affiliate brands. Public information — not a proprietary map.
-# key (lowercased substring) -> (covered parent display name, kind)
-_COVERED: dict[str, tuple[str, str]] = {
-    "hikvision": ("Hikvision", "branded"),
-    "dahua": ("Dahua", "branded"),
-    "huawei": ("Huawei", "branded"),
-    "hytera": ("Hytera", "branded"),
-    "zte": ("ZTE", "branded"),
-    "ezviz": ("Hikvision", "affiliate"),
-    "annke": ("Hikvision", "affiliate"),
-    "lorex": ("Dahua", "affiliate"),
-}
+# The §889 named vendors with their FCC Covered List entries (listing date and
+# source for each), plus a few widely-documented consumer/OEM affiliate brands.
+# Generated from a dated, hash-checked release of the public lists by
+# scripts/refresh_covered_vendors.py; the check reads it locally.
+_COVERED_FILE = Path(__file__).resolve().parent.parent / "config" / "covered_vendors.json"
+
+
+@lru_cache(maxsize=1)
+def _covered() -> tuple[dict, list[tuple[re.Pattern[str], dict]]]:
+    """Load the covered-vendor snapshot once: its metadata and one matcher per
+    brand string. A brand of four letters or fewer must stand on its own
+    (``zte`` matches "ZTE F660" but not "Aztec Gate"); longer brand names do
+    not occur inside ordinary words and still match anywhere."""
+    with open(_COVERED_FILE, encoding="utf-8") as fh:
+        snap = json.load(fh)
+    matchers: list[tuple[re.Pattern[str], dict]] = []
+    for vendor in snap["vendors"]:
+        for key in vendor["match"]:
+            pat = re.escape(key.lower())
+            if len(key) <= 4:
+                pat = rf"(?<![a-z]){pat}(?![a-z])"
+            matchers.append((re.compile(pat), {**vendor, "key": key}))
+    meta = {k: snap[k] for k in ("source", "release", "built_at")}
+    return meta, matchers
+
 
 _WEAK_USERNAMES = {"", "admin", "root", "user", "guest", "administrator"}
 
 
 def covered_status(*text: Optional[str]) -> Optional[dict]:
-    """Match camera identity strings against the public covered list. Returns
-    ``{covered, parent, kind, match}`` or None. ``kind`` is 'branded' for a
-    named covered vendor, 'affiliate' for a documented consumer/OEM brand."""
+    """Match camera identity strings against the covered list. Returns
+    ``{covered, parent, kind, match, lists}`` or None. ``kind`` is 'branded'
+    for a named covered vendor, 'affiliate' for a documented consumer/OEM
+    brand. ``lists`` gives each list naming the vendor, its listing date and
+    source (empty for an affiliate brand, which no list names)."""
     hay = " ".join((t or "").lower() for t in text)
-    for key, (parent, kind) in _COVERED.items():
-        if key in hay:
-            return {"covered": True, "parent": parent, "kind": kind, "match": key}
+    for pat, vendor in _covered()[1]:
+        if pat.search(hay):
+            return {
+                "covered": True, "parent": vendor["parent"], "kind": vendor["kind"],
+                "match": vendor["key"], "lists": vendor.get("lists", []),
+            }
     return None
 
 
@@ -156,6 +178,8 @@ def check_cameras(cameras: Iterable[Any]) -> dict:
             "weak_credentials": weak_n,
         },
         "cameras": devices,
+        # Which release of the lists this run matched against.
+        "covered_list": _covered()[0],
         # Honest scope note surfaced by the UI — this is the upsell hook.
         "note": (
             "Lite local check from your camera inventory using the public FCC "

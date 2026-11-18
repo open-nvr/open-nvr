@@ -13,6 +13,8 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.security_compliance import check_cameras, covered_status  # noqa: E402
@@ -67,3 +69,44 @@ def test_plaintext_default_when_no_url():
     r = check_cameras([_cam(manufacturer="Axis", rtsp_url="", ip_address="10.0.0.5",
                             username="operator1")])
     assert r["summary"]["plaintext_stream"] == 1     # no encrypted profile → flagged
+
+
+def test_short_brand_must_stand_alone():
+    # "zte" used to match inside any word: a camera named "Aztec Gate" or made
+    # by Aztech was reported as ZTE equipment.
+    assert covered_status("Aztech", "IPC100", "Aztec Gate") is None
+    assert covered_status("ZTE", "F660")["parent"] == "ZTE"
+    assert covered_status("", "zte-cam-2")["parent"] == "ZTE"
+    # longer brand names still match anywhere, as before
+    assert covered_status("", "", "HikvisionLobby")["parent"] == "Hikvision"
+
+
+def test_covered_vendor_carries_its_listings():
+    lists = covered_status("Dahua")["lists"]
+    assert {entry["list"].split(" ")[0] for entry in lists} == {"Section", "FCC"}
+    for entry in lists:
+        assert entry["listed_on"] and entry["source_url"].startswith("https://")
+    assert covered_status("Lorex")["lists"] == []    # affiliate brand: no list names it
+    r = check_cameras([_cam(manufacturer="Axis")])
+    assert r["covered_list"]["release"].startswith("data-")
+    assert r["covered_list"]["built_at"]
+
+
+def test_refresh_builds_from_the_lists_and_refuses_unknown_vendors():
+    from scripts.refresh_covered_vendors import build_snapshot
+
+    def row(src, slug, name, listed_on):
+        return {"RECORD_ID": f"{src}-{slug}", "NAME_ORG": name, "LIST_NAME": src,
+                "LISTED_ON": listed_on, "SOURCE_URL": "https://example.gov/" + src,
+                "SOURCE_DOC": "doc"}
+
+    far = [row("us_far_889", "zte-corporation", "ZTE Corporation", "2019-08-13")]
+    fcc = [row("us_fcc_covered", "zte-corporation", "ZTE Corporation", "2021-03-12")]
+    snap = build_snapshot(far, fcc, release="data-x", built_at="t", sha256={})
+    zte = snap["vendors"][0]
+    assert zte["parent"] == "ZTE" and zte["match"] == ["zte"]
+    assert [entry["listed_on"] for entry in zte["lists"]] == ["2019-08-13", "2021-03-12"]
+
+    far.append(row("us_far_889", "newco", "NewCo Ltd", "2027-01-01"))
+    with pytest.raises(ValueError, match="NewCo"):
+        build_snapshot(far, fcc, release="data-x", built_at="t", sha256={})
