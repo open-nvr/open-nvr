@@ -58,6 +58,8 @@ import type { AspectOverride } from '../../lib/aspect'
 import { useVideoSize } from '../../hooks/useVideoAspect'
 import { VideoControls } from './VideoControls'
 import { DetectionOverlay } from './DetectionOverlay'
+import { useDigitalZoom } from '../../hooks/useDigitalZoom'
+import { ZoomBadge } from '../ZoomBadge'
 import { AlertCircle } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 
@@ -215,6 +217,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const { t } = useTranslation()
     const containerRef = useRef<HTMLDivElement>(null)
     const videoRef = useRef<HTMLVideoElement>(null)
+    // Digital zoom (Ctrl + scroll, drag to pan) on the feed box.
+    const zoom = useDigitalZoom()
     const hlsInstanceRef = useRef<Hls | null>(null)
     const pcRef = useRef<RTCPeerConnection | null>(null)
     const whepResourceRef = useRef<string | null>(null)
@@ -1480,8 +1484,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             follows from the band's height and the stream's aspect ratio.
             min-w-0 keeps the video's intrinsic size from inflating it. */}
         <div
+          {...(bare ? {} : zoom.surfaceProps)}
           className="relative h-full min-w-0 bg-black"
-          style={videoAspect && !cover ? { aspectRatio: String(videoAspect) } : { width: '100%' }}
+          style={{
+            ...(videoAspect && !cover ? { aspectRatio: String(videoAspect) } : { width: '100%' }),
+            ...(bare ? {} : zoom.surfaceProps.style),
+          }}
         >
 
         {/* Video element. The feed box already carries the stream's DISPLAY
@@ -1490,23 +1498,33 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             no-op whenever the coded and display aspects agree. object-contain
             until metadata lands, when the box has no aspect of its own yet and
             fill would smear the frame across the whole tile. */}
-        <video
-          ref={videoRef}
-          className={`block w-full h-full ${cover ? 'object-cover' : stretched ? 'object-fill' : 'object-contain'}`}
-          playsInline
-          muted={isMuted}
-          autoPlay={autoPlay}
-          crossOrigin="anonymous"
-          preload={mode === 'playback' ? 'metadata' : 'auto'}
-        />
+        {/* Zoom layer: clips to the feed box so a zoomed picture never
+            spills into the letterbox, and carries the zoom transform. */}
+        <div className="absolute inset-0 overflow-hidden">
+          <div className="w-full h-full" style={zoom.layerStyle}>
+            <video
+              ref={videoRef}
+              className={`block w-full h-full ${cover ? 'object-cover' : stretched ? 'object-fill' : 'object-contain'}`}
+              playsInline
+              muted={isMuted}
+              autoPlay={autoPlay}
+              crossOrigin="anonymous"
+              preload={mode === 'playback' ? 'metadata' : 'auto'}
+            />
+          </div>
+        </div>
 
         {/* Detection overlay — INSIDE the feed box so its rectangle is the
             video's rectangle and normalized boxes need no letterbox math.
             Below the loading/error overlays in the tree, so those still
             cover it. Live only: recordings carry no live tracks. */}
         {mode === 'live' && showDetections && cameraId != null && (
-          <DetectionOverlay cameraId={cameraId} />
+          <DetectionOverlay cameraId={cameraId} zoom={zoom.view} />
         )}
+
+        {/* Top-left, under the tile's name: the top-right corner holds the
+            tile's own buttons (change camera) on Live View. */}
+        {!bare && <ZoomBadge zoom={zoom} className="top-8 left-2" />}
 
         {/* Loading / reconnecting overlay */}
         {compact && (isLoading || isReconnecting) && !error && (
