@@ -46,6 +46,13 @@ class WorkflowIn(BaseModel):
     yaml: str = Field(..., min_length=1, max_length=MAX_YAML)
 
 
+class TryIn(BaseModel):
+    #: An unsaved edit to try instead of the saved version (the editor's draft).
+    yaml: str | None = Field(None, min_length=1, max_length=MAX_YAML)
+    limit: int = Field(10, ge=1, le=20)
+    days: int = Field(7, ge=1, le=30)
+
+
 class StateIn(BaseModel):
     state: Literal["off", "test", "on"]
 
@@ -152,6 +159,16 @@ async def list_templates(_user: User = Depends(_view)):
     return list(catalog.templates())
 
 
+@router.get("/tries/{try_id}")
+async def get_try(try_id: str, _user: User = Depends(_view)):
+    """A trial's progress and results, as the engine gives them."""
+    from workflows.trial import trials
+    trial = trials().get(try_id)
+    if trial is None:
+        raise HTTPException(status_code=404, detail="Trial not found (a restart forgets them)")
+    return trial
+
+
 @router.get("/runs/{run_id}")
 async def get_run(run_id: int, db: Session = Depends(get_db), _user: User = Depends(_view)):
     run = db.get(WorkflowRun, run_id)
@@ -245,6 +262,37 @@ async def press_button(workflow_id: int, request: Request, db: Session = Depends
     audit_request(db, request, action="workflow.button", user_id=user.id,
                   entity_type="workflow", entity_id=wf.id, details={"run": runs[0]})
     return {"run_id": runs[0], "test": wf.state == "test"}
+
+
+@router.post("/{workflow_id}/try")
+async def try_workflow(workflow_id: int, body: TryIn, request: Request,
+                       db: Session = Depends(get_db), user: User = Depends(_manage)):
+    """Try the workflow (or the draft in ``yaml``) on recent alerts it would
+    have triggered: each one through the steps as a Test run, AI steps for
+    real, results only (RFC #620, "try on recent events"). Returns at once;
+    poll ``GET /workflows/tries/{try_id}``."""
+    from workflows.trial import MAX_EVENTS, matching_alerts, trials
+    wf = _workflow_or_404(db, workflow_id)
+    if body.yaml is not None:
+        report = catalog.check(body.yaml, db)
+        if not report.ok:
+            return _refused(report)
+        doc, version = report.doc, None
+    else:
+        current = next((v for v in wf.versions if v.version == wf.current_version), None)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Workflow has no saved version")
+        doc, version = yaml.safe_load(current.yaml), current.version
+    if not isinstance((doc.get("when") or {}).get("alert"), dict):
+        raise HTTPException(status_code=422, detail=(
+            "Trying on recent events works for workflows started by an app's alert"))
+    envelopes = matching_alerts(db, doc, days=body.days, limit=min(body.limit, MAX_EVENTS),
+                                now=datetime.now(UTC))
+    trial = trials().start(wf.id, version, doc, envelopes)
+    audit_request(db, request, action="workflow.try", user_id=user.id,
+                  entity_type="workflow", entity_id=wf.id,
+                  details={"events": len(envelopes), "draft": body.yaml is not None})
+    return {"try_id": trial["id"], "state": trial["state"], "total": trial["total"]}
 
 
 @router.get("/{workflow_id}/runs")
