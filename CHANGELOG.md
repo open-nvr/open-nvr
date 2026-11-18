@@ -8,6 +8,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Workflows start on more than app alerts.** `when: event` (a
+  contracted event such as `plate.recognized.v1`, by its schema and
+  cameras; its payload's values fill placeholders like `{plate_text}`),
+  `when: camera_offline` (a camera down for `for`, once per outage),
+  `when: schedule` (`at` local time, optional `days`, once per slot even
+  across a restart) and `when: button` (`POST
+  /api/v1/workflows/{id}/run`, `workflows.manage`). Each passes the same
+  `if:` guards and limits as an alert. Events no workflow listens for are
+  dropped before the database.
 - **An app can read the frame a plate was read from.** A visit's evidence
   photo is the best view of the track. When two vehicles follow each other
   closely the tracker can carry one track across both, and that photo is
