@@ -27,10 +27,15 @@
  * turning. Pointer capture keeps the release with the button that was
  * pressed, so sliding off it still stops the camera, and merely moving the
  * mouse across the pad sends nothing (it used to send a stop per button).
+ *
+ * Keyboard, anywhere inside ``keyScope`` (the Live View tile; the pad itself
+ * in settings), never page-wide: arrows move and combine into diagonals,
+ * + / − zoom, Shift moves fast, 1–9 recall presets, Home the Home preset,
+ * Esc closes the pad.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import {
   ArrowDown, ArrowDownLeft, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUp,
   ArrowUpLeft, ArrowUpRight, Minus, Plus, Square, X,
@@ -39,11 +44,11 @@ import { clsx } from 'clsx'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { useTranslation } from '../i18n'
-
-/** Pan, tilt, zoom direction, each -1, 0 or 1; scaled by the speed. */
-type Vec = readonly [number, number, number]
+import { DIR_KEYS, buttonFor, digitOf, heldVector, homePreset, presetForDigit } from '../lib/ptzKeys'
+import type { Preset, Vec } from '../lib/ptzKeys'
 
 const SPEEDS = [0.2, 0.5, 1] as const
+const FAST = SPEEDS.length - 1
 const SPEED_KEY = 'opennvr.ptzSpeed'
 
 function loadSpeed(): number {
@@ -66,7 +71,7 @@ function saveSpeed(i: number) {
 
 // ── per-camera command queue ───────────────────────────────────────────
 
-type Cmd = { kind: 'move'; vec: Vec } | { kind: 'stop' }
+type Cmd = { kind: 'move'; vec: Vec } | { kind: 'stop' } | { kind: 'goto'; token: string }
 
 const queues = new Map<number, { tail: Promise<void>; last: Cmd['kind'] | null }>()
 
@@ -79,6 +84,7 @@ function send(cameraId: number, cmd: Cmd, onError: (e: unknown) => void, force =
   q.tail = q.tail.then(async () => {
     try {
       if (cmd.kind === 'move') await apiService.ptzMove(cameraId, cmd.vec[0], cmd.vec[1], cmd.vec[2])
+      else if (cmd.kind === 'goto') await apiService.ptzGotoPreset(cameraId, cmd.token)
       else await apiService.ptzStop(cameraId)
     } catch (e) {
       onError(e)
@@ -87,23 +93,39 @@ function send(cameraId: number, cmd: Cmd, onError: (e: unknown) => void, force =
   queues.set(cameraId, q)
 }
 
-// ── the pad ─────────────────────────────────────────────────────────────
+// ── presets, for the 1–9 and Home keys ─────────────────────────────────
 
-const KEYS: Record<string, Vec> = {
-  ArrowUp: [0, 1, 0],
-  ArrowDown: [0, -1, 0],
-  ArrowLeft: [-1, 0, 0],
-  ArrowRight: [1, 0, 0],
-  '+': [0, 0, 1],
-  '=': [0, 0, 1],
-  '-': [0, 0, -1],
+/** Presets per camera, kept a minute so a run of key presses asks once;
+ *  a press while the list is still loading waits for the same request. */
+const presetCache = new Map<number, { at: number; presets: Promise<Preset[]> }>()
+
+function loadPresets(cameraId: number): Promise<Preset[]> {
+  const hit = presetCache.get(cameraId)
+  if (hit && Date.now() - hit.at < 60_000) return hit.presets
+  const presets = apiService.ptzPresets(cameraId).then(
+    ({ data }) => (data as { presets?: Preset[] } | undefined)?.presets ?? [])
+  presetCache.set(cameraId, { at: Date.now(), presets })
+  // A failed load is not remembered: the next press asks again.
+  presets.catch(() => { if (presetCache.get(cameraId)?.presets === presets) presetCache.delete(cameraId) })
+  return presets
 }
+
+// ── keys ───────────────────────────────────────────────────────────────
+
+function isTyping(t: EventTarget | null): boolean {
+  const el = t as HTMLElement | null
+  return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))
+}
+
+// ── the pad ─────────────────────────────────────────────────────────────
 
 export function PtzPad({
   cameraId,
   variant = 'overlay',
   onClose,
   onUnsupported,
+  onMovingChange,
+  keyScope,
 }: {
   cameraId: number
   /** 'overlay' sits on a live tile; 'panel' fills a settings page. */
@@ -111,21 +133,43 @@ export function PtzPad({
   onClose?: () => void
   /** The camera answered that it has no PTZ. */
   onUnsupported?: () => void
+  /** True while a press or held key is moving the camera. */
+  onMovingChange?: (moving: boolean) => void
+  /** Where the keyboard drives the camera. Defaults to the pad itself. */
+  keyScope?: RefObject<HTMLElement | null>
 }) {
   const { t } = useTranslation()
   const [speed, setSpeed] = useState(loadSpeed)
   const [active, setActive] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
   const [unsupported, setUnsupported] = useState(false)
   const activeRef = useRef<string | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
-  const errorTimer = useRef<number | undefined>(undefined)
+  const msgTimer = useRef<number | undefined>(undefined)
+  const heldRef = useRef<Set<string>>(new Set())
+  const shiftRef = useRef(false)
   // Callbacks from the parent change on its every render; read through a
   // ref so the effects below never re-run (and stop the camera) because of it.
   const onUnsupportedRef = useRef(onUnsupported)
   onUnsupportedRef.current = onUnsupported
+  const onMovingRef = useRef(onMovingChange)
+  onMovingRef.current = onMovingChange
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
   const tRef = useRef(t)
   tRef.current = t
+  const speedRef = useRef(speed)
+  speedRef.current = speed
+  const unsupportedRef = useRef(unsupported)
+  unsupportedRef.current = unsupported
+
+  const say = useCallback((kind: 'error' | 'note', msg: string) => {
+    setError(kind === 'error' ? msg : null)
+    setNote(kind === 'note' ? msg : null)
+    window.clearTimeout(msgTimer.current)
+    msgTimer.current = window.setTimeout(() => { setError(null); setNote(null) }, kind === 'error' ? 5000 : 2500)
+  }, [])
 
   const onError = useCallback((err: unknown) => {
     const e = err as { status?: number; response?: { status?: number } }
@@ -136,37 +180,73 @@ export function PtzPad({
     }
     const fallback = tRef.current('ptz.failed')
     const msg = extractApiError(err, fallback)
-    setError(msg.length < 120 ? msg : fallback)
-    window.clearTimeout(errorTimer.current)
-    errorTimer.current = window.setTimeout(() => setError(null), 5000)
-  }, [])
+    say('error', msg.length < 120 ? msg : fallback)
+  }, [say])
 
-  const start = (id: string, vec: Vec) => {
-    if (unsupported) return
-    const s = SPEEDS[speed]
+  const setActiveId = useCallback((id: string | null) => {
+    const was = activeRef.current
     activeRef.current = id
     setActive(id)
+    if ((was === null) !== (id === null)) onMovingRef.current?.(id !== null)
+  }, [])
+
+  /** Move along ``vec`` as press ``id``; Shift (or ``fast``) means full speed. */
+  const start = useCallback((id: string, vec: Vec, fast = false) => {
+    if (unsupportedRef.current) return
+    const s = SPEEDS[fast || shiftRef.current ? FAST : speedRef.current]
+    setActiveId(id)
     send(cameraId, { kind: 'move', vec: [vec[0] * s, vec[1] * s, vec[2] * s] }, onError)
-  }
+  }, [cameraId, onError, setActiveId])
 
   const stop = useCallback((id?: string) => {
-    if (activeRef.current === null || (id !== undefined && activeRef.current !== id)) return
-    activeRef.current = null
-    setActive(null)
+    const cur = activeRef.current
+    if (cur === null || (id !== undefined && cur !== id)) return
+    setActiveId(null)
     send(cameraId, { kind: 'stop' }, onError)
-  }, [cameraId, onError])
+  }, [cameraId, onError, setActiveId])
+
+  /** Re-send the held keys' direction: a key pressed or released, or Shift. */
+  const steerByKeys = useCallback(() => {
+    const v = heldVector(heldRef.current)
+    if (v[0] === 0 && v[1] === 0 && v[2] === 0) {
+      if (activeRef.current?.startsWith('key:')) stop()
+      return
+    }
+    start(`key:${buttonFor(v) ?? v.join(',')}`, v)
+  }, [start, stop])
+
+  const gotoPreset = useCallback(async (which: number | 'home') => {
+    if (unsupportedRef.current) return
+    let presets: Preset[]
+    try {
+      presets = await loadPresets(cameraId)
+    } catch (e) {
+      onError(e)
+      return
+    }
+    const p = which === 'home' ? homePreset(presets) : presetForDigit(presets, which)
+    const tt = tRef.current
+    if (!p) {
+      say('error', which === 'home' ? tt('ptz.noHomePreset') : tt('ptz.noPreset', { n: which }))
+      return
+    }
+    if (activeRef.current !== null) setActiveId(null)
+    heldRef.current.clear()
+    send(cameraId, { kind: 'goto', token: p.token }, onError)
+    say('note', tt('ptz.goingToPreset', { name: p.name }))
+  }, [cameraId, onError, say, setActiveId])
 
   // Never leave the camera moving: closing the pad, switching tabs or
   // windows mid-press all stop it.
   useEffect(() => {
-    const halt = () => stop()
+    const halt = () => { heldRef.current.clear(); shiftRef.current = false; stop() }
     window.addEventListener('blur', halt)
     document.addEventListener('visibilitychange', halt)
     return () => {
       window.removeEventListener('blur', halt)
       document.removeEventListener('visibilitychange', halt)
       halt()
-      window.clearTimeout(errorTimer.current)
+      window.clearTimeout(msgTimer.current)
     }
   }, [stop])
 
@@ -175,29 +255,70 @@ export function PtzPad({
     if (variant === 'overlay') rootRef.current?.focus({ preventScroll: true })
   }, [variant])
 
-  const onKeyDown = (e: ReactKeyboardEvent) => {
-    if (e.key === 'Escape' && onClose) {
-      e.stopPropagation()
-      onClose()
-      return
+  // The keyboard, anywhere in the scope. Native listeners on the scope run
+  // before the player's own window-level keys (arrows = volume / seek), and
+  // stopping the event here keeps those from also firing while PTZ is open.
+  useEffect(() => {
+    const scope = keyScope?.current ?? rootRef.current
+    if (!scope) return
+    const down = (e: KeyboardEvent) => {
+      if (isTyping(e.target) || e.ctrlKey || e.altKey || e.metaKey) return
+      if (e.key === 'Shift') {
+        if (!shiftRef.current) {
+          shiftRef.current = true
+          if (activeRef.current?.startsWith('key:')) steerByKeys()
+        }
+        return
+      }
+      if (e.key === 'Escape' && onCloseRef.current) {
+        e.preventDefault(); e.stopPropagation()
+        onCloseRef.current()
+        return
+      }
+      const digit = digitOf(e.code)
+      if (digit !== null || e.code === 'Home') {
+        e.preventDefault(); e.stopPropagation()
+        if (!e.repeat) void gotoPreset(digit ?? 'home')
+        return
+      }
+      if (!DIR_KEYS[e.code]) return
+      e.preventDefault(); e.stopPropagation()
+      if (e.repeat || heldRef.current.has(e.code)) return
+      heldRef.current.add(e.code)
+      steerByKeys()
     }
-    const vec = KEYS[e.key]
-    if (!vec) return
-    e.preventDefault()
-    e.stopPropagation()
-    if (e.repeat || activeRef.current === `key:${e.key}`) return
-    start(`key:${e.key}`, vec)
-  }
-  const onKeyUp = (e: ReactKeyboardEvent) => {
-    if (!KEYS[e.key]) return
-    e.preventDefault()
-    e.stopPropagation()
-    stop(`key:${e.key}`)
-  }
+    const up = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') {
+        shiftRef.current = false
+        if (activeRef.current?.startsWith('key:')) steerByKeys()
+        return
+      }
+      if (!heldRef.current.has(e.code)) return
+      e.preventDefault(); e.stopPropagation()
+      heldRef.current.delete(e.code)
+      steerByKeys()
+    }
+    // Focus leaving the scope takes the keyboard with it: stop.
+    const out = (e: FocusEvent) => {
+      if (scope.contains(e.relatedTarget as Node | null)) return
+      heldRef.current.clear()
+      shiftRef.current = false
+      if (activeRef.current?.startsWith('key:')) stop()
+    }
+    scope.addEventListener('keydown', down)
+    scope.addEventListener('keyup', up)
+    scope.addEventListener('focusout', out)
+    return () => {
+      scope.removeEventListener('keydown', down)
+      scope.removeEventListener('keyup', up)
+      scope.removeEventListener('focusout', out)
+    }
+  }, [keyScope, steerByKeys, gotoPreset, stop])
 
   const big = variant === 'panel'
   const cell = big ? 'h-12 w-12' : 'h-8 w-8'
   const icon = big ? 18 : 15
+  const lit = active?.startsWith('key:') ? active.slice(4) : active
 
   // A render helper, not a component: a component declared here would be a
   // new type on every render, remounting the button mid-press and dropping
@@ -213,7 +334,7 @@ export function PtzPad({
         cell,
         'flex items-center justify-center border border-[var(--border)] select-none touch-none',
         'disabled:opacity-40',
-        active === id
+        lit === id
           ? 'bg-[var(--accent)] text-white'
           : 'bg-[var(--panel-2)] text-[var(--text)] hover:bg-[var(--accent)]/30',
       )}
@@ -221,7 +342,7 @@ export function PtzPad({
         if (e.button !== 0) return
         e.preventDefault()
         e.currentTarget.setPointerCapture(e.pointerId)
-        start(id, vec)
+        start(id, vec, e.shiftKey)
       }}
       onPointerUp={() => stop(id)}
       onPointerCancel={() => stop(id)}
@@ -238,18 +359,18 @@ export function PtzPad({
       tabIndex={0}
       role="group"
       aria-label={t('video.ptz')}
-      onKeyDown={onKeyDown}
-      onKeyUp={onKeyUp}
-      onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-          const k = activeRef.current
-          if (k?.startsWith('key:')) stop(k)
-        }
-      }}
+      aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Shift + - 1 2 3 4 5 6 7 8 9 Home Escape"
+      title={big ? undefined : t('ptz.keys')}
       className={clsx(
         'outline-none text-[var(--text)]',
         variant === 'overlay'
-          ? 'bg-black/80 border border-[var(--border)] p-2 focus-visible:ring-1 focus-visible:ring-[var(--accent)]'
+          ? clsx(
+              'bg-black/80 border border-[var(--border)] p-2 focus-visible:ring-1 focus-visible:ring-[var(--accent)]',
+              // Out of the picture's way until it is used: faded unless the
+              // mouse is on it, the camera is moving, or it has news.
+              'transition-opacity duration-200 hover:opacity-100',
+              active || error || note || unsupported ? 'opacity-100' : 'opacity-40',
+            )
           : 'inline-block',
       )}
     >
@@ -266,8 +387,8 @@ export function PtzPad({
             disabled={unsupported}
             className={clsx(cell, 'flex items-center justify-center border border-[var(--border)] bg-[var(--panel-2)] hover:bg-[var(--panel)] disabled:opacity-40')}
             onClick={() => {
-              activeRef.current = null
-              setActive(null)
+              heldRef.current.clear()
+              setActiveId(null)
               send(cameraId, { kind: 'stop' }, onError, true)
             }}
           >
@@ -323,9 +444,16 @@ export function PtzPad({
           )
         })}
       </div>
-      {(unsupported || error) && (
-        <div role="status" className={clsx('mt-1 max-w-[220px]', big ? 'text-xs' : 'text-[10px]', 'text-[var(--danger)]')}>
-          {unsupported ? t('ptz.noPtz') : error}
+      {(unsupported || error || note) && (
+        <div
+          role="status"
+          className={clsx(
+            'mt-1 w-0 min-w-full',
+            big ? 'text-xs' : 'text-[10px]',
+            unsupported || error ? 'text-[var(--danger)]' : 'text-[var(--text-dim)]',
+          )}
+        >
+          {unsupported ? t('ptz.noPtz') : error ?? note}
         </div>
       )}
       {big && <p className="mt-3 text-xs text-[var(--text-dim)]">{t('ptz.hint')}</p>}

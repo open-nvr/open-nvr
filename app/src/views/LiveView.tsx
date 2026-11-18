@@ -104,6 +104,9 @@ export function LiveView() {
 
   // Camera display order - array of camera IDs in display sequence
   // This determines which camera appears in which tile position
+  // The one tile whose PTZ pad is open: opening another closes it, so the
+  // arrow keys can never be steering two cameras.
+  const [ptzTile, setPtzTile] = useState<number | null>(null)
   const [cameraDisplayOrder, setCameraDisplayOrder] = useState<number[]>(() => {
     try {
       const saved = localStorage.getItem('liveview-camera-display-order')
@@ -494,6 +497,8 @@ export function LiveView() {
                       isDragging={activeDragId === `tile-${i}`}
                       canManage={canManageCameras}
                       showDetections={showDetections}
+                      ptzOpen={ptzTile === i}
+                      onPtzOpenChange={(open) => setPtzTile((cur) => (open ? i : cur === i ? null : cur))}
                     />
                   </DraggableTile>
                 </DroppableTile>
@@ -617,6 +622,8 @@ function Tile({
   isDragging = false,
   canManage = false,
   showDetections = false,
+  ptzOpen = false,
+  onPtzOpenChange,
 }: {
   index: number
   availableCameras: Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null, ptz_supported?: boolean | null}>
@@ -627,13 +634,19 @@ function Tile({
   isDragging?: boolean
   showDetections?: boolean
   canManage?: boolean
+  ptzOpen?: boolean
+  onPtzOpenChange?: (open: boolean) => void
 }) {
   const { t } = useTranslation()
   const [cameraId, setCameraId] = useState<number | null>(null)
   const [cameraName, setCameraName] = useState<string>('')
   const [urls, setUrls] = useState<{ whep?: string; hls?: string; token?: string } | null>(null)
   const playerRef = useRef<VideoPlayerHandle>(null)
-  const [ptzOpen, setPtzOpen] = useState(false)
+  const setPtzOpen = (open: boolean) => onPtzOpenChange?.(open)
+  const [ptzMoving, setPtzMoving] = useState(false)
+  // The tile is where the PTZ keys work: click the picture and the arrows
+  // still steer this camera, never another tile's.
+  const tileRef = useRef<HTMLDivElement>(null)
   // Set when a PTZ command came back "this camera has no PTZ"; the camera
   // list says the same on its next load.
   const [noPtz, setNoPtz] = useState(false)
@@ -641,10 +654,14 @@ function Tile({
   const [showPicker, setShowPicker] = useState(false)
 
   // Close the PTZ pad when the tile's camera changes.
+  const prevCameraRef = useRef(assignedCameraId)
   useEffect(() => {
-    setPtzOpen(false)
+    if (prevCameraRef.current === assignedCameraId) return
+    prevCameraRef.current = assignedCameraId
+    onPtzOpenChange?.(false)
     setNoPtz(false)
-  }, [assignedCameraId])
+  }, [assignedCameraId, onPtzOpenChange])
+  useEffect(() => { if (!ptzOpen) setPtzMoving(false) }, [ptzOpen])
   // Backend-pushed connectivity: `status` drives the offline overlay;
   // `version` bumps on each recovery, re-running the URL fetch below (fresh
   // 60-min stream token) and remounting the player so the stream resumes
@@ -745,7 +762,7 @@ function Tile({
         : 'degraded'
 
   return (
-    <div className="group/tile relative h-full overflow-hidden bg-black">
+    <div ref={tileRef} className="group/tile relative h-full overflow-hidden bg-black">
       {/* Absolute so the <video>'s intrinsic size (e.g. a 1:1 stream) can't
           stretch this box — the player sizes itself to the stream's DISPLAY
           aspect inside it and letterboxes against black. */}
@@ -771,7 +788,7 @@ function Tile({
             showDetections={showDetections}
             onTogglePtz={
               ptzOpen || (!noPtz && assignedCamera?.ptz_supported !== false)
-                ? () => setPtzOpen((s) => !s)
+                ? () => setPtzOpen(!ptzOpen)
                 : undefined
             }
             ptzActive={ptzOpen}
@@ -784,6 +801,8 @@ function Tile({
                     cameraId={cameraId}
                     onClose={() => setPtzOpen(false)}
                     onUnsupported={() => setNoPtz(true)}
+                    onMovingChange={setPtzMoving}
+                    keyScope={tileRef}
                   />
                 </div>
               ) : null}
@@ -837,6 +856,11 @@ function Tile({
         </div>
       )}
 
+      {/* PTZ is open on this tile: the arrow keys steer this camera. */}
+      {ptzOpen && cameraId && (
+        <div className="pointer-events-none absolute inset-0 z-30 ring-2 ring-inset ring-[var(--accent)]" aria-hidden="true" />
+      )}
+
       {/* Label band, as on the dashboard wall: state dot, name, REC — legible
           over any picture without a solid bar. Above the offline overlay so
           a dead tile still says which camera it is. */}
@@ -847,6 +871,14 @@ function Tile({
             <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: STATE_INK[state] }} aria-hidden="true" />
             <span className="text-[11px] font-medium truncate [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">{displayName}</span>
             <span className="ml-auto shrink-0 flex items-center gap-2 leading-none text-[9px] font-bold tracking-[0.15em] [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">
+              {ptzOpen && (
+                <span
+                  className={clsx('px-1 py-0.5 bg-[var(--accent)] text-white [text-shadow:none]', ptzMoving && 'animate-pulse')}
+                  title={t('ptz.activeTitle')}
+                >
+                  {t('ptz.activeBadge')}
+                </span>
+              )}
               {!hasLink && <span className="text-[var(--on-video-warn)]">{t('live.noLink')}</span>}
               {rec === 'recording' ? (
                 <span className="flex items-center gap-1 text-[var(--on-video-danger)]">
