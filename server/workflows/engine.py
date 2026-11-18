@@ -613,6 +613,8 @@ class _Walker:
                         [*tokens, "ai", outcome], ai_decided=True)
 
     def _ai_over_budget(self) -> bool:
+        if self.run.workflow_id is None:    # a trial (workflows/trial.py): no workflow's budget
+            return False
         wf = self.db.get(Workflow, self.run.workflow_id)
         version = (self.db.query(WorkflowVersion)
                    .filter(WorkflowVersion.workflow_id == wf.id,
