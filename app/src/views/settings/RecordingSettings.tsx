@@ -18,7 +18,7 @@
 
 import { useState, useEffect } from 'react'
 import { apiService } from '../../lib/apiService'
-import { Save, FolderOpen, Clock, Shield, HardDrive, Archive, Link2, Trash2, RefreshCw } from 'lucide-react'
+import { Save, FolderOpen, Clock, Shield, HardDrive, Archive, Link2, Trash2, RefreshCw, AlertTriangle, RotateCcw } from 'lucide-react'
 import { useSnackbar } from '../../components/Snackbar'
 import { UsageBar } from '../../components/ui/stats'
 import { RecordingPauseSetting } from './RecordingPauseSetting'
@@ -58,6 +58,24 @@ function formatBytes(bytes: number): string {
     return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`
 }
 
+/** Where recordings reach the host disk (GET /recordings/storage, #976). */
+interface StorageMount {
+    // Compose bind-mounts RECORDINGS_PATH: the host folder is chosen in .env.
+    docker_managed: boolean
+    host_path: string | null
+    container_path: string | null
+    // The path saved on this page, or null for the default.
+    custom_path: string | null
+    // ok | other_mount (an operator-added volume) | container_layer (lost on recreate)
+    path_status: 'ok' | 'other_mount' | 'container_layer'
+}
+
+function apiErrorMessage(e: unknown, fallback: string): string {
+    const err = e as { response?: { data?: { detail?: unknown } }; message?: string } | null
+    const detail = err?.response?.data?.detail
+    return typeof detail === 'string' ? detail : err?.message || fallback
+}
+
 function formatDay(iso: string | null | undefined, fmt: DateFormatters): string {
     if (!iso) return '?'
     try {
@@ -70,9 +88,10 @@ function formatDay(iso: string | null | undefined, fmt: DateFormatters): string 
 export function RecordingSettings() {
     const confirm = useConfirm()
     const fmt = useDateFormat()
-    const { showError, showSuccess } = useSnackbar()
+    const { showError, showSuccess, showWarning } = useSnackbar()
     const [loading, setLoading] = useState(false)
     const [path, setPath] = useState('')
+    const [mount, setMount] = useState<StorageMount | null>(null)
 
     // Retention settings
     const [retentionDays, setRetentionDays] = useState(30)
@@ -108,8 +127,20 @@ export function RecordingSettings() {
                 apiService.getRecordingStorage(),
                 apiService.getRecordingRetention()
             ])
-            setPath(storageRes.data.root_path || storageRes.data.recordings_base_path || '')
             const s = storageRes.data
+            // The saved path only; the default shows as the placeholder.
+            setPath(s.custom_path ?? s.root_path ?? s.recordings_base_path ?? '')
+            setMount(
+                typeof s.docker_managed === 'boolean'
+                    ? {
+                          docker_managed: s.docker_managed,
+                          host_path: s.host_path ?? null,
+                          container_path: s.container_path ?? null,
+                          custom_path: s.custom_path ?? null,
+                          path_status: s.path_status ?? 'ok',
+                      }
+                    : null
+            )
             setDiskInfo(
                 s.disk_total != null && s.disk_used != null && s.disk_free != null
                     ? { total: s.disk_total, used: s.disk_used, free: s.disk_free }
@@ -220,14 +251,37 @@ export function RecordingSettings() {
         e.preventDefault()
         try {
             setLoading(true)
-            await apiService.updateRecordingStorage({ recordings_base_path: path })
-            showSuccess('Storage settings saved successfully')
+            const res = await apiService.updateRecordingStorage({ recordings_base_path: path.trim() || null })
+            if (res?.data?.warning) showWarning(res.data.warning)
+            else showSuccess('Storage settings saved successfully')
+            await loadSettings()
         } catch (e: any) {
-            showError(e?.message || 'Failed to save storage settings')
+            showError(apiErrorMessage(e, 'Failed to save storage settings'))
         } finally {
             setLoading(false)
         }
     }
+
+    // Back to the default location (the RECORDINGS_PATH mount under Docker).
+    // Existing recordings stay where they are.
+    const handleResetStorage = async () => {
+        try {
+            setLoading(true)
+            await apiService.updateRecordingStorage({ recordings_base_path: null })
+            showSuccess('Recording location reset to the default')
+            await loadSettings()
+        } catch (e: any) {
+            showError(apiErrorMessage(e, 'Failed to reset the recording location'))
+        } finally {
+            setLoading(false)
+        }
+    }
+
+    const dockerManaged = mount?.docker_managed === true
+    // A path saved before this page explained the mount; the reset button
+    // is the way out.
+    const customPathOnDocker =
+        dockerManaged && !!mount?.custom_path && mount.custom_path.replace(/\/+$/, '') !== mount.container_path
 
     const handleSaveRetention = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -265,32 +319,92 @@ export function RecordingSettings() {
                         Storage Location
                     </h3>
                     
-                    <p className="text-sm text-[var(--text-dim)] mb-6">
-                        Configure where camera recordings will be stored. If not specified, a default path is auto-detected:
-                        {' '}<strong>Docker: /app/recordings</strong> | <strong>Local: ./recordings</strong>
-                        <br />
-                        Changing this will affect new recordings. Existing recordings will remain in their original location.
-                    </p>
+                    {dockerManaged ? (
+                        <div className="space-y-4 mb-4">
+                            <div>
+                                <div className="text-sm font-medium mb-1">Recordings folder on this machine</div>
+                                <code className="block w-full px-3 py-2 bg-[var(--bg-2)] border border-[var(--border)] break-all">
+                                    {mount?.host_path}
+                                </code>
+                                {mount?.host_path?.startsWith('.') && (
+                                    <p className="text-xs text-[var(--text-dim)] mt-1">Relative to the OpenNVR folder (where .env is).</p>
+                                )}
+                            </div>
+                            <p className="text-sm text-[var(--text-dim)]">
+                                To store recordings on another folder or drive, set <code>RECORDINGS_PATH</code> in
+                                the <code>.env</code> file in your OpenNVR folder, then run <code>./start.sh up</code>
+                                {' '}(<code>.\start.ps1 up</code> on Windows). OpenNVR runs in Docker, so the folder
+                                is chosen there, not on this page. Existing recordings stay where they are; move them
+                                yourself if you want them in the new place.
+                            </p>
+
+                            {customPathOnDocker && mount?.path_status === 'container_layer' && (
+                                <div className="flex gap-3 p-3 border border-[var(--danger)]/50 bg-[var(--danger)]/10 text-sm">
+                                    <AlertTriangle size={18} className="mt-0.5 shrink-0 text-[var(--danger)]" />
+                                    <div className="space-y-2">
+                                        <div>
+                                            New recordings are going to <code>{mount.custom_path}</code>, a folder inside
+                                            the OpenNVR containers rather than on this machine's disk. They are lost when
+                                            the containers are recreated, for example on an update.
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={handleResetStorage}
+                                            disabled={loading}
+                                            className="px-3 py-1.5 border border-[var(--border)] bg-[var(--panel)] hover:border-[var(--accent)] disabled:opacity-50 flex items-center gap-2"
+                                        >
+                                            <RotateCcw size={14} /> Record to {mount.host_path} instead
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                            {customPathOnDocker && mount?.path_status !== 'container_layer' && (
+                                <div className="flex gap-3 p-3 border border-[var(--border)] bg-[var(--bg-2)] text-sm">
+                                    <div className="space-y-2">
+                                        <div>
+                                            New recordings are going to <code>{mount?.custom_path}</code>
+                                            {mount?.path_status === 'other_mount'
+                                                ? ', a volume added to the containers outside RECORDINGS_PATH. MediaMTX needs the same volume at the same path.'
+                                                : ', a folder inside the RECORDINGS_PATH mount.'}
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={handleResetStorage}
+                                            disabled={loading}
+                                            className="px-3 py-1.5 border border-[var(--border)] bg-[var(--panel)] hover:border-[var(--accent)] disabled:opacity-50 flex items-center gap-2"
+                                        >
+                                            <RotateCcw size={14} /> Use the default location
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                        <>
+                            <p className="text-sm text-[var(--text-dim)] mb-6">
+                                Configure where camera recordings will be stored. Changing this affects new
+                                recordings; existing recordings stay in their original location.
+                            </p>
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium mb-1">
+                                    Recording Path <span className="text-[var(--text-dim)] text-xs">(leave empty for the default)</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={path}
+                                    onChange={(e) => setPath(e.target.value)}
+                                    className="w-full px-3 py-2 bg-[var(--bg-2)] border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
+                                    placeholder="./recordings"
+                                />
+                                <p className="text-xs text-[var(--text-dim)] mt-1">
+                                    A folder on this machine, relative to the server folder (./recordings) or absolute
+                                    (/mnt/storage, D:/Recordings). It is created if missing.
+                                </p>
+                            </div>
+                        </>
+                    )}
 
                     <div className="space-y-4">
-                        <div>
-                            <label className="block text-sm font-medium mb-1">
-                                Recording Path <span className="text-[var(--text-dim)] text-xs">(optional, uses auto-detected default if empty)</span>
-                            </label>
-                            <input
-                                type="text"
-                                value={path}
-                                onChange={(e) => setPath(e.target.value)}
-                                className="w-full px-3 py-2 bg-[var(--bg-2)] border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
-                                placeholder="Docker: /app/recordings  |  Local: ./recordings or D:/Recordings"
-                            />
-                            <p className="text-xs text-[var(--text-dim)] mt-1">
-                                <strong>Docker:</strong> Use container path (e.g., /app/recordings). Ensure it matches your docker-compose.yml volume mount.
-                                <br />
-                                <strong>Local:</strong> Use relative (./recordings) or absolute path (D:/Recordings). Directory will be auto-created.
-                            </p>
-                        </div>
-
                         {diskInfo && diskInfo.total > 0 && (
                             <div>
                                 <div className="flex items-baseline justify-between text-sm mb-1.5">
@@ -310,16 +424,18 @@ export function RecordingSettings() {
                     </div>
                 </div>
 
-                <div className="flex justify-end">
-                    <button
-                        type="submit"
-                        disabled={loading}
-                        className="px-4 py-2 bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-2"
-                    >
-                        <Save size={16} />
-                        {loading ? 'Saving...' : 'Save Storage Settings'}
-                    </button>
-                </div>
+                {!dockerManaged && (
+                    <div className="flex justify-end">
+                        <button
+                            type="submit"
+                            disabled={loading}
+                            className="px-4 py-2 bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-2"
+                        >
+                            <Save size={16} />
+                            {loading ? 'Saving...' : 'Save Storage Settings'}
+                        </button>
+                    </div>
+                )}
             </form>
 
             {/* Retention Settings */}

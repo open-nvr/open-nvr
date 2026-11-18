@@ -47,7 +47,7 @@ from urllib.parse import urlparse
 
 from core.camera_source import SOURCE_PUBLISHER, is_publisher
 from core.config import _host_is_internal, settings
-from core.database import get_db
+from core.database import get_db, release
 from core.logging_config import camera_logger
 from core.permissions import RequirePermission, get_camera_or_403
 from models import (
@@ -886,6 +886,30 @@ def get_cameras(
         escalations = evidence_escalation.summary(db, list(camera_ids)) if camera_ids else {}
     except Exception:  # noqa: BLE001 - a badge must never cost the list
         escalations = {}
+    # PTZ support per camera: what a PTZ command last showed (freshest),
+    # else what the device-settings probe recorded, else unknown. One
+    # query for the page.
+    from services.ptz_service import ptz_support
+
+    try:
+        from models import CameraCapability
+
+        probed_areas = dict(
+            db.query(CameraCapability.camera_id, CameraCapability.supported_areas)
+            .filter(CameraCapability.camera_id.in_(camera_ids))
+            .all()
+        ) if camera_ids else {}
+    except Exception:  # noqa: BLE001 - a badge must never cost the list
+        probed_areas = {}
+
+    def _ptz_supported(camera_id: int) -> bool | None:
+        seen = ptz_support(camera_id)
+        if seen is not None:
+            return seen
+        areas = probed_areas.get(camera_id)
+        if isinstance(areas, dict) and "ptz" in areas:
+            return bool(areas["ptz"])
+        return None
 
     # Populate extra fields for response
     results = []
@@ -918,6 +942,7 @@ def get_cameras(
         )
         c_resp.recording_pause = pauses.get(str(c.id))
         c_resp.escalation = escalations.get(c.id)
+        c_resp.ptz_supported = _ptz_supported(c.id)
 
         results.append(c_resp)
 
@@ -2868,40 +2893,18 @@ async def ptz_move(
     x: Pan speed (-1.0 to 1.0, negative=left, positive=right)
     y: Tilt speed (-1.0 to 1.0, negative=down, positive=up)
     z: Zoom speed (-1.0 to 1.0, negative=zoom out, positive=zoom in)
+    409 when the camera has no PTZ.
     """
-    camera_logger.info(f"PTZ move request: camera_id={camera_id}, x={x}, y={y}, z={z}")
+    from services.ptz_service import PTZService
 
-    cam = CameraService.get_camera_by_id(db, camera_id, current_user.id)
-    if not cam:
-        raise HTTPException(status_code=404, detail="Camera not found")
-
-    if not cam.username or not cam.password:
-        raise HTTPException(
-            status_code=400, detail="Camera ONVIF credentials not configured"
-        )
-
-    camera_logger.info(f"PTZ move: camera IP={cam.ip_address}, user={cam.username}")
-
-    # Clamp values
     x = max(-1.0, min(1.0, x))
     y = max(-1.0, min(1.0, y))
     z = max(-1.0, min(1.0, z))
-
-    from services.ptz_service import PTZService
-
-    result = await PTZService.move(
-        camera_id=cam.id,
-        ip=cam.ip_address,
-        username=cam.username,
-        password=cam.password,
-        camera_port=cam.port,
-        x=x,
-        y=y,
-        z=z,
-    )
+    target = _ptz_target(db, camera_id, current_user)
+    result = await PTZService.move(**target, x=x, y=y, z=z)
     audit_request(
         db, request, action="ptz.move", user_id=current_user.id,
-        entity_type="camera", entity_id=cam.id,
+        entity_type="camera", entity_id=camera_id,
         details={"x": x, "y": y, "z": z,
                  "success": bool(isinstance(result, dict) and result.get("success"))},
     )
@@ -2920,27 +2923,13 @@ async def ptz_stop(
 
     Uses the camera's stored ONVIF credentials from the database.
     """
-    cam = CameraService.get_camera_by_id(db, camera_id, current_user.id)
-    if not cam:
-        raise HTTPException(status_code=404, detail="Camera not found")
-
-    if not cam.username or not cam.password:
-        raise HTTPException(
-            status_code=400, detail="Camera ONVIF credentials not configured"
-        )
-
     from services.ptz_service import PTZService
 
-    result = await PTZService.stop(
-        camera_id=cam.id,
-        ip=cam.ip_address,
-        username=cam.username,
-        password=cam.password,
-        camera_port=cam.port,
-    )
+    target = _ptz_target(db, camera_id, current_user)
+    result = await PTZService.stop(**target)
     audit_request(
         db, request, action="ptz.stop", user_id=current_user.id,
-        entity_type="camera", entity_id=cam.id,
+        entity_type="camera", entity_id=camera_id,
         details={"success": bool(isinstance(result, dict) and result.get("success"))},
     )
     return result
@@ -2955,6 +2944,25 @@ def _ptz_camera(db: Session, camera_id: int, current_user) -> Camera:
             status_code=400, detail="Camera ONVIF credentials not configured"
         )
     return cam
+
+
+def _ptz_target(db: Session, camera_id: int, current_user) -> dict:
+    """The PTZService keyword arguments for this camera, with the request's
+    DB connection handed back before the caller waits on the camera.
+
+    A camera can take seconds to answer, a minute when it has to be
+    re-found; holding the session that long left the connection idle in a
+    transaction until Postgres killed it, and the request then failed with
+    a database error instead of the camera's. The audit write afterwards
+    opens a fresh, short transaction on the same session.
+    """
+    cam = _ptz_camera(db, camera_id, current_user)
+    target = {
+        "camera_id": cam.id, "ip": cam.ip_address, "username": cam.username,
+        "password": cam.password, "camera_port": cam.port,
+    }
+    release(db)
+    return target
 
 
 class PTZPresetSave(BaseModel):
@@ -2972,12 +2980,9 @@ async def ptz_list_presets(
     """The camera's stored PTZ presets: ``{"presets": [{"token", "name"}]}``."""
     from services.ptz_service import PTZService
 
-    cam = _ptz_camera(db, camera_id, current_user)
-    presets = await PTZService.presets(
-        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
-        password=cam.password, camera_port=cam.port,
-    )
-    return {"camera_id": cam.id, "presets": presets}
+    target = _ptz_target(db, camera_id, current_user)
+    presets = await PTZService.presets(**target)
+    return {"camera_id": camera_id, "presets": presets}
 
 
 @router.post("/{camera_id}/ptz/presets")
@@ -2992,19 +2997,17 @@ async def ptz_save_preset(
     ``token``). The camera keeps the preset; OpenNVR stores nothing."""
     from services.ptz_service import PTZService
 
-    cam = _ptz_camera(db, camera_id, current_user)
+    target = _ptz_target(db, camera_id, current_user)
     result = await PTZService.set_preset(
-        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
-        password=cam.password, camera_port=cam.port,
-        name=payload.name.strip(), preset_token=payload.token,
+        **target, name=payload.name.strip(), preset_token=payload.token,
     )
     audit_request(
         db, request, action="ptz.preset_save", user_id=current_user.id,
-        entity_type="camera", entity_id=cam.id,
+        entity_type="camera", entity_id=camera_id,
         details={"name": payload.name.strip(), "token": result.get("token"),
                  "overwrite": payload.token is not None},
     )
-    return {"camera_id": cam.id, **result}
+    return {"camera_id": camera_id, **result}
 
 
 @router.post("/{camera_id}/ptz/presets/{preset_token}/goto")
@@ -3018,16 +3021,13 @@ async def ptz_goto_preset(
     """Move the camera to a stored preset."""
     from services.ptz_service import PTZService
 
-    cam = _ptz_camera(db, camera_id, current_user)
-    result = await PTZService.goto_preset(
-        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
-        password=cam.password, camera_port=cam.port, preset_token=preset_token,
-    )
+    target = _ptz_target(db, camera_id, current_user)
+    result = await PTZService.goto_preset(**target, preset_token=preset_token)
     audit_request(
         db, request, action="ptz.preset_goto", user_id=current_user.id,
-        entity_type="camera", entity_id=cam.id, details={"token": preset_token},
+        entity_type="camera", entity_id=camera_id, details={"token": preset_token},
     )
-    return {"camera_id": cam.id, **result}
+    return {"camera_id": camera_id, **result}
 
 
 # Proxy restart/status and publish URL endpoints removed (FFmpeg proxy eliminated)

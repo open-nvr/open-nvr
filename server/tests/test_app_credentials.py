@@ -944,6 +944,39 @@ def test_bus_users_file_renders_every_keyed_app_with_scoped_permissions(env, mon
     s.close()
 
 
+def test_a_manifest_that_gains_a_scope_reaches_the_bus_without_a_new_key(env, monkeypatch, tmp_path):
+    """An app upgrade that asks for another event family registers with
+    the key it already holds, so no key is issued. The users file must
+    still be rewritten: the bus enforces what is in it, and an app that
+    was granted the scope here was refused there until core restarted."""
+    from services import nats_users
+
+    tc, _, _ = env
+    target = tmp_path / "nats" / "users.conf"
+    monkeypatch.setattr(settings, "nats_users_conf", str(target), raising=False)
+
+    key = _register(tc, _site(), sdk_version="0.7.0").json()["api_key"]
+    assert "opennvr.events.access.decided.>" not in target.read_text()
+
+    written = []
+    real = nats_users.write_users_conf
+    monkeypatch.setattr(nats_users, "write_users_conf", lambda db, *a, **k: written.append(1) or real(db, *a, **k))
+
+    # The same manifest again, with the app's own key: nothing changed, nothing written.
+    assert _register(tc, _app(key), sdk_version="0.7.0").status_code == 200
+    assert written == []
+
+    wider = {**_manifest(), "requires_scopes": ["events:access.decided"]}
+    r = tc.post("/apps/register", json={"url": "http://loitering:9200", "manifest": wider}, headers=_app(key))
+    assert r.status_code == 200 and "api_key" not in r.json()
+    assert written == [1]
+    assert "opennvr.events.access.decided.>" in target.read_text()
+
+    # Dropping the scope takes it off the bus again.
+    assert _register(tc, _app(key), sdk_version="0.7.0").status_code == 200
+    assert "opennvr.events.access.decided.>" not in target.read_text()
+
+
 def test_bus_users_file_is_valid_with_no_apps_and_off_when_unset(monkeypatch, tmp_path):
     from services import nats_users
 

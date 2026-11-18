@@ -24,6 +24,7 @@ import { displayAspect, isStretched } from '../lib/aspect'
 import type { AspectOverride } from '../lib/aspect'
 import { useVideoSize } from '../hooks/useVideoAspect'
 import { AspectFrame } from './VideoPlayer'
+import { ZoomSurface } from './ZoomSurface'
 import { useTranslation } from '../i18n'
 import { loadHls } from '../lib/loadHls'
 import type { TimelineSegment } from './PlaybackTimeline'
@@ -390,12 +391,14 @@ export function SyncPlaybackTile({
       {/* The clip carries the camera's coded size, which for an anamorphic
           stream is not the size to show it at — see lib/aspect.ts (#354). */}
       <AspectFrame aspect={videoAspect}>
-        <video
-          ref={videoRef}
-          className={`block w-full h-full ${stretched ? 'object-fill' : 'object-contain'}`}
-          playsInline
-          crossOrigin="anonymous"
-        />
+        <ZoomSurface>
+          <video
+            ref={videoRef}
+            className={`block w-full h-full ${stretched ? 'object-fill' : 'object-contain'}`}
+            playsInline
+            crossOrigin="anonymous"
+          />
+        </ZoomSurface>
       </AspectFrame>
 
       {/* Label band, as on Live View and the dashboard wall: legible over

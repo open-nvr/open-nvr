@@ -897,6 +897,12 @@ class CameraResponse(CameraBase):
     # detecting on the main stream, or a decision about that is in force.
     # None = nothing to show. Only the camera list computes it.
     escalation: dict[str, Any] | None = None
+    # Whether the camera can pan/tilt/zoom: True / False once known (from a
+    # device-settings probe, or from a PTZ command it took or refused),
+    # None when nothing has asked it yet. The UI hides PTZ controls on
+    # False only, so a camera nobody has probed keeps them. Only the camera
+    # list computes it.
+    ptz_supported: bool | None = None
     # Live connectivity from the in-memory tracker (CameraStatusService:
     # MediaMTX path ready AND bytes flowing). None means UNKNOWN, not offline:
     # the backend restarted and the first reconcile pass has not landed yet,
@@ -1234,9 +1240,10 @@ class RecordingScheduleSettings(BaseModel):
 
 
 class RecordingStorageSettings(BaseModel):
-    recordings_base_path: str | None = Field(
-        None, min_length=1
-    )  # None = use settings.recordings_base_path
+    # None (or blank) = use settings.recordings_base_path. Blank used to fail
+    # min_length, so the page's "leave empty for the default" could not be
+    # saved and a wrong path could not be undone (#976).
+    recordings_base_path: str | None = None
     segment_seconds: int = Field(60, ge=5, le=3600)
     filename_template: str = Field("%camera/%Y/%m/%d/%H/%M/%S.mp4", min_length=1)
     max_storage_gb: int | None = Field(None, ge=1, le=100000)
@@ -1289,8 +1296,10 @@ class RecordingStorageSettings(BaseModel):
     @field_validator("recordings_base_path")
     @classmethod
     def validate_root_path(cls, v: str | None) -> str | None:
+        if v is not None:
+            v = v.strip()
         if not v:
-            return v
+            return None
 
         if ".." in v:
             raise ValueError("Invalid path: Directory traversal not allowed")

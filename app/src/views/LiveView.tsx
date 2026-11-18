@@ -27,7 +27,7 @@ import { useFullscreen } from '../hooks/useFullscreen'
 import { useClickOutside } from '../hooks/useClickOutside'
 import { usePermissions } from '../hooks/usePermissions'
 import { useCameraStatus } from '../hooks/useCameraStatus'
-import { Camera, CameraOff, Maximize, Minimize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, LayoutGrid, Menu as MenuIcon, Move, Square, Plus, Minus, ChevronDown, ChevronUp, Video, Search, AlertCircle, Expand, Scan, ScanEye, Tv, ArrowLeftRight, Minimize2 } from 'lucide-react'
+import { Camera, CameraOff, Maximize, Minimize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, LayoutGrid, Menu as MenuIcon, Move, Plus, ChevronDown, ChevronUp, Video, Search, AlertCircle, Expand, Scan, ScanEye, Tv, ArrowLeftRight, Minimize2 } from 'lucide-react'
 import { 
   DndContext, 
   DragOverlay, 
@@ -52,6 +52,7 @@ import { clsx } from 'clsx'
 import { PREDEFINED_LAYOUTS, type LayoutDefinition } from '../lib/liveLayouts'
 import { ToursMenu } from '../components/live/ToursMenu'
 import { webcamOfflineLabel } from '../lib/hostAgent'
+import { PtzPad } from '../components/PtzPad'
 
 /** The dashboard wall's still-tile background, for tiles with no picture. */
 const NO_PICTURE_BG = 'repeating-linear-gradient(135deg, #07090d 0 10px, #0b0f16 10px 20px)'
@@ -82,7 +83,7 @@ export function LiveView() {
   const { toggle: toggleFs, isFullscreen } = useFullscreen(gridRef as React.RefObject<HTMLDivElement>)
   // FS toolbar visibility — toggled by the bottom-center handle button
   const [fsToolbarVisible, setFsToolbarVisible] = useState(false)
-  const [availableCameras, setAvailableCameras] = useState<Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null}>>([])
+  const [availableCameras, setAvailableCameras] = useState<Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null, ptz_supported?: boolean | null}>>([])
   const [camerasLoaded, setCamerasLoaded] = useState(false)
   const { showWarning } = useSnackbar()
 
@@ -103,6 +104,9 @@ export function LiveView() {
 
   // Camera display order - array of camera IDs in display sequence
   // This determines which camera appears in which tile position
+  // The one tile whose PTZ pad is open: opening another closes it, so the
+  // arrow keys can never be steering two cameras.
+  const [ptzTile, setPtzTile] = useState<number | null>(null)
   const [cameraDisplayOrder, setCameraDisplayOrder] = useState<number[]>(() => {
     try {
       const saved = localStorage.getItem('liveview-camera-display-order')
@@ -194,6 +198,8 @@ export function LiveView() {
         // The display-aspect override rides along so the tile can render an
         // anamorphic stream at its true shape — see lib/aspect.ts (#354).
         display_aspect_ratio: cam.display_aspect_ratio,
+        // false = known to have no PTZ: the tile shows no PTZ button.
+        ptz_supported: cam.ptz_supported,
       }))
       setAvailableCameras(cameraList)
       setCamerasLoaded(true)
@@ -491,6 +497,8 @@ export function LiveView() {
                       isDragging={activeDragId === `tile-${i}`}
                       canManage={canManageCameras}
                       showDetections={showDetections}
+                      ptzOpen={ptzTile === i}
+                      onPtzOpenChange={(open) => setPtzTile((cur) => (open ? i : cur === i ? null : cur))}
                     />
                   </DraggableTile>
                 </DroppableTile>
@@ -614,9 +622,11 @@ function Tile({
   isDragging = false,
   canManage = false,
   showDetections = false,
+  ptzOpen = false,
+  onPtzOpenChange,
 }: {
   index: number
-  availableCameras: Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null}>
+  availableCameras: Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null, ptz_supported?: boolean | null}>
   assignedCameraId?: number | null
   tileOf: Map<number, number>
   onCameraSelected?: (cameraId: number) => void
@@ -624,20 +634,34 @@ function Tile({
   isDragging?: boolean
   showDetections?: boolean
   canManage?: boolean
+  ptzOpen?: boolean
+  onPtzOpenChange?: (open: boolean) => void
 }) {
   const { t } = useTranslation()
   const [cameraId, setCameraId] = useState<number | null>(null)
   const [cameraName, setCameraName] = useState<string>('')
   const [urls, setUrls] = useState<{ whep?: string; hls?: string; token?: string } | null>(null)
   const playerRef = useRef<VideoPlayerHandle>(null)
-  const [ptzOpen, setPtzOpen] = useState(false)
+  const setPtzOpen = (open: boolean) => onPtzOpenChange?.(open)
+  const [ptzMoving, setPtzMoving] = useState(false)
+  // The tile is where the PTZ keys work: click the picture and the arrows
+  // still steer this camera, never another tile's.
+  const tileRef = useRef<HTMLDivElement>(null)
+  // Set when a PTZ command came back "this camera has no PTZ"; the camera
+  // list says the same on its next load.
+  const [noPtz, setNoPtz] = useState(false)
   const [showCameraDialog, setShowCameraDialog] = useState(false)
   const [showPicker, setShowPicker] = useState(false)
 
   // Close the PTZ pad when the tile's camera changes.
+  const prevCameraRef = useRef(assignedCameraId)
   useEffect(() => {
-    setPtzOpen(false)
-  }, [assignedCameraId])
+    if (prevCameraRef.current === assignedCameraId) return
+    prevCameraRef.current = assignedCameraId
+    onPtzOpenChange?.(false)
+    setNoPtz(false)
+  }, [assignedCameraId, onPtzOpenChange])
+  useEffect(() => { if (!ptzOpen) setPtzMoving(false) }, [ptzOpen])
   // Backend-pushed connectivity: `status` drives the offline overlay;
   // `version` bumps on each recovery, re-running the URL fetch below (fresh
   // 60-min stream token) and remounting the player so the stream resumes
@@ -738,7 +762,7 @@ function Tile({
         : 'degraded'
 
   return (
-    <div className="group/tile relative h-full overflow-hidden bg-black">
+    <div ref={tileRef} className="group/tile relative h-full overflow-hidden bg-black">
       {/* Absolute so the <video>'s intrinsic size (e.g. a 1:1 stream) can't
           stretch this box — the player sizes itself to the stream's DISPLAY
           aspect inside it and letterboxes against black. */}
@@ -762,24 +786,24 @@ function Tile({
             offlineLabel={webcamOfflineLabel(assignedCamera as any)}
             cameraId={cameraId}
             showDetections={showDetections}
-            onTogglePtz={() => setPtzOpen((s) => !s)}
+            onTogglePtz={
+              ptzOpen || (!noPtz && assignedCamera?.ptz_supported !== false)
+                ? () => setPtzOpen(!ptzOpen)
+                : undefined
+            }
             ptzActive={ptzOpen}
               overlay={ptzOpen && cameraId ? (
-                /* Mini PTZ pad — rendered inside the player so it survives
-                   the player element going fullscreen; sits above the
-                   controls bar (~72px incl. gradient) */
-                <div className="absolute left-2 bottom-20 z-30 bg-black/80 p-2 border border-[var(--border)] text-[10px]">
-                  <div className="grid grid-cols-3 gap-1">
-                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&uarr;</button>
-                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)]" onClick={() => ptzStop(cameraId)}><Square size={12} /></button>
-                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&darr;</button>
-                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, -0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&larr;</button>
-                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[color-mix(in_oklab,var(--danger)_30%,transparent)]" onClick={() => setPtzOpen(false)}>Close</button>
-                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&rarr;</button>
-                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Plus size={12} /></button>
-                    <div />
-                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Minus size={12} /></button>
-                  </div>
+                /* PTZ pad — rendered inside the player so it survives the
+                   player element going fullscreen; sits above the controls
+                   bar (~72px incl. gradient) */
+                <div className="absolute left-2 bottom-20 z-30">
+                  <PtzPad
+                    cameraId={cameraId}
+                    onClose={() => setPtzOpen(false)}
+                    onUnsupported={() => setNoPtz(true)}
+                    onMovingChange={setPtzMoving}
+                    keyScope={tileRef}
+                  />
                 </div>
               ) : null}
             className="w-full h-full !bg-black"
@@ -832,6 +856,11 @@ function Tile({
         </div>
       )}
 
+      {/* PTZ is open on this tile: the arrow keys steer this camera. */}
+      {ptzOpen && cameraId && (
+        <div className="pointer-events-none absolute inset-0 z-30 ring-2 ring-inset ring-[var(--accent)]" aria-hidden="true" />
+      )}
+
       {/* Label band, as on the dashboard wall: state dot, name, REC — legible
           over any picture without a solid bar. Above the offline overlay so
           a dead tile still says which camera it is. */}
@@ -842,6 +871,14 @@ function Tile({
             <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: STATE_INK[state] }} aria-hidden="true" />
             <span className="text-[11px] font-medium truncate [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">{displayName}</span>
             <span className="ml-auto shrink-0 flex items-center gap-2 leading-none text-[9px] font-bold tracking-[0.15em] [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">
+              {ptzOpen && (
+                <span
+                  className={clsx('px-1 py-0.5 bg-[var(--accent)] text-white [text-shadow:none]', ptzMoving && 'animate-pulse')}
+                  title={t('ptz.activeTitle')}
+                >
+                  {t('ptz.activeBadge')}
+                </span>
+              )}
               {!hasLink && <span className="text-[var(--on-video-warn)]">{t('live.noLink')}</span>}
               {rec === 'recording' ? (
                 <span className="flex items-center gap-1 text-[var(--on-video-danger)]">
@@ -901,26 +938,6 @@ function Tile({
       )}
     </div>
   )
-}
-
-async function ptzMove(cameraId: number, x: number, y: number, z: number = 0) {
-  console.log('PTZ Move:', { cameraId, x, y, z })
-  try {
-    const result = await apiService.ptzMove(cameraId, x, y, z)
-    console.log('PTZ Move result:', result)
-  } catch (err) {
-    console.error('PTZ move failed:', err)
-  }
-}
-
-async function ptzStop(cameraId: number) {
-  console.log('PTZ Stop:', { cameraId })
-  try {
-    const result = await apiService.ptzStop(cameraId)
-    console.log('PTZ Stop result:', result)
-  } catch (err) {
-    console.error('PTZ stop failed:', err)
-  }
 }
 
 function ToolbarContents({

@@ -17,15 +17,24 @@
 """
 PTZ Service: Handles PTZ logic with port/profile caching to optimize performance.
 Helps resolve N+1 issue where every move request probes multiple ports.
+
+Every command to one camera runs under that camera's lock, in the order the
+commands reached it. A press is a move and a release a stop; before the lock
+the two raced through the same lookups, and on a quick tap the stop could
+reach the camera first and leave it moving.
 """
 
+import asyncio
+import time
 from typing import Any
 
 from fastapi import HTTPException
 
 from core.logging_config import camera_logger
 from services.onvif_digest_service import (
+    NO_PTZ_DETAIL,
     fetch_profiles_digest,
+    forget_ptz_service_url,
     ptz_continuous_move_digest,
     ptz_get_presets_digest,
     ptz_goto_preset_digest,
@@ -36,6 +45,44 @@ from services.onvif_digest_service import (
 
 # Simple in-memory cache: camera_id -> {scheme: str, port: int, profile_token: str}
 _PTZ_CACHE: dict[int, dict[str, Any]] = {}
+
+#: One lock per camera; see the module docstring.
+_LOCKS: dict[int, asyncio.Lock] = {}
+
+#: When each camera's ONVIF endpoint was last re-resolved. A rescan walks
+#: every candidate port and scheme at up to 4 s each, over a minute for a
+#: camera that does not answer at all, so a failing camera gets one per
+#: ``RESCAN_COOLDOWN_S`` and every other failure in between is reported
+#: straight away.
+_LAST_RESCAN: dict[int, float] = {}
+RESCAN_COOLDOWN_S = 60.0
+
+#: A scan that found no working endpoint, and when: repeated for the same
+#: cooldown instead of scanning again, so a camera that is off the network
+#: costs one scan a minute, not one per button press.
+_RESOLVE_FAILED: dict[int, tuple[float, HTTPException]] = {}
+
+#: What PTZ calls have shown about a camera: True when it took a PTZ
+#: command, False when it advertised no PTZ service. Absent = never tried.
+#: Read by the camera list to hide PTZ controls on cameras that have none.
+_PTZ_SUPPORT: dict[int, bool] = {}
+
+#: Failures a fresh endpoint scan cannot fix: no PTZ service, a refused
+#: login, a bad preset token, a camera that timed out (one that does not
+#: answer on its known port will not answer on the others either).
+_NO_RESCAN_STATUS = {401, 409, 422, 504}
+
+
+def ptz_support(camera_id: int) -> bool | None:
+    """True / False when a PTZ call has settled it for this camera, else None."""
+    return _PTZ_SUPPORT.get(camera_id)
+
+
+def _lock(camera_id: int) -> asyncio.Lock:
+    lock = _LOCKS.get(camera_id)
+    if lock is None:
+        lock = _LOCKS[camera_id] = asyncio.Lock()
+    return lock
 
 
 class PTZService:
@@ -90,7 +137,87 @@ class PTZService:
 
     @staticmethod
     def _invalidate_cache(camera_id: int):
-        _PTZ_CACHE.pop(camera_id, None)
+        config = _PTZ_CACHE.pop(camera_id, None)
+        if config:
+            # The PTZ XAddr was learned from that endpoint; drop it with it.
+            forget_ptz_service_url(
+                config.get("ip", ""), config["port"], config.get("scheme", "http")
+            )
+
+    @staticmethod
+    async def _resolve(
+        camera_id: int, ip: str, username: str, password: str, camera_port: int
+    ) -> dict[str, Any]:
+        failed = _RESOLVE_FAILED.get(camera_id)
+        if failed is not None:
+            at, error = failed
+            if time.monotonic() - at < RESCAN_COOLDOWN_S:
+                raise error
+        _LAST_RESCAN[camera_id] = time.monotonic()
+        try:
+            config = await PTZService._find_working_config(
+                ip, username, password, camera_port)
+        except HTTPException as e:
+            _RESOLVE_FAILED[camera_id] = (time.monotonic(), e)
+            raise
+        _RESOLVE_FAILED.pop(camera_id, None)
+        config["ip"] = ip
+        PTZService._update_cache(camera_id, config)
+        return config
+
+    @staticmethod
+    def _record(camera_id: int, error: Exception | None) -> None:
+        if error is None:
+            _PTZ_SUPPORT[camera_id] = True
+        elif isinstance(error, HTTPException) and error.detail == NO_PTZ_DETAIL:
+            _PTZ_SUPPORT[camera_id] = False
+
+    @staticmethod
+    async def _run(
+        camera_id: int, ip: str, username: str, password: str, camera_port: int, op,
+    ):
+        """Run ``op(config)`` against the cached ONVIF config, under the
+        camera's lock, re-resolving the config once if the cached one fails
+        in a way a rescan could fix (port or scheme changed) and none has
+        run in the last ``RESCAN_COOLDOWN_S``."""
+        async with _lock(camera_id):
+            config = PTZService._get_cached_config(camera_id)
+            if not config:
+                config = await PTZService._resolve(
+                    camera_id, ip, username, password, camera_port)
+            try:
+                result = await op(config)
+                PTZService._record(camera_id, None)
+                return result
+            except HTTPException as e:
+                PTZService._record(camera_id, e)
+                if e.status_code in _NO_RESCAN_STATUS:
+                    raise
+                first_error: Exception = e
+            except Exception as e:  # noqa: BLE001 - maybe retried below
+                first_error = e
+            since = time.monotonic() - _LAST_RESCAN.get(camera_id, float("-inf"))
+            if since < RESCAN_COOLDOWN_S:
+                camera_logger.warning(
+                    f"PTZ: camera {camera_id} failed again ({first_error}); "
+                    f"endpoint rescanned {since:.0f} s ago, not rescanning"
+                )
+                if isinstance(first_error, HTTPException):
+                    raise first_error
+                raise HTTPException(status_code=502, detail=f"PTZ failed: {first_error}")
+            camera_logger.warning(
+                f"PTZ: Cached config failed for camera {camera_id}: {first_error}. Retrying scan."
+            )
+            PTZService._invalidate_cache(camera_id)
+            config = await PTZService._resolve(
+                camera_id, ip, username, password, camera_port)
+            try:
+                result = await op(config)
+            except Exception as e:
+                PTZService._record(camera_id, e)
+                raise
+            PTZService._record(camera_id, None)
+            return result
 
     @staticmethod
     async def move(
@@ -103,93 +230,26 @@ class PTZService:
         y: float,
         z: float,
     ) -> dict[str, Any]:
-        """Execute continuous move with caching."""
-        config = PTZService._get_cached_config(camera_id)
-
-        # If no config, find it
-        if not config:
-            camera_logger.info(f"PTZ: Cache miss for camera {camera_id}, scanning...")
-            config = await PTZService._find_working_config(
-                ip, username, password, camera_port
-            )
-            PTZService._update_cache(camera_id, config)
-
-        try:
-            # Attempt move
+        """Continuous move: pan/tilt/zoom velocities in -1..1."""
+        async def op(cfg):
             await ptz_continuous_move_digest(
-                ip, username, password, config["profile_token"], x, y, z,
-                config["port"], config.get("scheme", "http")
-            )
-            return {
-                "success": True,
-                "camera_id": camera_id,
-                "port": config["port"],
-                "profile": config["profile_token"],
-            }
-        except Exception as e:
-            # If it fails, maybe credentials or port changed?
-            camera_logger.warning(
-                f"PTZ: Cached config failed for camera {camera_id}: {e}. Retrying scan."
-            )
-            PTZService._invalidate_cache(camera_id)
-
-            # Retry once
-            try:
-                config = await PTZService._find_working_config(
-                    ip, username, password, camera_port
-                )
-                PTZService._update_cache(camera_id, config)
-
-                await ptz_continuous_move_digest(
-                    ip,
-                    username,
-                    password,
-                    config["profile_token"],
-                    x,
-                    y,
-                    z,
-                    config["port"],
-                    config.get("scheme", "http"),
-                )
-                return {
-                    "success": True,
-                    "camera_id": camera_id,
-                    "port": config["port"],
-                    "profile": config["profile_token"],
-                }
-            except Exception as final_e:
-                camera_logger.error(
-                    f"PTZ: Retry failed for camera {camera_id}: {final_e}"
-                )
-                raise HTTPException(status_code=500, detail=f"PTZ failed: {final_e}")
+                ip, username, password, cfg["profile_token"], x, y, z,
+                cfg["port"], cfg.get("scheme", "http"))
+            return {"success": True, "camera_id": camera_id,
+                    "port": cfg["port"], "profile": cfg["profile_token"]}
+        return await PTZService._run(camera_id, ip, username, password, camera_port, op)
 
     @staticmethod
-    async def _run(
-        camera_id: int, ip: str, username: str, password: str, camera_port: int, op,
-    ):
-        """Run ``op(config)`` against the cached ONVIF config, re-resolving
-        it once if the cached one fails (credentials or port changed). An
-        HTTPException the camera answered with (e.g. 422 for a bad preset
-        token) is not a config problem and is raised as-is."""
-        config = PTZService._get_cached_config(camera_id)
-        if not config:
-            config = await PTZService._find_working_config(ip, username, password, camera_port)
-            PTZService._update_cache(camera_id, config)
-        try:
-            return await op(config)
-        except HTTPException as e:
-            if e.status_code == 422:
-                raise
-            first_error: Exception = e
-        except Exception as e:  # noqa: BLE001 - retried below
-            first_error = e
-        camera_logger.warning(
-            f"PTZ: Cached config failed for camera {camera_id}: {first_error}. Retrying scan."
-        )
-        PTZService._invalidate_cache(camera_id)
-        config = await PTZService._find_working_config(ip, username, password, camera_port)
-        PTZService._update_cache(camera_id, config)
-        return await op(config)
+    async def stop(
+        camera_id: int, ip: str, username: str, password: str, camera_port: int
+    ) -> dict[str, Any]:
+        """Stop pan, tilt and zoom."""
+        async def op(cfg):
+            await ptz_stop_digest(
+                ip, username, password, cfg["profile_token"], cfg["port"],
+                cfg.get("scheme", "http"))
+            return {"success": True, "camera_id": camera_id}
+        return await PTZService._run(camera_id, ip, username, password, camera_port, op)
 
     @staticmethod
     async def presets(
@@ -222,39 +282,3 @@ class PTZService:
                 ip, username, password, cfg["profile_token"], name, preset_token,
                 cfg["port"], cfg.get("scheme", "http"))
         return await PTZService._run(camera_id, ip, username, password, camera_port, op)
-
-    @staticmethod
-    async def stop(
-        camera_id: int, ip: str, username: str, password: str, camera_port: int
-    ) -> dict[str, Any]:
-        """Execute stop with caching."""
-        config = PTZService._get_cached_config(camera_id)
-
-        if not config:
-            config = await PTZService._find_working_config(
-                ip, username, password, camera_port
-            )
-            PTZService._update_cache(camera_id, config)
-
-        try:
-            await ptz_stop_digest(
-                ip, username, password, config["profile_token"], config["port"],
-                config.get("scheme", "http")
-            )
-            return {"success": True, "camera_id": camera_id}
-        except Exception:
-            PTZService._invalidate_cache(camera_id)
-            try:
-                config = await PTZService._find_working_config(
-                    ip, username, password, camera_port
-                )
-                PTZService._update_cache(camera_id, config)
-                await ptz_stop_digest(
-                    ip, username, password, config["profile_token"], config["port"],
-                    config.get("scheme", "http")
-                )
-                return {"success": True, "camera_id": camera_id}
-            except Exception as final_e:
-                raise HTTPException(
-                    status_code=500, detail=f"PTZ stop failed: {final_e}"
-                )

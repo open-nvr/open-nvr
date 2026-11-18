@@ -1005,6 +1005,13 @@ async def register_app(
         row = InstalledApp(id=app_id, enabled=False, config_json={})
         db.add(row)
 
+    # What this app may do on the apps bus is derived from its manifest
+    # (requires_scopes, provides). Remembered before the manifest is
+    # replaced, so a registration that changes it is seen as one.
+    from services.nats_users import app_permissions
+
+    bus_before = None if created else app_permissions(app_id, row.manifest_json)
+
     row.name = str(manifest["name"])
     row.version = str(manifest["version"])
     if request.sdk_version:
@@ -1055,7 +1062,11 @@ async def register_app(
         issued_key = issue_key(db, row)
     db.commit()
     db.refresh(row)
-    if issued_key is not None or created:
+    # The users file carries each app's permissions as well as its
+    # credential. It used to be rewritten only when a key was issued, so
+    # an upgrade whose manifest asked for a new event scope was granted
+    # and audited here and still refused on the bus until core restarted.
+    if issued_key is not None or created or app_permissions(app_id, manifest) != bus_before:
         _sync_bus_users(db)
 
     actor_user = principal if isinstance(principal, User) else None
