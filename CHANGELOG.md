@@ -8,6 +8,22 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **An app can read the frame a plate was read from.** A visit's evidence
+  photo is the best view of the track. When two vehicles follow each other
+  closely the tracker can carry one track across both, and that photo is
+  then a different car from the one whose plate is on the row. An app that
+  shows a picture beside a plate had nothing else to show: a gate desk put
+  plate K884RS beside a car plainly marked N-894-JV. Core has stored the
+  right picture since the Vehicles page needed it, and served it to
+  signed-in users only. Two reads now exist for an app, scoped to the
+  cameras selected for it like its other photos:
+  `GET /internal/camera-agent/events/{id}/plate-frame` (the frame the plate
+  was read from) and `.../plate-evidence` (the plate cut out of it). The
+  events listing carries `has_plate_frame` and `has_plate_evidence`. In the
+  App SDK: `nvr.timeline.plate_frame(event_id)` and `plate_crop(event_id)`,
+  sync and async, `None` when the visit has none. The SDK version is not
+  bumped here; apps get the calls with its next release.
+
 - **Attendly updates itself, without an OpenNVR release.** An app whose
   catalog entry says `updates: registry` is released by its own
   repository: each `X.Y.Z` tag that repository's release workflow signs

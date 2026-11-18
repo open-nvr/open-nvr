@@ -193,6 +193,16 @@ class AsyncTimelineAPI:
         return await self._http.get_bytes(
             f"/api/v1/internal/camera-agent/events/{int(event_id)}/{suffix}")
 
+    async def plate_frame(self, event_id: int) -> bytes | None:
+        """Async twin of ``TimelineAPI.plate_frame``."""
+        return await self._http.get_bytes(
+            f"/api/v1/internal/camera-agent/events/{int(event_id)}/plate-frame")
+
+    async def plate_crop(self, event_id: int) -> bytes | None:
+        """The plate rectangle cut out of ``plate_frame()``, or ``None``."""
+        return await self._http.get_bytes(
+            f"/api/v1/internal/camera-agent/events/{int(event_id)}/plate-evidence")
+
     async def find(self, text: str = "", *, label=None, camera=None,
                    plate: str | None = None, attrs=None, start=None, end=None,
                    limit: int = 25, skip: int = 0) -> dict | None:
