@@ -42,6 +42,7 @@ import { displayAspect, isStretched } from '../lib/aspect'
 import type { AspectOverride } from '../lib/aspect'
 import { useVideoSize } from '../hooks/useVideoAspect'
 import { AspectFrame } from './VideoPlayer'
+import { ZoomSurface } from './ZoomSurface'
 import { loadHls, warmHls } from '../lib/loadHls'
 import { useCameraSegments } from '../lib/queries'
 import { localDayEnd, localDayStart } from '../lib/time'
@@ -743,13 +744,15 @@ export function PlaybackConsole({
           ) : (
             <>
               <AspectFrame aspect={videoAspect}>
-                <video
-                  ref={videoRef}
-                  className={`block w-full h-full ${stretched ? 'object-fill' : 'object-contain'}`}
-                  playsInline
-                  crossOrigin="anonymous"
-                  onClick={togglePlay}
-                />
+                <ZoomSurface>
+                  <video
+                    ref={videoRef}
+                    className={`block w-full h-full ${stretched ? 'object-fill' : 'object-contain'}`}
+                    playsInline
+                    crossOrigin="anonymous"
+                    onClick={togglePlay}
+                  />
+                </ZoomSurface>
               </AspectFrame>
               {(loading || buffering) && !livePrompt && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/30 pointer-events-none">
