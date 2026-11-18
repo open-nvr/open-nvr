@@ -24,9 +24,10 @@ MediaMTX handles recording via webhooks - this service only provides file listin
 import json
 import logging
 import os
+import posixpath
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
 
@@ -237,6 +238,66 @@ def is_recording_path_configured(db: Session = None) -> bool:
     return path is not None and path != ""
 
 
+def recordings_mount() -> dict[str, Any]:
+    """Where recordings reach the host disk, when compose bind-mounts them.
+
+    Under Docker, compose mounts the host's ``RECORDINGS_PATH`` at
+    ``/app/recordings`` in core and MediaMTX and passes the host side in as
+    ``RECORDINGS_HOST_BASE``. That mount is the only path inside the
+    containers that lands on the host disk, so the host location is chosen
+    in ``.env``, not in the settings page (#976).
+    """
+    host = settings.recordings_host_base
+    return {
+        "docker_managed": bool(host),
+        "host_path": host or None,
+        "container_path": settings.recordings_container_base if host else None,
+    }
+
+
+#: ``recordings_path_status`` results.
+PATH_OK = "ok"  # host path, or inside the compose recordings mount
+PATH_OTHER_MOUNT = "other_mount"  # on a volume the operator mounted themselves
+PATH_CONTAINER_LAYER = "container_layer"  # never reaches the host disk
+
+
+def _on_other_mount(p: PurePosixPath) -> bool:
+    """Is ``p`` (or a folder above it, short of ``/``) a mount point here?"""
+    for candidate in (p, *p.parents):
+        if str(candidate) == "/":
+            return False
+        try:
+            if os.path.ismount(str(candidate)):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def recordings_path_status(path: str | None) -> str:
+    """Whether recordings written to ``path`` reach the host disk.
+
+    Outside Docker the configured path *is* a host path, so it is always ok.
+    Under Docker it is ok inside the compose recordings mount
+    (``/app/recordings``). A path on a volume the operator mounted
+    themselves (a compose override) works too, as long as MediaMTX has the
+    same mount, which core cannot see. Anything else (``/mnt/storage``
+    typed as if it were a host path, a relative path) writes into the
+    containers' own layers and is lost when they are recreated (#976).
+    """
+    if not path or path == "recordings" or not settings.recordings_host_base:
+        return PATH_OK
+    p = PurePosixPath(posixpath.normpath(str(path).replace("\\", "/")))
+    base = PurePosixPath(posixpath.normpath(settings.recordings_container_base))
+    if not p.is_absolute():
+        return PATH_CONTAINER_LAYER
+    if p == base or base in p.parents:
+        return PATH_OK
+    if _on_other_mount(p):
+        return PATH_OTHER_MOUNT
+    return PATH_CONTAINER_LAYER
+
+
 #: Default recording paths already announced at INFO (see below).
 _announced_default_paths: set[str] = set()
 
@@ -277,6 +338,22 @@ def get_effective_recordings_base_path(db: Session = None) -> str:
                 db_path = data.get("recordings_base_path") or data.get("root_path")
                 if db_path and db_path != "recordings":
                     path = str(db_path)
+                    # Kept as configured (moving footage is the operator's
+                    # call), but said once: these recordings never reach
+                    # the host disk (#976).
+                    warn_key = f"container_layer:{path}"
+                    if (
+                        warn_key not in _announced_default_paths
+                        and recordings_path_status(path) == PATH_CONTAINER_LAYER
+                    ):
+                        _announced_default_paths.add(warn_key)
+                        storage_logger.warning(
+                            f"Recording path {path} is inside the container, "
+                            "not on the host disk: recordings there are lost "
+                            "when the container is recreated. Set "
+                            "RECORDINGS_PATH in .env and reset the path in "
+                            "Settings > Recordings."
+                        )
                     # Auto-create directory
                     try:
                         Path(path).mkdir(parents=True, exist_ok=True)

@@ -43,6 +43,7 @@
 
 import { useEffect, useRef } from 'react'
 import { subscribeDetections, type OverlayFrame, type OverlayTrack } from '../../lib/detectionFeed'
+import { planMerge, TIER0_SOURCE, wearLabel } from '../../lib/overlayMerge'
 
 export interface DetectionOverlayProps {
   cameraId: number
@@ -98,6 +99,7 @@ const TRAIL_MS = 1500
 const TRAIL_MIN_MOVE = 0.004  // normalized; below this the foot point is noise
 
 interface Shown {
+  source: string
   track: OverlayTrack
   box: [number, number, number, number]       // what is drawn now
   target: [number, number, number, number]    // what Tier-0 last said
@@ -114,6 +116,9 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
   zoomRef.current = zoom
   const redrawRef = useRef<() => void>(() => {})
   const frameRef = useRef<OverlayFrame | null>(null)
+  // Latest frame per source: a detector frame never retires an app's
+  // boxes, nor the other way round.
+  const framesRef = useRef<Map<string, OverlayFrame>>(new Map())
   const shownRef = useRef<Map<string, Shown>>(new Map())
   const rafRef = useRef<number | null>(null)
   const lastTickRef = useRef<number>(0)
@@ -126,6 +131,8 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
     if (!ctx) return
     const shown = shownRef.current
     shown.clear()
+    const frames = framesRef.current
+    frames.clear()
 
     // Size the backing store to the element's CSS size × devicePixelRatio,
     // so lines are crisp on HiDPI and never smeared by CSS scaling.
@@ -139,14 +146,17 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
     ro.observe(canvas)
     fit()
 
-    const keyOf = (t: OverlayTrack, i: number) => (t.id != null ? `${t.label}#${t.id}` : `${t.label}@${i}`)
+    const keyOf = (src: string, t: OverlayTrack, i: number) =>
+      (t.id != null ? `${src}|${t.label}#${t.id}` : `${src}|${t.label}@${i}`)
 
-    // A new frame: retarget the tracks it carries, mark the rest lost.
+    // A new frame: retarget the tracks it carries, mark the rest of THAT
+    // source's tracks lost.
     const ingest = (frame: OverlayFrame) => {
       const now = frame.receivedAt
+      const src = frame.source
       const live = new Set<string>()
       frame.tracks.forEach((t, i) => {
-        const key = keyOf(t, i)
+        const key = keyOf(src, t, i)
         live.add(key)
         const s = shown.get(key)
         if (s) {
@@ -155,11 +165,13 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
           s.seenAt = now
           s.lostAt = null
         } else {
-          shown.set(key, { track: t, box: t.box, target: t.box, seenAt: now, bornAt: now, lostAt: null, trail: [] })
+          shown.set(key, { source: src, track: t, box: t.box, target: t.box, seenAt: now, bornAt: now, lostAt: null, trail: [] })
         }
       })
-      for (const [key, s] of shown) if (!live.has(key) && s.lostAt == null) s.lostAt = now
-      // Publishing rate, smoothed: the badge's "fps".
+      for (const [key, s] of shown) if (s.source === src && !live.has(key) && s.lostAt == null) s.lostAt = now
+      // Publishing rate, smoothed: the badge's "fps" — the detector's,
+      // when there is one (an app's label rate is not the picture's).
+      if (src !== TIER0_SOURCE && frames.has(TIER0_SOURCE)) return
       const f = fpsRef.current
       if (f.at) {
         const inst = 1000 / Math.max(40, now - f.at)
@@ -177,15 +189,25 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
       const W = canvas.width, H = canvas.height
       ctx.clearRect(0, 0, W, H)
 
-      const frame = frameRef.current
-      const frameStale = !frame || now - frame.receivedAt > staleMs
+      const staleOf = (src: string) => {
+        const f = frames.get(src)
+        return !f || now - f.receivedAt > staleMs
+      }
+      const anyFresh = [...frames.keys()].some((src) => !staleOf(src))
+      const calibrating = !!frames.get(TIER0_SOURCE)?.calibrating
       const k = approach(dt, SMOOTH_TAU_MS)
       let alive = 0
 
+      // Retire first (lost and faded, or that source went quiet), so the
+      // merge below sees only what is still on screen.
       for (const [key, s] of shown) {
-        // Retire: lost and faded, or the whole feed went quiet.
-        if (frameStale && s.lostAt == null) s.lostAt = now
-        if (s.lostAt != null && now - s.lostAt > FADE_OUT_MS) { shown.delete(key); continue }
+        if (staleOf(s.source) && s.lostAt == null) s.lostAt = now
+        if (s.lostAt != null && now - s.lostAt > FADE_OUT_MS) shown.delete(key)
+      }
+      const plan = planMerge(shown)
+
+      for (const [key, s] of shown) {
+        if (plan.hidden.has(key)) continue
         // Glide toward the latest box.
         for (let i = 0; i < 4; i++) s.box[i] += (s.target[i] - s.box[i]) * k
         // Foot point trail, trimmed to the window.
@@ -195,26 +217,28 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
         while (s.trail.length && now - s.trail[0].at > TRAIL_MS) s.trail.shift()
         const fadeIn = Math.min(1, (now - s.bornAt) / FADE_IN_MS)
         const fadeOut = s.lostAt == null ? 1 : Math.max(0, 1 - (now - s.lostAt) / FADE_OUT_MS)
-        const alpha = fadeIn * fadeOut * (frame?.calibrating ? 0.6 : 1)
+        const alpha = fadeIn * fadeOut * (calibrating && s.source === TIER0_SOURCE ? 0.6 : 1)
         if (s.lostAt == null) alive++
         const z = zoomRef.current
         drawTrack(ctx, z && z.s > 1 ? zoomed(s, z, canvas.clientWidth || 1, canvas.clientHeight || 1) : s, W, H, alpha)
+        const wearer = plan.labelled.get(key)
+        drawTrack(ctx, s, W, H, alpha, wearer ? wearLabel(s.track, wearer.track) : undefined)
       }
-      if (badge && !frameStale) drawBadge(ctx, W, alive, fpsRef.current.fps)
+      if (badge && anyFresh) drawBadge(ctx, W, alive, fpsRef.current.fps)
       if (shown.size) requestTick()
     }
     const requestTick = () => { if (rafRef.current == null) rafRef.current = requestAnimationFrame(tick) }
     redrawRef.current = requestTick
 
     const unsubscribe = subscribeDetections(cameraId, (frame) => {
-      frameRef.current = frame
+      frames.set(frame.source, frame)
       ingest(frame)
       requestTick()
     })
     // Expire stale boxes even when no new frame arrives to trigger a draw.
     const sweep = window.setInterval(() => {
-      const f = frameRef.current
-      if (f && Date.now() - f.receivedAt > staleMs) requestTick()
+      const t = Date.now()
+      for (const f of frames.values()) if (t - f.receivedAt > staleMs) { requestTick(); break }
     }, 250)
 
     return () => {
@@ -223,6 +247,7 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
       ro.disconnect()
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
       shown.clear()
+      frames.clear()
       ctx.clearRect(0, 0, canvas.width, canvas.height)
     }
   }, [cameraId, staleMs, badge])
@@ -250,8 +275,10 @@ function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: num
   ctx.closePath()
 }
 
-function drawTrack(ctx: CanvasRenderingContext2D, s: Shown, W: number, H: number, alpha: number) {
-  const t = s.track
+function drawTrack(ctx: CanvasRenderingContext2D, s: Shown, W: number, H: number, alpha: number,
+                   wearing?: OverlayTrack) {
+  // `wearing`: an app's label on this detector box (who, not what).
+  const t = wearing ?? s.track
   const [nx, ny, nw, nh] = s.box
   const x = nx * W, y = ny * H, w = nw * W, h = nh * H
   if (!(w > 0 && h > 0) || alpha <= 0.01) return

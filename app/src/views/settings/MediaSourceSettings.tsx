@@ -36,7 +36,6 @@ export function MediaSourceSettings() {
     mediamtx_admin_api: '',
     mediamtx_admin_token: '',
     mediamtx_webhook_token: '',
-    recordings_base_path: '',
     mediamtx_rtsp_publish_url: '',
     rtsp_proxy_enabled: true,
     ffmpeg_binary_path: 'ffmpeg',
@@ -150,11 +149,6 @@ export function MediaSourceSettings() {
             <span>Webhook Token</span>
             <input className="w-80 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.mediamtx_webhook_token||''}
               onChange={(e)=>setCfg({...cfg, mediamtx_webhook_token:e.target.value})} />
-          </label>
-          <label className="flex items-center justify-between gap-2">
-            <span>{t('settings.recordingsPath')}</span>
-            <input className="w-80 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.recordings_base_path||''}
-              onChange={(e)=>setCfg({...cfg, recordings_base_path:e.target.value})} />
           </label>
           <div className="text-[var(--text-dim)] text-xs">Used to provision media-server paths.</div>
         </div>
