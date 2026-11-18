@@ -25,6 +25,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An app upgrade that asks for a new event scope is no longer refused on
+  the apps bus.** What an app may publish and subscribe to on the apps bus
+  is written from its manifest, but only when core issued the app its key
+  (and when core started). An app that registered again with the key it
+  already held and a manifest that had gained a scope was granted the
+  scope and audited, and the bus still refused the subscription until core
+  was restarted. Registration now rewrites the bus permissions whenever
+  they differ from the ones the previous manifest gave. A registration
+  that changes nothing writes nothing.
+
 - **Editing a webcam camera on a Linux server offered the host agent, and
   switching its source did nothing until core restarted.** The camera edit
   dialog listed server webcams through the host agent on every OS, so on

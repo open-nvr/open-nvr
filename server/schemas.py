@@ -1240,9 +1240,10 @@ class RecordingScheduleSettings(BaseModel):
 
 
 class RecordingStorageSettings(BaseModel):
-    recordings_base_path: str | None = Field(
-        None, min_length=1
-    )  # None = use settings.recordings_base_path
+    # None (or blank) = use settings.recordings_base_path. Blank used to fail
+    # min_length, so the page's "leave empty for the default" could not be
+    # saved and a wrong path could not be undone (#976).
+    recordings_base_path: str | None = None
     segment_seconds: int = Field(60, ge=5, le=3600)
     filename_template: str = Field("%camera/%Y/%m/%d/%H/%M/%S.mp4", min_length=1)
     max_storage_gb: int | None = Field(None, ge=1, le=100000)
@@ -1295,8 +1296,10 @@ class RecordingStorageSettings(BaseModel):
     @field_validator("recordings_base_path")
     @classmethod
     def validate_root_path(cls, v: str | None) -> str | None:
+        if v is not None:
+            v = v.strip()
         if not v:
-            return v
+            return None
 
         if ".." in v:
             raise ValueError("Invalid path: Directory traversal not allowed")
