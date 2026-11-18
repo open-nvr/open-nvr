@@ -33,10 +33,16 @@ export interface OverlayTrack {
   /** Normalized [x, y, w, h] in 0..1 of the frame. */
   box: [number, number, number, number]
   stationary?: boolean
+  /** The Tier-0 track this app box labels (overlay.boxes.v1 `track`):
+   *  the overlay draws the label on that track's box instead. */
+  track?: number | string | null
 }
 
 export interface OverlayFrame {
   cameraId: number
+  /** Who drew it: "tier0" for the platform detector, "app:<id>" for an
+   *  app. Each source's frames replace only that source's boxes. */
+  source: string
   /** Wall-clock ms when this frame arrived here (not the producer's stamp). */
   receivedAt: number
   calibrating: boolean
@@ -77,6 +83,7 @@ function toFrame(evt: any): OverlayFrame | null {
         score: t.score == null ? null : Number(t.score) || 0,
         box: [Number(b[0]), Number(b[1]), Number(b[2]), Number(b[3])],
         stationary: Boolean(t.stationary),
+        track: t.track ?? null,
       })
     }
   } else if (evt.event_type === 'inference_result' && Array.isArray(p.detections)) {
@@ -107,7 +114,10 @@ function toFrame(evt: any): OverlayFrame | null {
     return null
   }
   if (!out.length) return null
-  return { cameraId, receivedAt: Date.now(), calibrating: Boolean(p.calibrating), tracks: out }
+  const source = typeof p.source === 'string' && p.source
+    ? p.source
+    : (evt.task === 'overlay' ? 'overlay' : 'tier0')
+  return { cameraId, source, receivedAt: Date.now(), calibrating: Boolean(p.calibrating), tracks: out }
 }
 
 function scheduleReconnect() {

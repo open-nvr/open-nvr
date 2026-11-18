@@ -494,3 +494,25 @@ def test_site_switch_on_reaches_the_nats_import(monkeypatch):
     monkeypatch.setitem(sys.modules, "core.config", fake)
     monkeypatch.setitem(sys.modules, "nats", None)   # import → ImportError → return
     asyncio.run(tc.run_consumer_loop())
+
+
+def test_an_app_box_keeps_the_tier0_track_it_labels(monkeypatch):
+    """overlay.boxes.v1 ``track``: which Tier-0 track an app's label
+    belongs to, so the live view puts the label on that track's box."""
+    msg = _app_msg(boxes=[{"label": "Asha Rao · 1008", "box": [0.2, 0.3, 0.1, 0.4], "track": 17}])
+    out = _run_app(msg, monkeypatch, allowed=True)
+    row = out[0]["payload"]["tracks"][0]
+    assert row["track"] == 17 and row["label"] == "Asha Rao · 1008"
+
+
+@pytest.mark.parametrize("ref", [None, "", "  ", True, [1], {"id": 1}])
+def test_a_junk_track_reference_is_left_out(ref):
+    raw = {"frame": {}, "tracks": [{"label": "x", "box": [0, 0, 0.5, 0.5], "score": 1.0, "track": ref}]}
+    out = tc.to_overlay_payload(raw, min_score=0.0)
+    assert out and "track" not in out["tracks"][0]
+
+
+def test_tier0_tracks_carry_no_track_reference():
+    raw = {"frame": {"w": 100, "h": 100},
+           "tracks": [{"id": 3, "label": "person", "score": 0.9, "box": [10, 10, 50, 90]}]}
+    assert "track" not in tc.to_overlay_payload(raw)["tracks"][0]
