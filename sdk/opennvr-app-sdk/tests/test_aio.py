@@ -101,6 +101,9 @@ def test_timeline_alerts_state(stack):
             [{"id": 9, "camera_id": 1, "label": "car"}]
         assert _FakeCore.log[-1]["query"] == {"camera_id": "1", "label": "car", "limit": "5"}
         assert await nvr.timeline.evidence(9) == b"\xff\xd8ev"
+        assert await nvr.timeline.plate_frame(9) == b"\xff\xd8frame"
+        assert await nvr.timeline.plate_crop(9) == b"\xff\xd8plate"
+        assert await nvr.timeline.plate_frame(10) is None
         assert await nvr.timeline.plate_stats(days=3) == {"total_reads": 3}
         assert await nvr.alerts.inbox(unacked=True) == [{"id": 1, "acknowledged_at": None}]
         assert (await nvr.site_mode())["mode"] == "armed_home"

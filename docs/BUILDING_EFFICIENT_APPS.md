@@ -223,6 +223,7 @@ such reuse.
 | A plate | subscribe to `plate.recognized.v1`; history from `nvr.timeline.plate_*` |
 | Who is inside | `nvr.timeline.plates_inside()` |
 | The photo of a visit | `nvr.timeline.evidence(event_id)` |
+| The picture to show beside a plate | `nvr.timeline.plate_frame(event_id)` — the frame the plate was read from; `evidence()` is the best view of the track and can be another car |
 | Is anyone there now, how many | the latest Tier-0 tracks; no model call |
 | What is on the camera now, in words | `nvr.description(camera, max_age_s=30)` — one shared look for every asker |
 

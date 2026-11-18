@@ -298,6 +298,28 @@ class TimelineAPI:
         return self._http.get_bytes(
             f"/api/v1/internal/camera-agent/events/{int(event_id)}/{suffix}")
 
+    def plate_frame(self, event_id: int) -> bytes | None:
+        """The frame this visit's plate was read from, or ``None``.
+
+        The picture to show beside a plate. ``evidence()`` is the best
+        view of the TRACK; when two vehicles follow each other closely
+        one track can cover both, and its best view is then a different
+        car from the one whose plate was read. This is the vehicle the
+        number belongs to, at the moment it was read.
+
+        ``None`` when the visit has no such frame (an older read, or one
+        taken off the evidence frame itself) and when core could not be
+        asked; fall back to ``evidence()``. A visit lists
+        ``has_plate_frame`` in ``search()``.
+        """
+        return self._http.get_bytes(
+            f"/api/v1/internal/camera-agent/events/{int(event_id)}/plate-frame")
+
+    def plate_crop(self, event_id: int) -> bytes | None:
+        """The plate rectangle cut out of ``plate_frame()``, or ``None``."""
+        return self._http.get_bytes(
+            f"/api/v1/internal/camera-agent/events/{int(event_id)}/plate-evidence")
+
     def find(self, text: str = "", *, label=None, camera=None,
              plate: str | None = None, attrs=None, start=None, end=None,
              limit: int = 25, skip: int = 0) -> dict | None:

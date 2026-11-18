@@ -242,6 +242,56 @@ def test_internal_cameras_and_events_follow_the_apps_picks(env):
     assert {e["camera_id"] for e in ev} == {ids["gate"], ids["yard"]}
 
 
+def test_an_app_reads_the_frame_a_plate_was_read_from_on_its_own_cameras(env, monkeypatch, tmp_path):
+    """The visit's best photo is of the track, which can cover two cars;
+    the plate frame is of the car the plate belongs to. An app showing a
+    picture beside a plate needs the second, scoped like the first."""
+    from datetime import datetime, timezone
+
+    from models import TimelineEvent
+
+    tc, ids, SessionLocal = env
+    monkeypatch.setattr(settings, "recordings_base_path", str(tmp_path), raising=False)
+    store = tmp_path / ".evidence" / "ab"
+    store.mkdir(parents=True)
+    (store / "frame.jpg").write_bytes(b"\xff\xd8frame")
+    (store / "plate.jpg").write_bytes(b"\xff\xd8plate")
+    s = SessionLocal()
+    rows = {}
+    for name, cam, paths in (("mine", ids["gate"], ("ab/frame.jpg", "ab/plate.jpg")),
+                             ("theirs", ids["yard"], ("ab/frame.jpg", "ab/plate.jpg")),
+                             ("bare", ids["gate"], (None, None)),
+                             ("gone", ids["gate"], ("ab/missing.jpg", None))):
+        e = TimelineEvent(camera_id=cam, source="tier0", event_type="track", label="car", plate_text="K884RS",
+                          started_at=datetime.now(timezone.utc), plate_frame_path=paths[0],
+                          plate_evidence_path=paths[1])
+        s.add(e)
+        s.flush()
+        rows[name] = e.id
+    s.commit()
+    s.close()
+    key = _register(tc, _site()).json()["api_key"]
+    base = "/internal/camera-agent/events"
+
+    r = tc.get(f"{base}/{rows['mine']}/plate-frame", headers=_app(key))
+    assert r.status_code == 200 and r.content == b"\xff\xd8frame" and r.headers["content-type"] == "image/jpeg"
+    assert tc.get(f"{base}/{rows['mine']}/plate-evidence", headers=_app(key)).content == b"\xff\xd8plate"
+    # Another app's camera: 404, the same answer as "no such visit".
+    for kind in ("plate-frame", "plate-evidence"):
+        assert tc.get(f"{base}/{rows['theirs']}/{kind}", headers=_app(key)).status_code == 404
+        assert tc.get(f"{base}/999999/{kind}", headers=_app(key)).status_code == 404
+        assert tc.get(f"{base}/{rows['bare']}/{kind}", headers=_app(key)).status_code == 404
+    assert tc.get(f"{base}/{rows['gone']}/plate-frame", headers=_app(key)).status_code == 404   # file aged out
+    assert tc.get(f"{base}/{rows['theirs']}/plate-frame", headers=_site()).status_code == 200   # the site key sees the fleet
+    assert tc.get(f"{base}/{rows['mine']}/plate-frame").status_code in (401, 403)               # no key at all
+
+    # The listing says which visits have them, so an app need not probe.
+    listed = {e["id"]: e for e in tc.get(base, headers=_app(key)).json()["events"]}
+    assert (listed[rows["mine"]]["has_plate_frame"], listed[rows["mine"]]["has_plate_evidence"]) == (True, True)
+    assert (listed[rows["bare"]]["has_plate_frame"], listed[rows["bare"]]["has_plate_evidence"]) == (False, False)
+    assert rows["theirs"] not in listed
+
+
 def test_an_app_with_nothing_picked_sees_nothing(env):
     """Nothing picked for this app → it gets NONE of the cameras.
 

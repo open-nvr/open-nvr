@@ -71,7 +71,7 @@ nvr = OpenNVR()                      # OPENNVR_URL + the app's own key
 | `.snapshot(camera) -> bytes \| None` | Current JPEG |
 | `.description(camera, max_age_s=30, prefer_store=False) -> dict \| None` | What is on the camera now, in words, from the platform's one shared look (`text`, `source`, `age_s`, `model_called`); use it instead of calling a caption model |
 | `.recordings(camera)` → `RecordingsAPI` | `.list(start, end)`, `.url(start, duration)`, `.frame_at(at)` |
-| `.timeline` → `TimelineAPI` | `.search(camera=, label=, …)`, `.evidence(event_id)`, `.plate_stats()`, `.plate_summary()`, `.plate_sessions()` |
+| `.timeline` → `TimelineAPI` | `.search(camera=, label=, …)`, `.evidence(event_id)`, `.plate_frame(event_id)`, `.plate_crop(event_id)`, `.plate_stats()`, `.plate_summary()`, `.plate_sessions()` |
 | `.alerts` → `AlertsAPI` | `.inbox(unacked=, limit=, after_id=)` — what this app raised, and whether anyone acknowledged it |
 | `.site_mode() -> dict \| None` | The site's arming state (`mode`: `disarmed` / `armed_home` / `armed_away`, plus `changed_at`, `changed_by`, `modes`); deployment-wide and read-only — arming is the operator's verb. `None` = core could not be asked, not "disarmed" |
 | `.state` → `StateAPI` | `.get`, `.set`, `.delete`, `.items(prefix)` — durable per-app key/value in core |

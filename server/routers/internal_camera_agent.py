@@ -902,6 +902,11 @@ async def internal_list_events(
                     e.scene_evidence_path
                     and e.scene_evidence_path != e.evidence_path
                 ),
+                # The frame the plate was read from, and the plate cut out
+                # of it: the pictures that belong to plate_text, where
+                # evidence belongs to the track (see /plate-frame).
+                "has_plate_frame": bool(e.plate_frame_path),
+                "has_plate_evidence": bool(e.plate_evidence_path),
             }
             for e in rows
         ]
@@ -958,6 +963,60 @@ async def internal_event_scene_evidence(
     if path is None:
         raise HTTPException(status_code=404, detail="evidence missing")
     return FileResponse(path, media_type="image/jpeg")
+
+
+def _plate_image(db: Session, principal, event_id: int, column: str):
+    """One of a visit's two plate images, scoped like its other photos."""
+    from fastapi.responses import FileResponse
+
+    from models import TimelineEvent
+    from services.evidence_store import resolve_evidence
+
+    e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    roster = _app_roster(db, principal)
+    if e is not None and roster is not None and int(e.camera_id) not in roster:
+        e = None   # 404, not 403: another app's camera is not confirmed to exist
+    rel = getattr(e, column, None) if e is not None else None
+    if not rel:
+        raise HTTPException(status_code=404, detail="no plate image for this event")
+    path = resolve_evidence(rel)
+    if path is None:
+        raise HTTPException(status_code=404, detail="evidence missing")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/events/{event_id}/plate-frame")
+async def internal_event_plate_frame(
+    event_id: int,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """The frame this visit's plate was read from: the vehicle the number
+    belongs to, at the moment it was read.
+
+    ``/evidence`` is the best view of the TRACK. When two vehicles follow
+    each other closely the tracker can carry one track across both, and
+    the best view is then of whichever looked best: a different car from
+    the one whose plate is on the row. An app that shows a picture beside
+    a plate (a gate desk, a parking log) had only ``/evidence`` to show,
+    and showed the wrong car. The operator's Vehicles page has had this
+    image since it was stored; an app could not reach it.
+
+    404 when the read predates the column or came off the evidence frame
+    itself; callers fall back to ``/evidence``.
+    """
+    return _plate_image(db, principal, event_id, "plate_frame_path")
+
+
+@router.get("/events/{event_id}/plate-evidence")
+async def internal_event_plate_evidence(
+    event_id: int,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """The plate rectangle itself, cut from the frame it was read from.
+    404 as for ``/plate-frame``."""
+    return _plate_image(db, principal, event_id, "plate_evidence_path")
 
 
 GATE_MODE_KEY = "detect_gate_mode"

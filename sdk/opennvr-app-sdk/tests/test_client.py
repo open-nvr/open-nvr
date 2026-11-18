@@ -67,6 +67,12 @@ class _FakeCore(BaseHTTPRequestHandler):
             return self._reply(200, {"events": [{"id": 9, "camera_id": 1, "label": "car"}]})
         if p == "/api/v1/internal/camera-agent/events/9/evidence":
             return self._reply(200, b"\xff\xd8ev", "image/jpeg")
+        if p == "/api/v1/internal/camera-agent/events/9/plate-frame":
+            return self._reply(200, b"\xff\xd8frame", "image/jpeg")
+        if p == "/api/v1/internal/camera-agent/events/9/plate-evidence":
+            return self._reply(200, b"\xff\xd8plate", "image/jpeg")
+        if p.startswith("/api/v1/internal/camera-agent/events/10/plate-"):
+            return self._reply(404, {"detail": "no plate image for this event"})
         if p == "/api/v1/internal/app/plates/stats":
             return self._reply(200, {"total_reads": 3})
         if p == "/api/v1/internal/app/site-mode":
@@ -142,6 +148,11 @@ def test_timeline_and_alerts(core):
     assert ev == [{"id": 9, "camera_id": 1, "label": "car"}]
     assert _FakeCore.log[-1]["query"] == {"camera_id": "1", "label": "car", "limit": "5"}
     assert nvr.timeline.evidence(9) == b"\xff\xd8ev"
+    # The frame the plate was read from, and the plate cut out of it; a
+    # visit with neither answers None, and the caller falls back.
+    assert nvr.timeline.plate_frame(9) == b"\xff\xd8frame"
+    assert nvr.timeline.plate_crop(9) == b"\xff\xd8plate"
+    assert nvr.timeline.plate_frame(10) is None and nvr.timeline.plate_crop(10) is None
     assert nvr.timeline.plate_stats(days=3) == {"total_reads": 3}
     assert nvr.alerts.inbox(unacked=True) == [{"id": 1, "acknowledged_at": None}]
     assert _FakeCore.log[-1]["query"]["unacked"] == "true"
