@@ -231,6 +231,10 @@ export const cameraService = {
     api.post(`/api/v1/cameras/${cameraId}/ptz/move`, null, { params: { x, y, z } }),
   ptzStop: (cameraId: number) =>
     api.post(`/api/v1/cameras/${cameraId}/ptz/stop`),
+  ptzPresets: (cameraId: number) =>
+    api.get(`/api/v1/cameras/${cameraId}/ptz/presets`),
+  ptzGotoPreset: (cameraId: number, token: string) =>
+    api.post(`/api/v1/cameras/${cameraId}/ptz/presets/${encodeURIComponent(token)}/goto`),
 
   // MediaMTX Integration
   provisionCameraMediaMTX: (cameraId: number, params: { enable_recording?: boolean; rtsp_transport?: string; recording_segment_seconds?: number; recording_path?: string } = {}) =>
