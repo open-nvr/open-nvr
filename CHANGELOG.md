@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Workflows start on more than app alerts.** `when: event` (a
+  contracted event such as `plate.recognized.v1`, by its schema and
+  cameras; its payload's values fill placeholders like `{plate_text}`),
+  `when: camera_offline` (a camera down for `for`, once per outage),
+  `when: schedule` (`at` local time, optional `days`, once per slot even
+  across a restart) and `when: button` (`POST
+  /api/v1/workflows/{id}/run`, `workflows.manage`). Each passes the same
+  `if:` guards and limits as an alert. Events no workflow listens for are
+  dropped before the database.
+
 - **Try a workflow on recent events.** `POST /api/v1/workflows/{id}/try`
   replays up to 20 of the last days' inbox alerts the workflow's trigger
   matches (or an unsaved draft's) through its steps as a Test run would go:

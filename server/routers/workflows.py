@@ -239,6 +239,31 @@ async def set_state(workflow_id: int, body: StateIn, request: Request,
     return workflow_out(db, wf)
 
 
+@router.post("/{workflow_id}/run")
+async def press_button(workflow_id: int, request: Request, db: Session = Depends(get_db),
+                       user: User = Depends(_manage)):
+    """Start a workflow whose trigger is a button (``when: button``), as
+    the person pressing it. Its if: guards and limits apply as to any
+    trigger; when they hold it back, nothing starts and the answer says so."""
+    from workflows.consumer import engine
+
+    wf = _workflow_or_404(db, workflow_id)
+    current = next((v for v in wf.versions if v.version == wf.current_version), None)
+    doc = yaml.safe_load(current.yaml) if current else {}
+    if "button" not in (doc.get("when") or {}):
+        raise HTTPException(status_code=409, detail="This workflow is not started by a button")
+    if wf.state == "off":
+        raise HTTPException(status_code=409, detail="This workflow is Off")
+    runs = engine().start_from_button(wf.id, getattr(user, "username", None) or str(user.id))
+    if not runs:
+        raise HTTPException(status_code=409, detail=(
+            "Not started: its if: guards do not hold now, or a limit (cooldown, one at a "
+            "time, per hour) holds it back"))
+    audit_request(db, request, action="workflow.button", user_id=user.id,
+                  entity_type="workflow", entity_id=wf.id, details={"run": runs[0]})
+    return {"run_id": runs[0], "test": wf.state == "test"}
+
+
 @router.post("/{workflow_id}/try")
 async def try_workflow(workflow_id: int, body: TryIn, request: Request,
                        db: Session = Depends(get_db), user: User = Depends(_manage)):

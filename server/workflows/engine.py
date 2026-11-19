@@ -2,8 +2,11 @@
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
 """The workflow engine: an alert starts a run, and the run walks its steps.
 
-RFC #620, section 8. An app's alert on ``opennvr.alerts.>`` is matched
-against every workflow that is On or in Test; for each that it triggers,
+RFC #620, section 8. A trigger is matched against every workflow that is
+On or in Test: an app's alert (``opennvr.alerts.>``), a contracted event
+(``opennvr.events.>``, by its schema), a camera offline for the trigger's
+time (once per outage), a schedule (local time, once per slot), or a
+person pressing the workflow's button. For each workflow it triggers,
 the file's ``if:`` guards and its limits are checked, a run row is
 written, and the run walks ``then`` (and ``always``) top to bottom. Each
 step is a ``workflow_run_steps`` row, written as it happens, so a run
@@ -69,6 +72,7 @@ from workflows.ai_steps import run_ai_step_recorded
 
 log = logging.getLogger(__name__)
 
+_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 LIMIT_DEFAULTS = {"cooldown": "1m", "one_at_a_time": "camera", "per_hour": 30,
                   "ai_per_hour": 60}
 NOT_YET = "not available yet in this engine"
@@ -138,6 +142,31 @@ def matches_alert(doc: dict[str, Any], envelope: dict[str, Any], ctx: Context) -
     if trig.get("app") != source.get("name"):
         return False
     if trig.get("type") and trig["type"] != envelope.get("alert_type"):
+        return False
+    cams = trig.get("cameras")
+    return not cams or ctx.values.get("camera") in cams
+
+
+def context_from_event(db: Session, envelope: dict[str, Any]) -> Context:
+    """A contracted event (docs/EVENT_CONTRACTS.md): its payload's plain
+    values become the run's values (``{plate_text}``), beside the camera."""
+    payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+    handle = envelope.get("camera_id")
+    num = camera_num(handle)
+    cam = db.get(Camera, num) if num is not None else None
+    values: dict[str, Any] = {k: v for k, v in payload.items() if isinstance(v, _SCALAR)}
+    values.update(schema=envelope.get("schema"), ts=envelope.get("ts"),
+                  camera=camera_role(cam.name) if cam else str(handle or ""),
+                  camera_name=cam.name if cam else None,
+                  camera_id=str(handle) if handle else None)
+    images = payload.get("images") if isinstance(payload.get("images"), dict) else {}
+    return Context(values=values, camera_handle=str(handle) if handle else None,
+                   images=[p for p in images.values() if isinstance(p, str)])
+
+
+def matches_event(doc: dict[str, Any], envelope: dict[str, Any], ctx: Context) -> bool:
+    trig = (doc.get("when") or {}).get("event")
+    if not isinstance(trig, dict) or trig.get("subject") != envelope.get("schema"):
         return False
     cams = trig.get("cameras")
     return not cams or ctx.values.get("camera") in cams
@@ -258,6 +287,9 @@ class Engine:
         self.hardware = hardware
         self.max_side = max_side
         self.tasks: set[asyncio.Task] = set()
+        self._offline_since: dict[int, datetime] = {}
+        self._offline_fired: set[tuple[int, int]] = set()
+        self._schemas: set[str] | None = None
 
     async def warm_up(self) -> bool:
         """Load the model before the first alert needs it: a cold load on
@@ -277,26 +309,31 @@ class Engine:
 
     # ── starting runs ──
 
-    def start_from_alert(self, envelope: dict[str, Any]) -> list[int]:
-        """The runs this alert starts (their ids); the runs themselves go on
-        in the background. A workflow's own alerts start nothing."""
-        source = envelope.get("source") if isinstance(envelope.get("source"), dict) else {}
-        if source.get("kind") == "workflow":
-            return []
+    def _active(self, db: Session) -> list[tuple[Workflow, int, dict[str, Any]]]:
+        """Every workflow that is On or in Test, with its current file."""
+        out = []
+        for wf in db.query(Workflow).filter(Workflow.state.in_(("on", "test"))).all():
+            version = (db.query(WorkflowVersion)
+                       .filter(WorkflowVersion.workflow_id == wf.id,
+                               WorkflowVersion.version == wf.current_version).first())
+            if version is not None:
+                out.append((wf, version.version, yaml.safe_load(version.yaml)))
+        return out
+
+    def _start(self, ctx_base: Context, match: Callable[[Workflow, dict[str, Any], Context], bool],
+               trigger: dict[str, Any], *, only: int | None = None) -> list[int]:
+        """Start every active workflow ``match`` accepts (or only workflow
+        ``only``), once its if: guards hold and its limits allow. The runs
+        go on in the background; their ids come back."""
         db = self.session()
         started: list[tuple[int, dict[str, Any], Context]] = []
         try:
-            ctx_base = context_from_alert(db, envelope)
-            for wf in db.query(Workflow).filter(Workflow.state.in_(("on", "test"))).all():
-                version = (db.query(WorkflowVersion)
-                           .filter(WorkflowVersion.workflow_id == wf.id,
-                                   WorkflowVersion.version == wf.current_version).first())
-                if version is None:
+            for wf, version, doc in self._active(db):
+                if only is not None and wf.id != only:
                     continue
-                doc = yaml.safe_load(version.yaml)
                 ctx = Context(values=dict(ctx_base.values), camera_handle=ctx_base.camera_handle,
                               images=list(ctx_base.images))
-                if not matches_alert(doc, envelope, ctx):
+                if not match(wf, doc, ctx):
                     continue
                 if doc.get("if") is not None and not holds(db, doc["if"], ctx):
                     continue
@@ -305,12 +342,11 @@ class Engine:
                 if why:
                     log.info("workflow %s: run not started (%s)", wf.name, why)
                     continue
-                run = WorkflowRun(workflow_id=wf.id, workflow_version=version.version,
+                run = WorkflowRun(workflow_id=wf.id, workflow_version=version,
                                   test=wf.state == "test", status="running",
                                   trigger={**{k: v for k, v in ctx.values.items()
                                               if isinstance(v, _SCALAR) or v is None},
-                                           "alert_id": envelope.get("alert_id"),
-                                           "_key": _run_key(limits_of(doc), ctx)},
+                                           **trigger, "_key": _run_key(limits_of(doc), ctx)},
                                   started_at=now)
                 db.add(run)
                 db.commit()
@@ -323,6 +359,128 @@ class Engine:
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
         return [r for r, _d, _c in started]
+
+    def start_from_alert(self, envelope: dict[str, Any]) -> list[int]:
+        """The runs this app alert starts. A workflow's own alerts start nothing."""
+        source = envelope.get("source") if isinstance(envelope.get("source"), dict) else {}
+        if source.get("kind") == "workflow":
+            return []
+        db = self.session()
+        try:
+            ctx = context_from_alert(db, envelope)
+        finally:
+            db.close()
+        return self._start(ctx, lambda wf, doc, c: matches_alert(doc, envelope, c),
+                           {"kind": "alert", "alert_id": envelope.get("alert_id")})
+
+    def wanted_schemas(self, *, refresh: bool = False) -> set[str]:
+        """The event schemas an active workflow listens for. Cached and
+        refreshed every tick: ``opennvr.events.>`` carries detections many
+        times a second per camera, and nearly all of them start nothing."""
+        if refresh or self._schemas is None:
+            db = self.session()
+            try:
+                self._schemas = {
+                    doc["when"]["event"].get("subject") for _wf, _v, doc in self._active(db)
+                    if isinstance(doc.get("when"), dict)
+                    and isinstance(doc["when"].get("event"), dict)}
+            finally:
+                db.close()
+        return self._schemas
+
+    def start_from_event(self, envelope: dict[str, Any]) -> list[int]:
+        """The runs this contracted event (``opennvr.events.*``) starts."""
+        if envelope.get("schema") not in self.wanted_schemas():
+            return []
+        db = self.session()
+        try:
+            ctx = context_from_event(db, envelope)
+        finally:
+            db.close()
+        return self._start(ctx, lambda wf, doc, c: matches_event(doc, envelope, c),
+                           {"kind": "event", "event_id": envelope.get("id"),
+                            "schema": envelope.get("schema")})
+
+    def start_from_button(self, workflow_id: int, who: str) -> list[int]:
+        """A person pressed the workflow's button."""
+        ctx = Context(values={"pressed_by": who}, camera_handle=None)
+        return self._start(ctx, lambda wf, doc, c: isinstance(doc.get("when"), dict)
+                           and "button" in doc["when"],
+                           {"kind": "button"}, only=workflow_id)
+
+    def check_offline(self, status: dict[int, bool | None]) -> list[int]:
+        """Cameras offline for long enough start their camera_offline
+        workflows, once per outage; a camera back online is forgotten.
+        ``status`` is the camera status service's snapshot (None: unknown)."""
+        now = self.now()
+        started: list[int] = []
+        for cam_id, online in status.items():
+            if online is True:
+                self._offline_since.pop(cam_id, None)
+                self._offline_fired = {k for k in self._offline_fired if k[1] != cam_id}
+            elif online is False:
+                self._offline_since.setdefault(cam_id, now)
+        down = {c: since for c, since in self._offline_since.items() if status.get(c) is False}
+        if not down:
+            return started
+        db = self.session()
+        try:
+            cams = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(list(down))).all()}
+        finally:
+            db.close()
+        for cam_id, since in down.items():
+            cam = cams.get(cam_id)
+            if cam is None:
+                continue
+            ctx = Context(values={"camera": camera_role(cam.name), "camera_name": cam.name,
+                                  "camera_id": f"cam{cam_id}",
+                                  "offline_for": int((now - since).total_seconds())},
+                          camera_handle=f"cam{cam_id}")
+
+            def match(wf, doc, c, cam_id=cam_id, since=since):
+                trig = (doc.get("when") or {}).get("camera_offline")
+                if not isinstance(trig, dict) or c.values["camera"] not in (trig.get("cameras")
+                                                                           or []):
+                    return False
+                if (wf.id, cam_id) in self._offline_fired:
+                    return False
+                if now - since < timedelta(seconds=parse_duration(trig.get("for") or "2m")):
+                    return False
+                self._offline_fired.add((wf.id, cam_id))
+                return True
+            started += self._start(ctx, match, {"kind": "camera_offline"})
+        return started
+
+    def check_schedule(self) -> list[int]:
+        """Workflows whose schedule is this minute (local time) start, once
+        per slot: the slot is on the run, so a restart within the minute
+        does not start it again."""
+        local = self.now().astimezone()
+        at, day = local.strftime("%H:%M"), _DAYS[local.weekday()]
+        slot = f"{local.date().isoformat()} {at}"
+        db = self.session()
+        try:
+            recent = db.query(WorkflowRun).filter(
+                WorkflowRun.started_at >= self.now() - timedelta(minutes=2)).all()
+            done = {r.workflow_id for r in recent if (r.trigger or {}).get("slot") == slot}
+        finally:
+            db.close()
+
+        def match(wf, doc, c):
+            trig = (doc.get("when") or {}).get("schedule")
+            return (isinstance(trig, dict) and trig.get("at") == at and wf.id not in done
+                    and (not trig.get("days") or day in trig["days"]))
+        ctx = Context(values={"time": at, "day": day}, camera_handle=None)
+        return self._start(ctx, match, {"kind": "schedule", "slot": slot})
+
+    def tick(self, status: dict[int, bool | None] | None = None) -> None:
+        """Every few seconds: time out approvals, start schedules, and
+        start camera_offline workflows from the cameras' status."""
+        self.expire_due()
+        self.wanted_schemas(refresh=True)
+        self.check_schedule()
+        if status is not None:
+            self.check_offline(status)
 
     def close_interrupted(self) -> int:
         """At start: runs left running by a stop are failed, never redone
