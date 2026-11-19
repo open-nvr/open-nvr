@@ -5,9 +5,10 @@
 :func:`site_registry` is the site as the SDK's validator sees it
 (``opennvr_app_sdk.workflows.Registry``): the AI step's read tools, and
 the installed apps with their actions, where an action declared
-``confirm=True`` moves things (RFC #620, section 4). Camera roles, webhook
-destinations and site lists have no store yet, so they are not checked
-at save; the engine refuses an unknown one when it runs.
+``confirm=True`` moves things (RFC #620, section 4), and the webhook
+destinations: the enabled webhook, Slack and Teams integrations. Camera
+roles and site lists have no store yet, so they are not checked at save;
+the engine refuses an unknown one when it runs.
 
 :func:`templates` are the YAML files beside this module (RFC #620,
 section 6), checked when they are read: a broken template fails its test,
@@ -35,7 +36,12 @@ def site_registry(db: Session) -> Registry:
         actions = (app.manifest_json or {}).get("actions") or []
         apps[app.id] = AppInfo(actions={a["name"]: bool(a.get("confirm"))
                                         for a in actions if isinstance(a, dict) and a.get("name")})
-    return Registry(skills=dict.fromkeys(READ_TOOL_NAMES, "read"), apps=apps)
+    # The admin-approved webhook destinations are the enabled webhook, Slack
+    # and Teams integrations, by name (Settings > Integrations).
+    from models import Integration
+    webhooks = [i.name for i in db.query(Integration).filter(Integration.enabled.is_(True)).all()
+                if str(getattr(i.type, "value", i.type)) in ("webhook", "slack", "teams")]
+    return Registry(skills=dict.fromkeys(READ_TOOL_NAMES, "read"), apps=apps, webhooks=webhooks)
 
 
 def check(text: str, db: Session) -> Report:

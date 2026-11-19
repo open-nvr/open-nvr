@@ -91,6 +91,7 @@ _STEP_KEYS = frozenset({"ai", "if", "for_each", "ask_person", "call", *ACTIONS})
 _TOP = frozenset({"workflow", "name", "description", "state", "limits", "when", "if", "then",
                   "always"})
 _ROLE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+_CAMERA_PLACEHOLDER = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _DURATION = re.compile(r"^\d+(?:s|m|h)$")
 _CLOCK = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -475,14 +476,28 @@ class _Checker:
             if not _text(spec):
                 self.err(ap, "the text to log")
         elif kind in ("save_clip", "ptz_preset"):
+            allowed = ({"camera", "before", "after"} if kind == "save_clip"
+                       else {"camera", "preset"})
             if not isinstance(spec, Mapping) or "camera" not in spec:
-                self.err(f"{ap}.camera", "the camera role")
+                self.err(f"{ap}.camera", "the camera role, or {camera} for the triggering one")
             else:
                 self.camera_roles([spec["camera"]], f"{ap}.camera")
+                for k in spec:
+                    if k not in allowed:
+                        self.err(f"{ap}.{k}", f"{kind} has {sorted(allowed)}")
+                for k in ("before", "after"):
+                    if kind == "save_clip" and k in spec:
+                        self.duration(spec[k], f"{ap}.{k}")
             if kind == "ptz_preset" and not (isinstance(spec, Mapping) and _text(spec.get("preset"))):
                 self.err(f"{ap}.preset", "the preset's name")
         elif kind == "webhook":
             to = spec.get("to") if isinstance(spec, Mapping) else None
+            if isinstance(spec, Mapping):
+                for k in spec:
+                    if k not in ("to", "body"):
+                        self.err(f"{ap}.{k}", "webhook has to and body")
+                if "body" in spec and not isinstance(spec["body"], Mapping):
+                    self.err(f"{ap}.body", "a mapping of the values to send")
             if not _text(to):
                 self.err(f"{ap}.to", "an admin-approved destination's name")
             else:
@@ -543,6 +558,8 @@ class _Checker:
             self.err(p, "a list of camera roles")
             return
         for r in roles:
+            if isinstance(r, str) and _CAMERA_PLACEHOLDER.match(r):
+                continue        # filled in when the run gets there, e.g. {camera}
             if isinstance(r, int) or (isinstance(r, str) and r.isdigit()):
                 self.err(p, f"{r!r}: reference cameras by role (gate, yard-east), never by id, "
                             "so the workflow moves between sites")
