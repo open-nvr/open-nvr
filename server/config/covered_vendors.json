@@ -1,0 +1,138 @@
+{
+  "_generated_by": "server/scripts/refresh_covered_vendors.py; do not edit by hand",
+  "source": "https://github.com/Mattbusel/us-restricted-parties",
+  "release": "data-2026-11-18",
+  "built_at": "2026-11-18T02:14:50Z",
+  "sha256": {
+    "us_far_889.jsonl": "d5eb862bcd2756e4229cbf6f8a7fd4b8ff73911dd2abba777299e701b11a4e8f",
+    "us_fcc_covered.jsonl": "ee8563275cbf3caf1855d658e63a2a126db05d1d0e6857b717aaf07dcf0134c5"
+  },
+  "vendors": [
+    {
+      "parent": "Dahua",
+      "kind": "branded",
+      "match": [
+        "dahua"
+      ],
+      "legal_name": "Dahua Technology Company",
+      "lists": [
+        {
+          "list": "Section 889 covered telecommunications and video surveillance companies",
+          "listed_on": "2019-08-13",
+          "source_url": "https://www.ecfr.gov/current/title-48/section-52.204-25",
+          "source_doc": "48 CFR 52.204-25 (eCFR as of 2026-11-16)"
+        },
+        {
+          "list": "FCC Covered List (Secure and Trusted Communications Networks Act)",
+          "listed_on": "2021-03-12",
+          "source_url": "https://www.fcc.gov/supplychain/coveredlist"
+        }
+      ]
+    },
+    {
+      "parent": "Hikvision",
+      "kind": "branded",
+      "match": [
+        "hikvision"
+      ],
+      "legal_name": "Hangzhou Hikvision Digital Technology Company",
+      "lists": [
+        {
+          "list": "Section 889 covered telecommunications and video surveillance companies",
+          "listed_on": "2019-08-13",
+          "source_url": "https://www.ecfr.gov/current/title-48/section-52.204-25",
+          "source_doc": "48 CFR 52.204-25 (eCFR as of 2026-11-16)"
+        },
+        {
+          "list": "FCC Covered List (Secure and Trusted Communications Networks Act)",
+          "listed_on": "2021-03-12",
+          "source_url": "https://www.fcc.gov/supplychain/coveredlist"
+        }
+      ]
+    },
+    {
+      "parent": "Huawei",
+      "kind": "branded",
+      "match": [
+        "huawei"
+      ],
+      "legal_name": "Huawei Technologies Company",
+      "lists": [
+        {
+          "list": "Section 889 covered telecommunications and video surveillance companies",
+          "listed_on": "2019-08-13",
+          "source_url": "https://www.ecfr.gov/current/title-48/section-52.204-25",
+          "source_doc": "48 CFR 52.204-25 (eCFR as of 2026-11-16)"
+        },
+        {
+          "list": "FCC Covered List (Secure and Trusted Communications Networks Act)",
+          "listed_on": "2021-03-12",
+          "source_url": "https://www.fcc.gov/supplychain/coveredlist"
+        }
+      ]
+    },
+    {
+      "parent": "Hytera",
+      "kind": "branded",
+      "match": [
+        "hytera"
+      ],
+      "legal_name": "Hytera Communications Corporation",
+      "lists": [
+        {
+          "list": "Section 889 covered telecommunications and video surveillance companies",
+          "listed_on": "2019-08-13",
+          "source_url": "https://www.ecfr.gov/current/title-48/section-52.204-25",
+          "source_doc": "48 CFR 52.204-25 (eCFR as of 2026-11-16)"
+        },
+        {
+          "list": "FCC Covered List (Secure and Trusted Communications Networks Act)",
+          "listed_on": "2021-03-12",
+          "source_url": "https://www.fcc.gov/supplychain/coveredlist"
+        }
+      ]
+    },
+    {
+      "parent": "ZTE",
+      "kind": "branded",
+      "match": [
+        "zte"
+      ],
+      "legal_name": "ZTE Corporation",
+      "lists": [
+        {
+          "list": "Section 889 covered telecommunications and video surveillance companies",
+          "listed_on": "2019-08-13",
+          "source_url": "https://www.ecfr.gov/current/title-48/section-52.204-25",
+          "source_doc": "48 CFR 52.204-25 (eCFR as of 2026-11-16)"
+        },
+        {
+          "list": "FCC Covered List (Secure and Trusted Communications Networks Act)",
+          "listed_on": "2021-03-12",
+          "source_url": "https://www.fcc.gov/supplychain/coveredlist"
+        }
+      ]
+    },
+    {
+      "parent": "Hikvision",
+      "kind": "affiliate",
+      "match": [
+        "ezviz"
+      ]
+    },
+    {
+      "parent": "Hikvision",
+      "kind": "affiliate",
+      "match": [
+        "annke"
+      ]
+    },
+    {
+      "parent": "Dahua",
+      "kind": "affiliate",
+      "match": [
+        "lorex"
+      ]
+    }
+  ]
+}
