@@ -30,8 +30,13 @@ What runs today:
   installed app's action, as the person who answered, audited as the
   workflow's), **site_mode** and **wait**.
 
-The other actions (save_clip, ptz_preset, webhook, home_assistant) are
-recorded as "not available yet" and the path carries on.
+* **save_clip** (protects the camera's recordings around the moment the
+  run began from retention), **ptz_preset** (points a camera at a preset
+  by name) and **webhook** (to an enabled webhook, Slack or Teams
+  integration by name: the admin-approved destinations).
+
+``home_assistant`` is recorded as "not available yet" and the path
+carries on.
 
 In **Test** every action is recorded as "would have" and nothing is done;
 AI steps run for real, so the trace is genuine, and Ask a person asks
@@ -76,6 +81,11 @@ _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 LIMIT_DEFAULTS = {"cooldown": "1m", "one_at_a_time": "camera", "per_hour": 30,
                   "ai_per_hour": 60}
 NOT_YET = "not available yet in this engine"
+#: Integration types a workflow's webhook may send to.
+WEBHOOK_TYPES = ("webhook", "slack", "teams")
+#: How long after a clip's end its last segment is surely indexed (60 s
+#: segments, indexed when they close, plus lag).
+CLIP_INDEX_SLACK_S = 90.0
 #: How long an Ask a person step waits when it sets no timeout.
 DEFAULT_ASK_TIMEOUT = "5m"
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -290,6 +300,19 @@ class Engine:
         self._offline_since: dict[int, datetime] = {}
         self._offline_fired: set[tuple[int, int]] = set()
         self._schemas: set[str] | None = None
+
+    def later(self, seconds: float, fn: Callable[..., Any], *args: Any) -> None:
+        """Run ``fn(*args)`` after ``seconds`` in the background; a failure
+        is logged, never raised."""
+        async def go() -> None:
+            await asyncio.sleep(seconds)
+            try:
+                fn(*args)
+            except Exception:   # a late follow-up must not take anything down
+                log.warning("workflows: a follow-up failed", exc_info=True)
+        task = asyncio.get_event_loop().create_task(go())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
     async def warm_up(self) -> bool:
         """Load the model before the first alert needs it: a cold load on
@@ -616,6 +639,18 @@ class Engine:
             db.close()
 
 
+def _protect_again(session: Callable[[], Session], camera_id: int, start: datetime,
+                   end: datetime) -> None:
+    """save_clip's second pass, once the clip's last segments are indexed."""
+    from services.recording_protection import set_range_protection
+
+    db = session()
+    try:
+        set_range_protection(db, camera_id, start, end, True)
+    finally:
+        db.close()
+
+
 class _WaitingError(Exception):
     """An Ask a person step is waiting; ``frames`` are the paths to carry
     on with, innermost first, each ``{p, tokens, next, ai_decided}``."""
@@ -826,8 +861,96 @@ class _Walker:
         elif kind == "app":
             outcome, why = await self._app_action(spec)
             self.record(sp, kind, outcome=outcome, inputs=spec, reason=why)
+        elif kind == "save_clip":
+            outcome, why = self._save_clip(spec)
+            self.record(sp, kind, outcome=outcome, inputs=spec, reason=why)
+        elif kind == "ptz_preset":
+            outcome, why = await self._ptz_preset(spec)
+            self.record(sp, kind, outcome=outcome, inputs=spec, reason=why)
+        elif kind == "webhook":
+            outcome, why = await self._webhook(spec)
+            self.record(sp, kind, outcome=outcome, inputs=spec, reason=why)
         else:
             self.record(sp, kind, outcome="skipped", inputs=spec, reason=NOT_YET)
+
+    def _camera(self, role: str) -> Camera | None:
+        """The camera with this role (its name, lower-cased, spaces as -)."""
+        for cam in self.db.query(Camera).all():
+            if getattr(cam, "deleted_at", None) is None and camera_role(cam.name) == role:
+                return cam
+        return None
+
+    def _save_clip(self, spec: dict[str, Any]) -> tuple[str, str]:
+        """Protect the camera's recordings around the moment the run began
+        from retention: ``before`` it and ``after`` it (30 s each by
+        default). Segments are indexed when they close, so what is recorded
+        now is protected now and the rest once the ``after`` window has
+        been written."""
+        from services.recording_protection import set_range_protection
+
+        cam = self._camera(str(spec["camera"]))
+        if cam is None:
+            return "failed", f"no camera with the role {spec['camera']!r}"
+        at = _aware(self.run.started_at)
+        start = at - timedelta(seconds=parse_duration(spec.get("before") or "30s"))
+        end = at + timedelta(seconds=parse_duration(spec.get("after") or "30s"))
+        n = set_range_protection(self.db, cam.id, start, end, True)
+        wait = max(0.0, (end - self.engine.now()).total_seconds()) + CLIP_INDEX_SLACK_S
+        self.engine.later(wait, _protect_again, self.engine.session, cam.id, start, end)
+        return "done", (f"protected {n} clip(s) of {cam.name} from {start:%H:%M:%S} to "
+                        f"{end:%H:%M:%S} UTC; the rest once recorded")
+
+    async def _ptz_preset(self, spec: dict[str, Any]) -> tuple[str, str]:
+        """Point the camera at a preset, by its name (or token)."""
+        from services import ptz_presets_cache
+        from services.ptz_service import PTZService
+
+        cam = self._camera(str(spec["camera"]))
+        if cam is None:
+            return "failed", f"no camera with the role {spec['camera']!r}"
+        target = {"camera_id": cam.id, "ip": cam.ip_address, "username": cam.username,
+                  "password": cam.password, "camera_port": cam.port}
+        name = str(spec["preset"])
+        # Hand the connection back before waiting on the camera (routers/cameras.py).
+        self.db.commit()
+        try:
+            token = ptz_presets_cache.token_for(cam.id, name)
+            if token is None:
+                presets = await PTZService.presets(**target)
+                token = next((p.get("token") for p in presets
+                              if name in (p.get("name"), p.get("token"))), None)
+            if token is None:
+                return "failed", f"{cam.name} has no preset {name!r}"
+            await PTZService.goto_preset(**target, preset_token=token)
+        except Exception as err:   # a camera that does not answer fails the step, not the run
+            log.warning("workflow ptz_preset on camera %s failed", cam.id, exc_info=True)
+            return "failed", f"the camera did not take the preset: {str(err)[:200]}"
+        return "done", f"{cam.name} to {name}"
+
+    async def _webhook(self, spec: dict[str, Any]) -> tuple[str, str]:
+        """POST to an admin-approved destination: an enabled webhook, Slack
+        or Teams integration with this name, through the integrations'
+        own target policy."""
+        from models import Integration
+        from services.integration_service import IntegrationService
+
+        integ = next((i for i in self.db.query(Integration)
+                      .filter(Integration.name == spec["to"], Integration.enabled.is_(True)).all()
+                      if str(getattr(i.type, "value", i.type)) in WEBHOOK_TYPES), None)
+        if integ is None:
+            return "failed", f"no enabled webhook, Slack or Teams integration named {spec['to']!r}"
+        wf = self.db.get(Workflow, self.run.workflow_id) if self.run.workflow_id else None
+        summary = " ".join(str(x) for x in (self.ctx.values.get("outcome"),
+                                            self.ctx.values.get("reason")) if x)
+        payload = {"text": f"{wf.name if wf else 'Workflow'}: {summary or 'ran'}",
+                   "workflow": wf.name if wf else None, "run": self.run.id,
+                   "correlation_id": self.run.correlation_id,
+                   "camera": self.ctx.values.get("camera"),
+                   "outcome": self.ctx.values.get("outcome"),
+                   "reason": self.ctx.values.get("reason"), **(spec.get("body") or {})}
+        self.db.commit()
+        result = await IntegrationService._send_webhook(integ, payload)
+        return ("done" if result.get("success") else "failed"), str(result.get("message"))[:300]
 
     async def _app_action(self, spec: dict[str, Any]) -> tuple[str, str | None]:
         """An installed app's action, as the person who answered the Ask a

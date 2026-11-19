@@ -8,6 +8,13 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The last workflow actions.** `save_clip` protects a camera's
+  recordings around the moment the run began from retention (`before` /
+  `after`, 30 s each by default; again once the rest is recorded),
+  `ptz_preset` points a camera at a preset by name, and `webhook` posts to
+  an enabled webhook, Slack or Teams integration by name, the
+  admin-approved destinations, checked when the workflow is saved. A
+  camera can be written `{camera}`, the one that triggered the run.
 - **Workflows start on more than app alerts.** `when: event` (a
   contracted event such as `plate.recognized.v1`, by its schema and
   cameras; its payload's values fill placeholders like `{plate_text}`),

@@ -263,3 +263,30 @@ def test_the_report_says_whether_the_file_moves_things():
     g["then"][0]["ai"]["delivery"][0]["Let in"] = [
         {"app": {"id": "gate-controller", "action": "status"}}]
     assert validate(g, registry=SITE).moves_things is False
+
+
+@pytest.mark.parametrize("action, path, says", [
+    ({"save_clip": {"camera": "yard-east", "before": "a while"}},
+     "then[1].save_clip.before", "a duration"),
+    ({"save_clip": {"camera": "yard-east", "seconds": 30}}, "then[1].save_clip.seconds",
+     "save_clip has"),
+    ({"ptz_preset": {"camera": "yard-east", "preset": "gate", "speed": 1}},
+     "then[1].ptz_preset.speed", "ptz_preset has"),
+    ({"webhook": {"to": "ticketing", "url": "http://x"}}, "then[1].webhook.url",
+     "webhook has to and body"),
+    ({"webhook": {"to": "ticketing", "body": "text"}}, "then[1].webhook.body", "a mapping"),
+])
+def test_the_last_actions_are_checked_key_by_key(action, path, says):
+    d = doc()
+    d["then"].append(action)
+    found = [p for p in validate(d).errors if p.path == path]
+    assert found and says in found[0].message, validate(d).errors
+
+
+def test_a_camera_can_be_the_triggering_one():
+    d = doc()
+    d["then"].append({"save_clip": {"camera": "{camera}", "before": "30s", "after": "1m"}})
+    d["then"].append({"ptz_preset": {"camera": "{camera}", "preset": "gate"}})
+    report = validate(d)
+    assert report.ok, report.errors
+    assert "{camera}" not in report.needs["cameras"]
