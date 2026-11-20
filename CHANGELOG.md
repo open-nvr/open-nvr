@@ -8,6 +8,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Workflows guide.** `docs/WORKFLOWS.md`: setting up the model, the
+  workflow file (triggers, conditions, steps, actions, limits), the safety
+  rule, Test and On, Ask a person, trying on recent events, reading a run,
+  what is not there yet, and the API, with a curl walk-through.
+
 - **The last workflow actions.** `save_clip` protects a camera's
   recordings around the moment the run began from retention (`before` /
   `after`, 30 s each by default; again once the rest is recorded),
