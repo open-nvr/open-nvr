@@ -151,7 +151,7 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             # A draft, so publishing the release stays a person's decision.
             gh release create "$TAG" --draft --verify-tag --title "$TAG" \
-              --notes "See CHANGELOG.md. Signed update manifest attached."
+              --notes "See CHANGELOG.md. Signed update manifest attached. Questions or feedback: https://opennvr.org/discord or https://github.com/open-nvr/open-nvr/discussions"
           fi
           gh release upload "$TAG" dist/release-manifest.json dist/release-manifest.json.sig \
             dist/release-revocations.json dist/release-revocations.json.sig --clobber

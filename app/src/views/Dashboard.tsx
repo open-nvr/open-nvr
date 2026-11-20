@@ -25,6 +25,7 @@ import { Button } from '../components/ui'
 import { useAuth } from '../auth/AuthContext'
 import { useClickOutside } from '../hooks/useClickOutside'
 import { useTranslation } from '../i18n'
+import { CommunityStrip } from '../components/Community'
 import { HealthBar } from './dashboard/HealthBar'
 import { DRAG_HANDLE_CLASS, NO_DRAG_CLASS } from './dashboard/WidgetFrame'
 import {
@@ -220,6 +221,7 @@ export function Dashboard() {
     <section className="flex flex-col gap-2">
       <h1 className="sr-only">{t('dashboard.title')}</h1>
       <HealthBar actions={actions} />
+      <CommunityStrip />
 
       {/* Floating, so entering edit mode does not shift the grid it explains. */}
       {editing && (

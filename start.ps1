@@ -685,6 +685,19 @@ function Show-RunningInfo {
     Write-Color "  First-time setup page opens automatically on first visit." DarkGray
 }
 
+# Where to find other OpenNVR users. Printed last by `up` and `build` so it is
+# the final thing on screen; `up` runs on every restart and update too, so keep
+# it to these few lines. Static links only - nothing here contacts the network.
+function Show-CommunityLinks {
+    Write-Color ""
+    Write-Color "  Community & help" Cyan
+    Write-Color "  Discord        → https://opennvr.org/discord" Cyan
+    Write-Color "  Discussions    → https://github.com/open-nvr/open-nvr/discussions" Cyan
+    Write-Color "  Report a bug   → https://github.com/open-nvr/open-nvr/issues" Cyan
+    Write-Color "  Like OpenNVR? A star on GitHub helps others find it." DarkGray
+    Write-Color ""
+}
+
 # ── Host LAN IP detection (OPENNVR_HOST_IP) ────────────────
 # The core container runs on a Docker bridge and can't see the host's LAN, so
 # ONVIF discovery (and the TLS cert SAN) needs the host's LAN IP passed in.
@@ -920,6 +933,7 @@ function Invoke-Up {
     # The runner behind OpenNVR Updates in the app (scripts\update-host.ps1).
     . (Join-Path $PSScriptRoot "scripts\update-host.ps1")
     Update-UpdateRunner
+    Show-CommunityLinks
 }
 
 function Invoke-Build {
@@ -941,6 +955,7 @@ function Invoke-Build {
     Show-RunningInfo
     Show-FirstTimeSetupToken -ComposeArgs $ca
     Test-EdgeReachable
+    Show-CommunityLinks
 }
 
 # ── Smart front door (bare .\start.ps1) ────────────────────

@@ -1,0 +1,54 @@
+name: Bug report
+description: Something is broken
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security issues go in a [private advisory](https://github.com/open-nvr/open-nvr/security/advisories/new), not here.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `./start.sh`
+        2. Add a camera ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OpenNVR version or commit
+      description: The Support page in the web UI shows the running version.
+      placeholder: e.g. v0.1.12 or a commit hash
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host
+      options:
+        - Linux
+        - Windows (Docker Desktop)
+        - macOS (Docker Desktop)
+        - Raspberry Pi
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: camera
+    attributes:
+      label: Camera make/model (if relevant)
+      placeholder: e.g. Reolink RLC-510A, OpenNVR Cam app, webcam
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Output of `./start.sh logs` around the failure. Remove passwords and tokens.
+      render: shell
