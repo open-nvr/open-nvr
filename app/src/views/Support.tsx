@@ -20,6 +20,7 @@ import React, { useCallback, useMemo, useState } from 'react'
 import { useAuth } from '../auth/AuthContext'
 import { apiService } from '../lib/apiService'
 import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
+import { CommunityCard } from '../components/Community'
 
 type DiagItem = {
   key: string
@@ -315,6 +316,8 @@ export function Support() {
           </div>
         </div>
       </div>
+
+      <CommunityCard />
     </div>
   )
 }

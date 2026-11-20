@@ -320,7 +320,7 @@ opening the PR saves a review cycle.
 - [ ] Code follows the style guide above (`pre-commit` is green).
 - [ ] Tests added or updated for the behaviour change.
 - [ ] Docs updated if user-visible behaviour changed.
-- [ ] CHANGELOG entry added under `## Unreleased` if the change is
+- [ ] CHANGELOG entry added under `## [Unreleased]` if the change is
       user-visible.
 - [ ] PR title follows Conventional Commits.
 - [ ] PR description states *what* the change does and *why* — a sentence
@@ -341,11 +341,11 @@ opening the PR saves a review cycle.
 
 ## Code of conduct
 
-We want this to stay a project people enjoy contributing to. The expectation is welcoming, inclusive language and respectful disagreement; personal attacks, harassment, doxxing, and inflammatory off-topic posting are not part of that. Report violations to **contact@opennvr.org** — reports are confidential.
+We want this to stay a project people enjoy contributing to. The expectation is welcoming, inclusive language and respectful disagreement; personal attacks, harassment, doxxing, and inflammatory off-topic posting are not part of that. The full text is in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Report violations to **contact@opennvr.org** — reports are confidential.
 
 ## Getting help while you contribute
 
-For deeper reference reading, [`docs/AI_ADAPTER_CONTRACT.md`](docs/AI_ADAPTER_CONTRACT.md) covers the wire spec and [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) covers the threat model. Open a [Discussion](https://github.com/open-nvr/open-nvr/discussions) for "is this the right approach?" questions before you start writing code, and an [Issue](https://github.com/open-nvr/open-nvr/issues) for "I think I found a bug" reports.
+For deeper reference reading, [`docs/AI_ADAPTER_CONTRACT.md`](docs/AI_ADAPTER_CONTRACT.md) covers the wire spec and [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) covers the threat model. Open a [Discussion](https://github.com/open-nvr/open-nvr/discussions) for "is this the right approach?" questions before you start writing code, and an [Issue](https://github.com/open-nvr/open-nvr/issues) for "I think I found a bug" reports. For quick questions and a chat with other contributors, join us on [Discord](https://opennvr.org/discord).
 
 
 ## Licensing of contributions (CLA / DCO)
