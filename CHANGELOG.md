@@ -66,6 +66,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A camera URL pasted with a leading or trailing space now works.** The
+  RTSP and substream URLs were saved with the space, MediaMTX refused the
+  source, and live view said "path 'cam-N' is not configured". Adding,
+  editing and importing a camera now strip whitespace from both URLs (#989).
+
 - **The §889 security check no longer reports a camera as ZTE because its
   name or maker contains the letters "zte".** The covered-vendor match was a
   plain substring, so a camera named "Aztec Gate" or made by Aztech came up

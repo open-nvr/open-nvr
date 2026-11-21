@@ -145,6 +145,8 @@ class CameraBase(BaseModel):
     @field_validator("rtsp_url", "substream_url")
     @classmethod
     def validate_rtsp_url(cls, v: str | None) -> str | None:
+        if v:
+            v = v.strip()
         if not v:
             return v
 
@@ -558,6 +560,11 @@ class CameraUpdate(BaseModel):
     @classmethod
     def validate_display_aspect(cls, v: str | None) -> str | None:
         return _validate_display_aspect(v)
+
+    @field_validator("rtsp_url", "substream_url", mode="before")
+    @classmethod
+    def strip_stream_urls(cls, v: object) -> object:
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("assignments")
     @classmethod
