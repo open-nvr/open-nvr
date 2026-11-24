@@ -28,6 +28,7 @@ import { apiService } from '../../lib/apiService'
 import { useAuth } from '../../auth/AuthContext'
 import { useSnackbar } from '../../components/Snackbar'
 import { Modal } from '../../components/Modal'
+import { StepUpCode, stepUpReady, useSsoStepUp } from '../../components/StepUpCode'
 import { PlaybackConsole } from '../../components/PlaybackConsole'
 import { useDateFormat, type DateFormatters } from '../../i18n'
 
@@ -64,6 +65,7 @@ export function DeletedCameras() {
   const [purging, setPurging] = useState<DeletedCamera | null>(null)
   const [phrase, setPhrase] = useState('')
   const [mfaCode, setMfaCode] = useState('')
+  const ssoStepUp = useSsoStepUp()
   const [purgeBusy, setPurgeBusy] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -111,7 +113,7 @@ export function DeletedCameras() {
   }
 
   const onPurge = async () => {
-    if (!purging || !phraseOk || !mfaCode.trim()) return
+    if (!purging || !phraseOk || !stepUpReady(mfaCode)) return
     setPurgeBusy(true)
     try {
       const { data } = await apiService.hardDeleteCamera(purging.id, phrase, mfaCode.trim())
@@ -266,14 +268,11 @@ export function DeletedCameras() {
               />
             </div>
             <div>
-              <div className="mb-1 text-[var(--text-dim)]">Current MFA code:</div>
-              <input
+              <div className="mb-1 text-[var(--text-dim)]">{ssoStepUp ? 'Confirm it is you:' : 'Current MFA code:'}</div>
+              <StepUpCode
                 className="w-40 bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1"
                 value={mfaCode}
-                onChange={(e) => setMfaCode(e.target.value)}
-                placeholder="123456"
-                inputMode="numeric"
-                autoComplete="one-time-code"
+                onChange={setMfaCode}
               />
             </div>
             <div className="flex justify-end gap-2 pt-1">
@@ -287,7 +286,7 @@ export function DeletedCameras() {
               <button
                 className="px-3 py-1 bg-[var(--critical)] text-white disabled:opacity-50"
                 onClick={onPurge}
-                disabled={purgeBusy || !phraseOk || !mfaCode.trim()}
+                disabled={purgeBusy || !phraseOk || !stepUpReady(mfaCode)}
               >
                 {purgeBusy ? 'Deleting…' : 'Delete Permanently'}
               </button>
