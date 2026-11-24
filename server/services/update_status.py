@@ -9,8 +9,8 @@ holds Docker. The two talk through two folders:
   the run state, the last check's result, the verified candidate manifest,
   the run history and the runner's heartbeat.
 * ``data/update-requests`` (core → host, mounted at ``/app/update-requests``):
-  an "update to X" request and the update policy, which the host runner
-  picks up within a minute.
+  an "update to X" request, a "check now" request and the update policy,
+  which the host runner picks up within a minute.
 
 Core cannot touch the run state, the manifests or the backups. A request
 only names a version; the host's updater still verifies a signed manifest
@@ -136,6 +136,7 @@ def status(installed_version: str, installed_commit: str | None, *, now: datetim
                             "requested_at": pending.get("REQUESTED_AT")}
         if pending.get("ID") and pending.get("ID") != done else None,
         "connected": STATE_DIR.is_dir() and REQUEST_DIR.is_dir(),
+        "pending_check": pending_check(),
         "apps": apps_status(),
     }
 
@@ -262,6 +263,29 @@ def cancel_app_request() -> bool:
         return True
     except FileNotFoundError:
         return False
+
+
+def pending_check() -> dict | None:
+    """A Check now the runner has not picked up yet, or None."""
+    pending = _kv_last(REQUEST_DIR / "check-request.env")
+    done = (STATE_DIR / "last-check-request").read_text(encoding="utf-8").strip() \
+        if (STATE_DIR / "last-check-request").is_file() else ""
+    if not pending.get("ID") or pending["ID"] == done:
+        return None
+    return {"requested_by": pending.get("REQUESTED_BY"), "requested_at": pending.get("REQUESTED_AT")}
+
+
+def request_check(username: str) -> str:
+    """Ask the host runner to look for new releases (OpenNVR's and the
+    apps') on its next tick instead of at the next six-hourly check. It
+    installs nothing; it only refreshes what this page offers."""
+    REQUEST_DIR.mkdir(parents=True, exist_ok=True)
+    rid = uuid.uuid4().hex
+    tmp = REQUEST_DIR / "check-request.env.tmp"
+    envfile.write_kv(tmp, {"ID": rid, "ACTION": "check", "REQUESTED_BY": _token(username),
+                           "REQUESTED_AT": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    tmp.replace(REQUEST_DIR / "check-request.env")
+    return rid
 
 
 def request_update(version: str, username: str) -> str:
