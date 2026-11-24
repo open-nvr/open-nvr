@@ -461,7 +461,19 @@ class AdapterRegistry:
         # approval_status "pending" → it is stored + visible but MUST
         # NOT serve inference until an operator grants. An adapter that
         # declares no permission is trivially approved (∅ ⊆ ∅).
+        #
+        # The one exception is consent the operator ALREADY gave this
+        # adapter at this URL — still registered, queued for a restore,
+        # or in a receipt not restored yet. Re-registering is not a
+        # reason to forget it: after a host boot the app that owns an
+        # adapter often re-registers it before KAI-C's first restore
+        # retry reaches the (slower-booting) adapter container, and
+        # dropping the queued restore here silently put the adapter
+        # back to "pending" on every reboot. It is re-applied below
+        # through grant_permissions, i.e. audited and intersected with
+        # what the adapter declares NOW, so new scope still waits.
         with self._lock:
+            remembered = self._remembered_grants_locked(name, url, source)
             self._adapters[name] = adapter
             # A successful registration supersedes any queued retry for
             # the same name (a restore raced a fresh runtime register).
@@ -487,7 +499,34 @@ class AdapterRegistry:
             "adapter registered: %s @ %s (approval_status=%s)",
             name, url, adapter.approval_status,
         )
+        if remembered:
+            adapter, _ = self.grant_permissions(
+                name, sorted(remembered), actor="system:state-restore"
+            )
         return adapter
+
+    def _remembered_grants_locked(self, name: str, url: str, source: str) -> set[str]:
+        """The keys an operator already granted ``name`` at ``url``: from
+        the adapter as registered now, a queued restore, or a receipt
+        read at boot and not restored yet. MUST be called with
+        ``self._lock`` held. Runtime registrations only (a seed's
+        consent is its configuration, re-applied by the seed loop), and
+        the same URL only: a name re-pointed elsewhere is a different
+        adapter and needs fresh consent."""
+        if source != "runtime":
+            return set()
+        found: set[str] = set()
+        current = self._adapters.get(name)
+        if current is not None and current.url == url:
+            found |= current.granted_permissions
+        queued = self._pending.get(name)
+        if queued is not None and queued.source == "runtime" and queued.url == url:
+            found |= set(queued.granted_keys)
+        if not self._restored:
+            for receipt in self._boot_receipts:
+                if receipt.get("name") == name and str(receipt.get("url") or "").rstrip("/") == url:
+                    found |= set(receipt.get("granted_permissions") or [])
+        return found
 
     async def deregister(self, name: str, *, reason: str = "operator_action") -> None:
         with self._lock:
@@ -973,15 +1012,13 @@ class AdapterRegistry:
             # Registered. Re-apply the recorded consent through the
             # NORMAL grant paths (audited, drift-safe): seeds get the
             # §8.5 config-as-consent approve-all; restored runtime
-            # adapters get exactly the keys the operator had granted —
+            # adapters got exactly the keys the operator had granted —
             # intersected against today's declared set, so new scope
-            # stays pending.
+            # stays pending — inside register() itself, which is also
+            # what keeps them when someone else registers the adapter
+            # first (see _remembered_grants_locked).
             if p.grant_all_on_register:
                 self.approve_all(p.name, actor="system:startup-config")
-            elif p.granted_keys:
-                self.grant_permissions(
-                    p.name, list(p.granted_keys), actor="system:state-restore"
-                )
             logger.info(
                 "pending adapter %s registered after %d retry attempt(s)",
                 p.name, p.attempts,
