@@ -10,6 +10,11 @@ the account, and hands the browser a one-time code in the login page's
 URL; the page swaps it at ``POST /auth/oidc/exchange`` for the same
 token pair a password login returns. Tokens never travel in a URL.
 
+``GET /auth/oidc/start?reauth=<id>`` (opened in a pop-up) makes a single
+sign-on user sign in at the provider again to confirm a sensitive action;
+the callback answers with a page that passes a short-lived step-up token
+back to the app over a same-origin BroadcastChannel and closes.
+
 Reset: ``POST /auth/forgot`` always answers the same way, whether or not
 the address exists, and sends a 30-minute single-use link only when the
 operator configured mail. ``POST /auth/reset`` sets the password, ends
@@ -18,13 +23,16 @@ every other session of that account, and clears a lockout.
 from __future__ import annotations
 
 import contextlib
+import html
+import json
 import logging
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from jose import JWTError, jwt
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
@@ -196,14 +204,52 @@ def _login_url(request: Request, **query: str) -> str:
     return f"{_public_origin(request)}/login" + (f"?{urlencode(query)}" if query else "")
 
 
+_REAUTH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+STEP_UP_CHANNEL = "opennvr-sso-step-up"
+
+
+def _step_up_page(request: Request, rid: str, *, token: str | None = None,
+                  error: str | None = None) -> HTMLResponse:
+    """The pop-up's last page: hand the result to the app and close.
+
+    BroadcastChannel rather than window.opener: a provider that sends
+    Cross-Origin-Opener-Policy cuts the pop-up off from its opener for good,
+    and the channel only reaches pages of this same origin."""
+    def js(v: Any) -> str:   # safe inside <script>: no "</script>" can survive
+        return json.dumps(v).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+    msg = js({"type": "sso-step-up", "rid": rid, "token": token, "error": error})
+    origin = js(_public_origin(request))
+    text = html.escape(error or "Confirmed. You can close this window.")
+    body = f"""<!doctype html><html><head><meta charset="utf-8"><title>OpenNVR</title></head>
+<body style="font-family:system-ui,sans-serif;padding:2rem"><p>{text}</p>
+<script>
+(function () {{
+  var msg = {msg};
+  try {{ var ch = new BroadcastChannel({js(STEP_UP_CHANNEL)}); ch.postMessage(msg); ch.close(); }} catch (e) {{}}
+  try {{ if (window.opener) window.opener.postMessage(msg, {origin}); }} catch (e) {{}}
+  setTimeout(function () {{ window.close(); }}, {1500 if error else 300});
+}})();
+</script></body></html>"""
+    return HTMLResponse(body, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
 @router.get("/oidc/start")
-async def oidc_start(request: Request, next: str | None = None, db: Session = Depends(get_db)):
-    """Send the browser to the identity provider."""
+async def oidc_start(request: Request, next: str | None = None, reauth: str | None = None,
+                     db: Session = Depends(get_db)):
+    """Send the browser to the identity provider. ``reauth`` (a request id
+    from the app) asks it to make the user sign in again, to confirm a
+    sensitive action rather than start a session."""
     redirect_uri = f"{_public_origin(request)}{settings.api_prefix}/auth/oidc/callback"
+    if reauth is not None and not _REAUTH_ID.match(reauth):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="bad reauth id")
     try:
-        url, cookie = await oidc.begin(db, redirect_uri, next if (next or "").startswith("/") else "/")
+        url, cookie = await oidc.begin(db, redirect_uri, next if (next or "").startswith("/") else "/",
+                                       reauth=reauth)
     except Exception as exc:
         logger.warning("oidc start failed: %s", exc)
+        if reauth:
+            return _step_up_page(request, reauth, error=f"Single sign-on failed: {str(exc)[:160]}")
         return RedirectResponse(_login_url(request, sso_error=str(exc)[:160]), status_code=302)
     resp = RedirectResponse(url, status_code=302)
     resp.set_cookie(oidc.STATE_COOKIE, cookie, max_age=oidc.STATE_TTL_SECONDS, httponly=True,
@@ -216,7 +262,12 @@ async def oidc_callback(request: Request, code: str | None = None, state: str | 
                         error: str | None = None, error_description: str | None = None,
                         db: Session = Depends(get_db)):
     """Back from the provider: verify, resolve the account, hand the page a
-    one-time code."""
+    one-time code. A re-sign-in (pop-up) answers with the step-up page
+    instead, errors included, so the pop-up never ends on the login page."""
+    reauth = (oidc.read_state(request.cookies.get(oidc.STATE_COOKIE)) or {}).get("reauth")
+    if reauth:
+        return await _oidc_step_up_callback(request, db, str(reauth), code=code, state=state,
+                                            error=error_description or error)
     if error:
         return RedirectResponse(_login_url(request, sso_error=(error_description or error)[:160]), status_code=302)
     if not code or not state:
@@ -233,6 +284,31 @@ async def oidc_callback(request: Request, code: str | None = None, state: str | 
     resp = RedirectResponse(_login_url(request, sso=handoff), status_code=302)
     resp.delete_cookie(oidc.STATE_COOKIE, path=f"{settings.api_prefix}/auth/oidc")
     return resp
+
+
+async def _oidc_step_up_callback(request: Request, db: Session, rid: str, *, code: str | None,
+                                 state: str | None, error: str | None) -> HTMLResponse:
+    """Back from a re-sign-in: a step-up token for the account it proves."""
+    def done(resp: HTMLResponse) -> HTMLResponse:
+        resp.delete_cookie(oidc.STATE_COOKIE, path=f"{settings.api_prefix}/auth/oidc")
+        return resp
+
+    if error or not code or not state:
+        return done(_step_up_page(request, rid, error=f"Single sign-on failed: {(error or 'no code')[:160]}"))
+    try:
+        claims = await oidc.complete(db, code=code, state=state, cookie=request.cookies.get(oidc.STATE_COOKIE))
+        user = oidc.step_up_user(db, claims, oidc.load(db))
+    except ValueError as exc:
+        return done(_step_up_page(request, rid, error=f"Not confirmed: {str(exc)[:160]}"))
+    except Exception as exc:
+        logger.warning("oidc step-up callback failed: %s", exc, exc_info=True)
+        return done(_step_up_page(request, rid, error="Single sign-on failed; try again."))
+    with contextlib.suppress(Exception):
+        write_audit_log(db, action="auth.sso_step_up", user_id=user.id, entity_type="user", entity_id=user.id,
+                        details={"username": user.username, "auth_time": claims.get("auth_time")},
+                        ip=request.client.host if request.client else None,
+                        user_agent=request.headers.get("user-agent"))
+    return done(_step_up_page(request, rid, token=oidc.issue_step_up_token(user)))
 
 
 @router.post("/oidc/exchange", response_model=Token)

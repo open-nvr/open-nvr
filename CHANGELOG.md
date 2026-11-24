@@ -71,6 +71,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A single sign-on administrator can reset 2FA, passwords and users
+  again** (#998). Those actions asked for the administrator's own MFA
+  code, which a single sign-on account never has and may not add, so every
+  one of them failed with "Set up MFA before performing this action". The
+  dialogs now offer **Confirm with single sign-on**: a pop-up signs in at
+  the identity provider again (`prompt=login`) and confirms changes for
+  five minutes. New `scripts/reset_password.py` sets a password from the
+  host, next to `disable_mfa.py`.
 - **A camera URL pasted with a leading or trailing space now works.** The
   RTSP and substream URLs were saved with the space, MediaMTX refused the
   source, and live view said "path 'cam-N' is not configured". Adding,

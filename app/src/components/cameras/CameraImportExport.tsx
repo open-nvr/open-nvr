@@ -24,6 +24,7 @@ import { saveBlob } from '../../lib/clipDownload'
 import { Modal } from '../Modal'
 import { Badge, Button, type BadgeVariant } from '../ui'
 import { Checkbox } from '../ui/form'
+import { StepUpCode, stepUpReady, useSsoStepUp } from '../StepUpCode'
 
 type RowStatus = 'new' | 'update' | 'unchanged' | 'duplicate' | 'error'
 type PreviewRow = {
@@ -343,6 +344,7 @@ export function CameraExportDialog({ filters, onClose }: {
   const [format, setFormat] = useState<'xlsx' | 'csv'>('xlsx')
   const [withPasswords, setWithPasswords] = useState(false)
   const [mfa, setMfa] = useState('')
+  const ssoStepUp = useSsoStepUp()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const filtered = !!(filters.q || filters.location || filters.no_location || filters.active_only)
@@ -368,7 +370,7 @@ export function CameraExportDialog({ filters, onClose }: {
       footer={(
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>{t('cameraIo.cancel')}</Button>
-          <Button variant="primary" onClick={run} disabled={busy || (withPasswords && !mfa.trim())}>
+          <Button variant="primary" onClick={run} disabled={busy || (withPasswords && !stepUpReady(mfa))}>
             <Download size={14} /> {busy ? t('cameraIo.exporting') : t('cameraIo.export')}
           </Button>
         </div>
@@ -385,8 +387,8 @@ export function CameraExportDialog({ filters, onClose }: {
           <p className="text-xs text-[var(--text-dim)]">{withPasswords ? t('cameraIo.passwordsWarn') : t('cameraIo.passwordsOff')}</p>
           {withPasswords && (
             <label className="block">
-              <span className="mb-1 block text-xs text-[var(--text-dim)]">{t('cameraIo.mfaCode')}</span>
-              <input value={mfa} onChange={(e) => setMfa(e.target.value)} placeholder="123456" inputMode="numeric" autoComplete="one-time-code" autoFocus
+              {!ssoStepUp && <span className="mb-1 block text-xs text-[var(--text-dim)]">{t('cameraIo.mfaCode')}</span>}
+              <StepUpCode value={mfa} onChange={setMfa} autoFocus
                 className="h-9 w-40 border border-[var(--border)] bg-[var(--bg-2)] px-2.5 text-[13px] outline-none focus:border-[var(--accent)]" />
             </label>
           )}
