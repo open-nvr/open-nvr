@@ -12,6 +12,9 @@
 * ``POST /system/update/apps/{id}/request`` — install an app's newest
   release from the registry now; ``DELETE /system/update/apps/request``
   withdraws it. ``system.update``. ``GET`` carries the apps under ``apps``.
+* ``POST /system/update/check`` — look for new releases (OpenNVR's and the
+  apps') now rather than at the next six-hourly check. Installs nothing.
+  ``system.update``.
 
 The host does the work (services/update_status.py explains the hand-off).
 These are not the OS updates of routers/firmware.py.
@@ -163,6 +166,26 @@ async def request_update(body: UpdateRequestIn, request: Request, db: Session = 
                   entity_type="system", entity_id=None,
                   details={"from": version, "to": body.version, "request": rid})
     return {"request": rid, "to": body.version}
+
+
+@router.post("/check", status_code=202)
+async def request_check(request: Request, db: Session = Depends(get_db),
+                        current_user: User = Depends(_update)):
+    """Check now: the host runner looks for new releases on its next tick
+    (within a minute) and this page shows what it found. Nothing is
+    installed; an automatic install still waits for the window."""
+    version, commit = _installed()
+    now = update_status.status(version, commit)
+    if not now["connected"]:
+        raise HTTPException(status_code=503, detail="This installation has no update folders mounted.")
+    if not now["runner"]["running"]:
+        raise HTTPException(status_code=409, detail="The update runner is not running on the host.")
+    if now["pending_check"]:
+        return {"request": None, "already_requested": True}
+    rid = update_status.request_check(current_user.username)
+    audit_request(db, request, action="system.update_check", user_id=current_user.id,
+                  entity_type="system", entity_id=None, details={"request": rid})
+    return {"request": rid, "already_requested": False}
 
 
 @router.delete("/request")
