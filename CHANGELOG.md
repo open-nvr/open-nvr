@@ -8,6 +8,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Workflows guide.** `docs/WORKFLOWS.md`: setting up the model, the
+  workflow file (triggers, conditions, steps, actions, limits), the safety
+  rule, Test and On, Ask a person, trying on recent events, reading a run,
+  what is not there yet, and the API, with a curl walk-through.
+
 - **The last workflow actions.** `save_clip` protects a camera's
   recordings around the moment the run began from retention (`before` /
   `after`, 30 s each by default; again once the rest is recorded),
@@ -65,6 +70,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the first app released this way; release manifests no longer pin it.
 
 ### Fixed
+
+- **A single sign-on administrator can reset 2FA, passwords and users
+  again** (#998). Those actions asked for the administrator's own MFA
+  code, which a single sign-on account never has and may not add, so every
+  one of them failed with "Set up MFA before performing this action". The
+  dialogs now offer **Confirm with single sign-on**: a pop-up signs in at
+  the identity provider again (`prompt=login`) and confirms changes for
+  five minutes. New `scripts/reset_password.py` sets a password from the
+  host, next to `disable_mfa.py`.
+- **A camera URL pasted with a leading or trailing space now works.** The
+  RTSP and substream URLs were saved with the space, MediaMTX refused the
+  source, and live view said "path 'cam-N' is not configured". Adding,
+  editing and importing a camera now strip whitespace from both URLs (#989).
 
 - **The §889 security check no longer reports a camera as ZTE because its
   name or maker contains the letters "zte".** The covered-vendor match was a
