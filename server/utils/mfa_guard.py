@@ -20,7 +20,9 @@ Sensitive actions (user delete/activate, camera hard delete) require the
 caller to present a *current* TOTP code from one of their authenticators in
 the X-MFA-Code header on top of a valid session — proof of presence, not just
 a live token. Changes to the account's own second factors also ask for the
-account password (``require_reauth``).
+account password (``require_reauth``). A single sign-on account, which has
+no authenticator here, sends ``sso:<token>`` instead: proof that it signed
+in at its identity provider again a few minutes ago (services.oidc).
 
 A wrong code or password counts toward the account lockout exactly like a
 wrong one at sign-in, and a locked account is refused here too: otherwise a
@@ -79,6 +81,34 @@ def _clear_failures(db, user: User) -> None:
     db.commit()
 
 
+def _sso_step_up(db, user: User, mfa_code: str | None) -> bool:
+    """A single sign-on account confirms by signing in at its provider again
+    (services.oidc), which yields a step-up token sent as ``sso:<token>``.
+    True when one is valid. Without one, an account that has no authenticator
+    of its own is told to confirm that way (it can never enter a code).
+
+    A bad token does not count toward the lockout: it is signed, so there is
+    nothing to guess, and an expired one is not an attack."""
+    from services import oidc
+
+    code = (mfa_code or "").strip()
+    if code.startswith(oidc.STEP_UP_PREFIX):
+        _refuse_if_locked(user)
+        if oidc.verify_step_up_token(user, code[len(oidc.STEP_UP_PREFIX):]):
+            _clear_failures(db, user)
+            return True
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your single sign-on confirmation has expired. Confirm with single sign-on again.",
+        )
+    if not mfa_service.has_active_factor(db, user):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Confirm with single sign-on before performing this action.",
+        )
+    return False
+
+
 def require_mfa_code(current_user: User, mfa_code: str | None) -> None:
     """Verify the caller's current TOTP code for sensitive actions."""
     require_reauth(current_user, mfa_code)
@@ -92,6 +122,9 @@ def require_reauth(current_user: User, mfa_code: str | None, *,
     takes (and uses up) a recovery code: only for the account's own
     two-factor settings, never for destructive actions."""
     db = _session_of(current_user)
+    if db is not None and mfa_service.is_sso_account(current_user) and not need_password:
+        if _sso_step_up(db, current_user, mfa_code):
+            return
     if db is None or not mfa_service.has_active_factor(db, current_user):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

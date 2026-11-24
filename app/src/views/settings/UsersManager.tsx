@@ -24,6 +24,7 @@ import { useAuth } from '../../auth/AuthContext'
 import { useTranslation } from '../../i18n'
 import { Modal } from '../../components/Modal'
 import { UserMfaDialog } from './UserMfaDialog'
+import { StepUpCode, stepUpReady, useSsoStepUp } from '../../components/StepUpCode'
 
 type User = {
   id: number
@@ -62,6 +63,7 @@ type Role = {
 export function UsersManager() {
   const { t } = useTranslation()
   const { user: me } = useAuth()
+  const ssoStepUp = useSsoStepUp()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [users, setUsers] = useState<User[]>([])
@@ -311,15 +313,15 @@ export function UsersManager() {
               </label>
               {form.is_superuser && (
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Your MFA code * (required to create a superuser)</span>
-                  <input className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm font-mono" inputMode="numeric" maxLength={6} value={formMfaCode} onChange={(e) => setFormMfaCode(e.target.value.replace(/\D/g, ''))} required />
+                  <span className="text-xs text-[var(--text-dim)]">{ssoStepUp ? 'Confirm it is you' : 'Your MFA code'} * (required to create a superuser)</span>
+                  <StepUpCode className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm font-mono" value={formMfaCode} onChange={setFormMfaCode} required />
                 </label>
               )}
             </div>
           </div>
           <div className="flex items-center justify-end gap-2 p-4 border-t border-[var(--border)]">
             <button type="button" className="px-4 py-2 text-sm border border-[var(--border)] hover:bg-[var(--panel-2)]" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>{t('admin.cancel')}</button>
-            <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading || (!!form.is_superuser && formMfaCode.length !== 6)}>{loading ? t('common.loading') : t('admin.createUser')}</button>
+            <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading || (!!form.is_superuser && !stepUpReady(formMfaCode))}>{loading ? t('common.loading') : t('admin.createUser')}</button>
           </div>
         </form>
         </Modal>
@@ -375,15 +377,15 @@ export function UsersManager() {
               </label>
               {(!!form.is_superuser !== !!editing.is_superuser || !!form.password) && (
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Your MFA code * (required to {form.password ? 'reset the password' : form.is_superuser ? 'promote' : 'demote'})</span>
-                  <input className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm font-mono" inputMode="numeric" maxLength={6} value={formMfaCode} onChange={(e) => setFormMfaCode(e.target.value.replace(/\D/g, ''))} required />
+                  <span className="text-xs text-[var(--text-dim)]">{ssoStepUp ? 'Confirm it is you' : 'Your MFA code'} * (required to {form.password ? 'reset the password' : form.is_superuser ? 'promote' : 'demote'})</span>
+                  <StepUpCode className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm font-mono" value={formMfaCode} onChange={setFormMfaCode} required />
                 </label>
               )}
             </div>
           </div>
           <div className="flex items-center justify-end gap-2 p-4 border-t border-[var(--border)]">
             <button type="button" className="px-4 py-2 text-sm border border-[var(--border)] hover:bg-[var(--panel-2)]" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>{t('admin.cancel')}</button>
-            <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading || ((!!form.is_superuser !== !!editing.is_superuser || !!form.password) && formMfaCode.length !== 6)}>{loading ? t('common.loading') : t('admin.updateUser')}</button>
+            <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading || ((!!form.is_superuser !== !!editing.is_superuser || !!form.password) && !stepUpReady(formMfaCode))}>{loading ? t('common.loading') : t('admin.updateUser')}</button>
           </div>
         </form>
         </Modal>
@@ -417,26 +419,21 @@ export function UsersManager() {
             </div>
             {confirmAction.kind !== 'delete' && (
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">Your MFA code *</span>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  maxLength={6}
+                <span className="text-xs text-[var(--text-dim)]">{ssoStepUp ? 'Confirm it is you *' : 'Your MFA code *'}</span>
+                <StepUpCode
                   className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm tracking-widest"
-                  placeholder="123456"
                   value={mfaCode}
-                  onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ''))}
+                  onChange={setMfaCode}
                   autoFocus
                   required
                 />
-                <span className="text-[10px] text-[var(--text-dim)]">Enter the 6-digit code from your authenticator app to confirm this action.</span>
+                {!ssoStepUp && <span className="text-[10px] text-[var(--text-dim)]">Enter the 6-digit code from your authenticator app to confirm this action.</span>}
               </label>
             )}
           </div>
           <div className="flex items-center justify-end gap-2 p-4 border-t border-[var(--border)]">
             <button type="button" className="px-4 py-2 text-sm border border-[var(--border)] hover:bg-[var(--panel-2)]" onClick={() => { setConfirmAction(null); setMfaCode(''); setError(null) }}>Cancel</button>
-            <button type="submit" className={`px-4 py-2 text-sm text-white disabled:opacity-50 ${confirmAction.kind === 'activate' ? 'bg-[var(--ok)] hover:bg-[color-mix(in_oklab,var(--ok)_14%,transparent)]' : 'bg-[var(--critical)] hover:bg-[var(--critical)]'}`} disabled={loading || (confirmAction.kind !== 'delete' && mfaCode.length !== 6)}>
+            <button type="submit" className={`px-4 py-2 text-sm text-white disabled:opacity-50 ${confirmAction.kind === 'activate' ? 'bg-[var(--ok)] hover:bg-[color-mix(in_oklab,var(--ok)_14%,transparent)]' : 'bg-[var(--critical)] hover:bg-[var(--critical)]'}`} disabled={loading || (confirmAction.kind !== 'delete' && !stepUpReady(mfaCode))}>
               {confirmAction.kind === 'activate'
                 ? (loading ? 'Reactivating...' : 'Reactivate user')
                 : confirmAction.kind === 'delete'

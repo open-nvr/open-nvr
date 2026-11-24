@@ -12,6 +12,12 @@ claim mapping or the default role. Local password login stays available
 unless the operator turns it off — and stays available to superusers
 regardless, so a broken provider never locks the site.
 
+An account that signs in only through the provider has no authenticator
+app, so the actions that ask for an MFA code (resetting a user's 2FA or
+password, deleting users, purging cameras) confirm it instead by sending
+the user back to the provider to sign in again (``begin(reauth=...)``).
+That yields a short-lived step-up token, sent where a code would go.
+
 Settings live under ``auth.oidc`` in the site settings table, the client
 secret encrypted at rest.
 """
@@ -38,6 +44,9 @@ OIDC_KEY = "auth.oidc"
 STATE_COOKIE = "onvr_oidc"
 STATE_TTL_SECONDS = 600
 EXCHANGE_TTL_SECONDS = 90
+STEP_UP_PREFIX = "sso:"            # how a step-up token travels in X-MFA-Code
+STEP_UP_TTL_SECONDS = 300          # one re-sign-in confirms changes for this long
+REAUTH_MAX_AGE_SECONDS = 300       # the provider's auth_time must be this fresh
 _DISCOVERY_TTL = 600.0
 
 DEFAULTS: dict[str, Any] = {
@@ -170,8 +179,13 @@ def read_state(token: str | None) -> dict[str, Any] | None:
     return payload if payload.get("type") == "oidc_state" else None
 
 
-async def begin(db, redirect_uri: str, next_path: str | None = None) -> tuple[str, str]:
-    """The provider's authorize URL and the state cookie value to set."""
+async def begin(db, redirect_uri: str, next_path: str | None = None, *,
+                reauth: str | None = None) -> tuple[str, str]:
+    """The provider's authorize URL and the state cookie value to set.
+
+    ``reauth`` (the page's request id) asks the provider to make the user
+    sign in again (``prompt=login``, ``max_age``) to confirm a sensitive
+    action, instead of starting a session."""
     cfg = load(db)
     if not (cfg["enabled"] and cfg["issuer"] and cfg["client_id"]):
         raise ValueError("single sign-on is not configured")
@@ -183,10 +197,14 @@ async def begin(db, redirect_uri: str, next_path: str | None = None) -> tuple[st
         "scope": cfg["scopes"] or "openid email profile", "state": state, "nonce": nonce,
         "code_challenge": challenge, "code_challenge_method": "S256",
     }
+    if reauth:
+        query.update({"prompt": "login", "max_age": "0"})
     url = f"{doc['authorization_endpoint']}{'&' if '?' in doc['authorization_endpoint'] else '?'}{urlencode(query)}"
-    cookie = _state_token({"state": state, "nonce": nonce, "verifier": verifier,
-                           "redirect_uri": redirect_uri, "next": next_path or "/"})
-    return url, cookie
+    saved = {"state": state, "nonce": nonce, "verifier": verifier,
+             "redirect_uri": redirect_uri, "next": next_path or "/"}
+    if reauth:
+        saved["reauth"] = str(reauth)[:64]
+    return url, _state_token(saved)
 
 
 async def complete(db, *, code: str, state: str, cookie: str | None) -> dict[str, Any]:
@@ -227,6 +245,8 @@ async def complete(db, *, code: str, state: str, cookie: str | None) -> dict[str
         except Exception:
             logger.debug("oidc: userinfo fetch failed", exc_info=True)
     claims["_next"] = saved.get("next") or "/"
+    if saved.get("reauth"):
+        claims["_reauth"] = saved["reauth"]
     return claims
 
 
@@ -408,3 +428,59 @@ def redeem_exchange_code(code: str) -> tuple[int, str] | None:
     if not entry or entry[0] < time.monotonic():
         return None
     return entry[1], entry[2]
+
+
+# ── confirming a sensitive action by signing in again ───────────────
+
+def step_up_user(db, claims: dict[str, Any], cfg: dict[str, Any]):
+    """The account a re-sign-in confirms. Only an existing, active single
+    sign-on account matched by issuer + subject: no creation, no linking by
+    e-mail, no role changes (that is what an ordinary sign-in is for)."""
+    from models import User
+
+    user = (db.query(User)
+            .filter(User.oidc_issuer == cfg["issuer"], User.oidc_subject == str(claims["sub"]))
+            .first())
+    if user is None or not user.is_active or (user.auth_provider or "local") != "oidc":
+        raise ValueError("this identity is not a single sign-on account here")
+    auth_time = claims.get("auth_time")
+    if auth_time is None:
+        # Required by the spec when max_age is sent; prompt=login was asked
+        # for all the same, so a provider that omits it is taken at its word.
+        logger.warning("oidc: re-sign-in for %s carried no auth_time", user.username)
+    else:
+        try:
+            age = time.time() - float(auth_time)
+        except (TypeError, ValueError):
+            raise ValueError("the identity provider sent an unreadable auth_time") from None
+        if age > REAUTH_MAX_AGE_SECONDS + 60:
+            raise ValueError("the identity provider did not ask you to sign in again; "
+                             "it reused an earlier sign-in")
+    return user
+
+
+def issue_step_up_token(user) -> str:
+    """What the page sends as X-MFA-Code (with STEP_UP_PREFIX) for the next
+    few minutes. Bound to the account and its token version, and of its own
+    type, so it is never accepted as a session token."""
+    now = datetime.now(UTC)
+    return jwt.encode({"type": "sso_step_up", "sub": user.username, "uid": user.id,
+                       "ver": int(user.token_version or 0), "oidc_sub": user.oidc_subject,
+                       "iat": now, "exp": now + timedelta(seconds=STEP_UP_TTL_SECONDS)},
+                      settings.secret_key, algorithm=settings.algorithm)
+
+
+def verify_step_up_token(user, token: str | None) -> bool:
+    """Whether ``token`` is a current step-up token for ``user``."""
+    if not token:
+        return False
+    try:
+        p = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+    except JWTError:
+        return False
+    return (p.get("type") == "sso_step_up"
+            and p.get("uid") == user.id
+            and p.get("sub") == user.username
+            and p.get("ver") == int(user.token_version or 0)
+            and p.get("oidc_sub") == user.oidc_subject
+            and (user.auth_provider or "local") == "oidc")
