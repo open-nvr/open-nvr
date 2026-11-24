@@ -12,6 +12,7 @@ Start here. Pick the row that matches what you're doing.
 - **[HOME_ASSISTANT.md](HOME_ASSISTANT.md)** — network setup when Home Assistant runs on another machine: WebRTC hosts, optional RTSPS, CORS, mDNS discovery, tokens.
 - **[LOCAL_SETUP.md](LOCAL_SETUP.md)** — run the backend / frontend / KAI-C from source for development.
 - **[../USER_MANUAL.md](../USER_MANUAL.md)** — day-to-day operator guide (add cameras, playback, users).
+- **[WORKFLOWS.md](WORKFLOWS.md)** — write and run a workflow: set up the model, the file format, the safety rule, Test and On, Ask a person, reading a run, and the API until the Workflows page lands.
 
 ## Contribute
 - **[../CONTRIBUTING.md](../CONTRIBUTING.md)** — PR flow, conventions, running tests.

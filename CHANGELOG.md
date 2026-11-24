@@ -8,6 +8,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Workflows guide.** `docs/WORKFLOWS.md`: setting up the model, the
+  workflow file (triggers, conditions, steps, actions, limits), the safety
+  rule, Test and On, Ask a person, trying on recent events, reading a run,
+  what is not there yet, and the API, with a curl walk-through.
+
 - **The last workflow actions.** `save_clip` protects a camera's
   recordings around the moment the run began from retention (`before` /
   `after`, 30 s each by default; again once the rest is recorded),
@@ -74,6 +79,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the identity provider again (`prompt=login`) and confirms changes for
   five minutes. New `scripts/reset_password.py` sets a password from the
   host, next to `disable_mfa.py`.
+- **A camera URL pasted with a leading or trailing space now works.** The
+  RTSP and substream URLs were saved with the space, MediaMTX refused the
+  source, and live view said "path 'cam-N' is not configured". Adding,
+  editing and importing a camera now strip whitespace from both URLs (#989).
+
 - **The §889 security check no longer reports a camera as ZTE because its
   name or maker contains the letters "zte".** The covered-vendor match was a
   plain substring, so a camera named "Aztec Gate" or made by Aztech came up
