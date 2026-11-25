@@ -43,6 +43,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from core.camera_source import is_publisher
 from core.config import settings
 from core.database import get_db, release
 from models import AppAlert, AppState, Camera, InstalledApp
@@ -136,10 +137,12 @@ async def app_camera_snapshot(
     if not cam.is_active:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="Camera is disabled")
-    if not cam.rtsp_url:
+    if not cam.rtsp_url and not is_publisher(cam):
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="Camera has no stream URL configured")
-    rtsp_url, cam_id = cam.rtsp_url, int(cam.id)
+    # A webcam (browser tab, host agent, local USB) has no URL; "" makes
+    # the capture read its MediaMTX path, as the user snapshot route does.
+    rtsp_url, cam_id = cam.rtsp_url or "", int(cam.id)
     # The capture waits up to its stream timeout (30 s) on a slow or dead
     # camera. Holding the roster query's transaction through that wait let
     # one app polling one bad camera pin the whole pool and hang /health.
