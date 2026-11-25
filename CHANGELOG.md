@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ROS 2 bridge, phase 1** (`examples/ros2-bridge/`, discussion #985).
+  Publishes the contracted events (detections, plates, visits, occupancy)
+  and the alerts on ROS 2 topics, `/opennvr/<site>/<camera>/<schema>` and
+  `/opennvr/<site>/alerts`, as JSON on `std_msgs/String`, with QoS per
+  topic (detections best effort, the rest reliable) and a `stamp` that
+  says which time it is. Read-only: nothing comes back from ROS 2. The
+  image is built on `ros:jazzy-ros-base`; the tests need no ROS.
+
 - **Ways to reach other OpenNVR users.** `start.sh` / `start.ps1 up` and
   `build` end with the Discord, Discussions and bug-report links; the
   Support page has a Community & help card; the dashboard shows a one-line
