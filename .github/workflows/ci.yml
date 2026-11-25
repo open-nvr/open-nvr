@@ -191,6 +191,7 @@ jobs:
           - ppe-check
           - gate-watch
           - gate-controller
+          - guard-scan-compliance
           - gold-bar-desk
           - home-assistant-relay
           - inference-listener
