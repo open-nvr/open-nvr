@@ -103,6 +103,14 @@ get_env_var() {
     grep -E "^${key}=" .env 2>/dev/null | cut -d'=' -f2- | sed -E 's/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//' | tr -d '"' | tr -d "'"
 }
 
+# The user is in the docker group, but this shell started before they joined
+# it: usermod reaches new logins only, so these processes still lack the group
+# and the socket refuses them. No usermod is needed, only a new shell.
+docker_group_pending() {
+    [[ " $(id -nG "$(id -un)" 2>/dev/null) " == *" docker "* ]] \
+        && [[ " $(id -nG 2>/dev/null) " != *" docker "* ]]
+}
+
 # ── Helper: why `docker info` failed ─────────────────────
 # A daemon that is down and a socket this user may not open both make the
 # docker client exit 1, and only its stderr tells them apart. The fix differs:
@@ -117,8 +125,16 @@ docker_unavailable_reason() {
     case "$err" in
         *"permission denied"*|*"Permission denied"*)
             printf 'Docker is running, but %s may not use it (permission denied on the Docker socket).\n' "$user"
-            printf '      → Join the docker group, open a new shell (or log out and back in), then re-run:\n'
-            printf '          sudo usermod -aG docker %s && newgrp docker\n' "$user"
+            if [[ " $(id -nG 2>/dev/null) " == *" docker "* ]]; then
+                printf '      → %s already has the docker group, and the socket still refuses it.\n' "$user"
+                printf '        Check who may open it:  ls -l /var/run/docker.sock  (expected: group docker, srw-rw----)\n'
+            elif docker_group_pending; then
+                printf '      → %s is already in the docker group; this shell started before that.\n' "$user"
+                printf '        Run  newgrp docker  (or log out and back in), then re-run.\n'
+            else
+                printf '      → Join the docker group, open a new shell (or log out and back in), then re-run:\n'
+                printf '          sudo usermod -aG docker %s && newgrp docker\n' "$user"
+            fi
             printf '      → Not sudo ./start.sh: .env and the certificates would then belong to root.\n' ;;
         *)
             printf 'Docker is not running.\n'
