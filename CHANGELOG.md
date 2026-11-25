@@ -71,6 +71,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A first `./start.sh` on a fresh Linux host no longer stops twice
+  after installing Docker** (#1002). A checkout that belongs to root (cloned with
+  `sudo git clone`) is now named before Docker is offered, not after it is
+  installed. When the user is in the docker group but the shell isn't yet
+  (the shell that ran the install, or one opened before a `usermod`), the
+  installer carries on as the group instead of asking for `usermod` again;
+  `start.sh` and `uninstall.sh` say `newgrp docker` for that case.
+  The Docker download now shows apt's progress instead of a silent screen
+  for several minutes.
 - **A single sign-on administrator can reset 2FA, passwords and users
   again** (#998). Those actions asked for the administrator's own MFA
   code, which a single sign-on account never has and may not add, so every
