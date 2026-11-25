@@ -42,6 +42,11 @@ _manage = RequirePermission("workflows.manage")
 MAX_YAML = 64_000
 
 
+def _now() -> datetime:
+    """The clock "recent alerts" are measured from. Tests pin it."""
+    return datetime.now(UTC)
+
+
 class WorkflowIn(BaseModel):
     yaml: str = Field(..., min_length=1, max_length=MAX_YAML)
 
@@ -287,7 +292,7 @@ async def try_workflow(workflow_id: int, body: TryIn, request: Request,
         raise HTTPException(status_code=422, detail=(
             "Trying on recent events works for workflows started by an app's alert"))
     envelopes = matching_alerts(db, doc, days=body.days, limit=min(body.limit, MAX_EVENTS),
-                                now=datetime.now(UTC))
+                                now=_now())
     trial = trials().start(wf.id, version, doc, envelopes)
     audit_request(db, request, action="workflow.try", user_id=user.id,
                   entity_type="workflow", entity_id=wf.id,
