@@ -23,7 +23,11 @@
 #   * compose_args appends a fragment only when its file is in the set,
 #     after the overlay it belongs to;
 #   * fill_qualcomm_embedder writes the tag it FOUND as EMBED_ADAPTER_TAG,
-#     and leaving the flavour clears it.
+#     and leaving the flavour clears it;
+#   * the fill switches on only an EMPTY EVENTS_EMBED_ENRICHMENT: `false`
+#     is the operator's answer and stays (Ventuno Q, 2026-11-25: the fill
+#     turned a false back on at every start and re-pulled a 4 GB image
+#     onto a full disk).
 set -u
 . "$(dirname "$0")/_lib.sh"
 require_python_yaml
@@ -217,7 +221,7 @@ else fail "files: $(echo "$got" | tr '\n' ' ')"; fi
 
 # ── 6. The embedder fill writes the tag it found ──
 start_test "fill_qualcomm_embedder writes EMBED_ADAPTER_TAG=latest-qualcomm when the pinned release has no image"
-printf 'ADAPTER_TAG=0.1.10\nEVENTS_EMBED_ENRICHMENT=false\nOPENNVR_EXAMPLE_PROFILE=\n' > .env
+printf 'ADAPTER_TAG=0.1.10\nEVENTS_EMBED_ENRICHMENT=\nOPENNVR_EXAMPLE_PROFILE=\n' > .env
 accel_image_available() { [[ "$1" == *:latest-qualcomm ]]; }
 fill_qualcomm_embedder >/dev/null 2>&1
 if [[ "$(get_env_var EMBED_ADAPTER_TAG)" == "latest-qualcomm" && "$(get_env_var EVENTS_EMBED_ENRICHMENT)" == "true" \
@@ -231,6 +235,37 @@ fill_qualcomm_embedder >/dev/null 2>&1
 if [[ "$(get_env_var EMBED_ADAPTER_TAG)" == "0.1.11-qualcomm" ]]; then pass
 else fail "EMBED_ADAPTER_TAG=$(get_env_var EMBED_ADAPTER_TAG)"; fi
 
+start_test "fill_qualcomm_embedder keeps EVENTS_EMBED_ENRICHMENT=false (the operator's off) and still writes the tag"
+printf 'ADAPTER_TAG=0.1.11\nEVENTS_EMBED_ENRICHMENT=false\nOPENNVR_EXAMPLE_PROFILE=\n' > .env
+accel_image_available() { return 0; }
+fill_qualcomm_embedder >/dev/null 2>&1
+if [[ "$(get_env_var EVENTS_EMBED_ENRICHMENT)" == "false" && -z "$(get_env_var OPENNVR_EXAMPLE_PROFILE)" \
+   && "$(get_env_var EMBED_ADAPTER_TAG)" == "0.1.11-qualcomm" ]]; then pass
+else fail "$(grep -E '^(EMBED_ADAPTER_TAG|EVENTS_EMBED_ENRICHMENT|OPENNVR_EXAMPLE_PROFILE)=' .env | tr '\n' ' ')"; fi
+
+start_test "false after an earlier fill: the embeddings profile it added is removed, other picks stay, twice over"
+printf 'ADAPTER_TAG=0.1.11\nEVENTS_EMBED_ENRICHMENT=false\nOPENNVR_EXAMPLE_PROFILE=occupancy-counting,embeddings\n' > .env
+fill_qualcomm_embedder >/dev/null 2>&1; fill_qualcomm_embedder >/dev/null 2>&1
+if [[ "$(get_env_var EVENTS_EMBED_ENRICHMENT)" == "false" && "$(get_env_var OPENNVR_EXAMPLE_PROFILE)" == "occupancy-counting" ]]; then pass
+else fail "$(grep -E '^(EVENTS_EMBED_ENRICHMENT|OPENNVR_EXAMPLE_PROFILE)=' .env | tr '\n' ' ')"; fi
+
+start_test "false with the fill run: compose_args starts no embedder"
+got=$(profiles_of "$(compose_args)")
+if ! printf '%s\n' "$got" | grep -qx 'embeddings'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "false keeps an enrichment pick the operator made"
+printf 'ADAPTER_TAG=0.1.11\nEVENTS_EMBED_ENRICHMENT=false\nOPENNVR_EXAMPLE_PROFILE=enrichment\n' > .env
+fill_qualcomm_embedder >/dev/null 2>&1
+if [[ "$(get_env_var OPENNVR_EXAMPLE_PROFILE)" == "enrichment" ]]; then pass
+else fail "OPENNVR_EXAMPLE_PROFILE=$(get_env_var OPENNVR_EXAMPLE_PROFILE)"; fi
+
+start_test "an operator's true is kept and gets its profile"
+printf 'ADAPTER_TAG=0.1.11\nEVENTS_EMBED_ENRICHMENT=true\nOPENNVR_EXAMPLE_PROFILE=\n' > .env
+fill_qualcomm_embedder >/dev/null 2>&1
+if [[ "$(get_env_var EVENTS_EMBED_ENRICHMENT)" == "true" && "$(get_env_var OPENNVR_EXAMPLE_PROFILE)" == "embeddings" ]]; then pass
+else fail "$(grep -E '^(EVENTS_EMBED_ENRICHMENT|OPENNVR_EXAMPLE_PROFILE)=' .env | tr '\n' ' ')"; fi
+
 start_test "fill_qualcomm_embedder writes nothing when no image exists"
 printf 'ADAPTER_TAG=0.1.10\nEVENTS_EMBED_ENRICHMENT=false\n' > .env
 accel_image_available() { return 1; }
@@ -242,8 +277,14 @@ else fail "$(grep -E '^(EMBED_ADAPTER_TAG|EVENTS_EMBED_ENRICHMENT)=' .env | tr '
 start_test "reset_stale_accel_fills clears EMBED_ADAPTER_TAG the qualcomm fill wrote"
 printf 'OPENNVR_ACCEL_RESOLVED=qualcomm\nEMBED_ADAPTER_TAG=latest-qualcomm\nEVENTS_EMBED_ENRICHMENT=true\nOPENNVR_EXAMPLE_PROFILE=embeddings\n' > .env
 reset_stale_accel_fills cpu >/dev/null 2>&1
-if [[ -z "$(get_env_var EMBED_ADAPTER_TAG)" && "$(get_env_var EVENTS_EMBED_ENRICHMENT)" == "false" ]]; then pass
+if [[ -z "$(get_env_var EMBED_ADAPTER_TAG)" && -z "$(get_env_var EVENTS_EMBED_ENRICHMENT)" && -z "$(get_env_var OPENNVR_EXAMPLE_PROFILE)" ]]; then pass
 else fail "$(grep -E '^(EMBED_ADAPTER_TAG|EVENTS_EMBED_ENRICHMENT)=' .env | tr '\n' ' ')"; fi
+
+start_test "leaving the flavour keeps an operator's false"
+printf 'OPENNVR_ACCEL_RESOLVED=qualcomm\nEMBED_ADAPTER_TAG=latest-qualcomm\nEVENTS_EMBED_ENRICHMENT=false\n' > .env
+reset_stale_accel_fills cpu >/dev/null 2>&1
+if [[ "$(get_env_var EVENTS_EMBED_ENRICHMENT)" == "false" ]]; then pass
+else fail "EVENTS_EMBED_ENRICHMENT=$(get_env_var EVENTS_EMBED_ENRICHMENT)"; fi
 
 # ── 8. The detector's crop budget follows the flavour (Ventuno Q, 2026-11-13:
 #    8 crops × 5 fps × 2 busy cameras pinned the Hexagon; 3 × 4 fps fitted) ──

@@ -42,6 +42,12 @@ UNSURE_REASONS = (
 )
 
 _REASON_CHARS = 300
+#: The longest reason the answer's schema allows. Without a bound a small
+#: model can keep explaining until the token budget cuts its JSON off:
+#: qwen3-vl:2b-instruct did that on 23 of 174 Look answers (13%), each an
+#: ``invalid_output``. Constrained decoding stops the string here and the
+#: answer still closes (MODELS_AND_LATENCY.md, the Look eval).
+REASON_MAX_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -144,7 +150,7 @@ class DecisionSpec:
         visitor alike. It made no difference on the Investigate cases
         (#649; the tool phase is where that model reasons). For Look it is
         not measured yet: that needs the Look cases."""
-        props: dict[str, Any] = {"reason": {"type": "string"}}
+        props: dict[str, Any] = {"reason": {"type": "string", "maxLength": REASON_MAX_CHARS}}
         for name, values in self.fields.items():
             props[name] = {"type": "string", "enum": list(values)}
         if not self.rules:      # with rules, the model never chooses the outcome
