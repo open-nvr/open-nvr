@@ -8,6 +8,13 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Ways to reach other OpenNVR users.** `start.sh` / `start.ps1 up` and
+  `build` end with the Discord, Discussions and bug-report links; the
+  Support page has a Community & help card; the dashboard shows a one-line
+  community strip until it is dismissed (per browser). All plain links:
+  nothing is fetched and no deployment contacts the internet on its own.
+  The repository gains a code of conduct, bug and feature issue forms, a
+  Discord link in the issue chooser, and a pull-request template.
 - **Workflows guide.** `docs/WORKFLOWS.md`: setting up the model, the
   workflow file (triggers, conditions, steps, actions, limits), the safety
   rule, Test and On, Ask a person, trying on recent events, reading a run,

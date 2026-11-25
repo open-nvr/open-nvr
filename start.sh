@@ -2048,6 +2048,19 @@ print_access_urls() {
     echo -e "  ${GRAY}First-time setup page opens automatically on first visit.${NC}"
 }
 
+# Where to find other OpenNVR users. Printed last by `up` and `build` so it is
+# the final thing on screen; `up` runs on every restart and update too, so keep
+# it to these few lines. Static links only — nothing here contacts the network.
+print_community_links() {
+    echo ""
+    echo -e "  ${BRIGHT_CYAN}Community & help${NC}"
+    echo -e "  Discord         → ${CYAN}https://opennvr.org/discord${NC}"
+    echo -e "  Discussions     → ${CYAN}https://github.com/open-nvr/open-nvr/discussions${NC}"
+    echo -e "  Report a bug    → ${CYAN}https://github.com/open-nvr/open-nvr/issues${NC}"
+    echo -e "  ${GRAY}Like OpenNVR? A star on GitHub helps others find it.${NC}"
+    echo ""
+}
+
 # ── First-time setup token surfacer ────────────────────────
 #
 # V-001 / M0 C-1 UX: the OpenNVR server mints a one-time setup token
@@ -2309,6 +2322,7 @@ run_up() {
     # shellcheck source=scripts/update-host.sh
     . "$(dirname "$0")/scripts/update-host.sh"
     run_update_runner_refresh || true
+    print_community_links
 }
 
 # Image tags from earlier releases, and dangling layers. An upgrade pulls the
@@ -2370,6 +2384,7 @@ run_build() {
     print_security_posture
     print_first_time_setup_token "$ARGS"
     check_edge_reachable
+    print_community_links
 }
 
 # ── Smart front door (bare `./start.sh`) ───────────────────

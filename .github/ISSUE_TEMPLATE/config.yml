@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or design discussion
+    url: https://github.com/open-nvr/open-nvr/discussions
+    about: "\"Is this the right approach?\" and how-do-I questions go in Discussions."
+  - name: Chat on Discord
+    url: https://opennvr.org/discord
+    about: Quick questions, setup help and show-and-tell with other OpenNVR users.
+  - name: Security vulnerability
+    url: https://github.com/open-nvr/open-nvr/security/advisories/new
+    about: Report privately via a GitHub security advisory. See SECURITY.md.
