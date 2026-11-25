@@ -82,6 +82,7 @@ jobs:
           - { app: garbage-dumping,            title: Garbage Dumping }
           - { app: ppe-check,                  title: PPE Check }
           - { app: gate-watch,                 title: Gate Watch }
+          - { app: gold-bar-desk,              title: Gold Bar Desk }
           - { app: guard-scan-compliance,      title: Guard Scan Compliance }
           - { app: home-assistant-relay,       title: Home Assistant Relay }
           - { app: camera-tamper,              title: Camera Tamper }
@@ -92,6 +93,7 @@ jobs:
           - { app: occupancy-counting,         title: Occupancy Counting }
           - { app: package-delivery,           title: Package Delivery }
           - { app: smart-doorbell,             title: Smart Doorbell }
+          - { app: xray-screening,             title: X-ray Screening }
     steps:
       - name: Checkout
         uses: actions/checkout@v4

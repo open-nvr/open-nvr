@@ -30,6 +30,14 @@ ok() { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ⚠ %s\n' "$*"; }
 die() { printf '  ✗ %s\n' "$*" >&2; exit 1; }
 
+# The user is in the docker group, but this shell started before they joined
+# it: usermod reaches new logins only, so these processes still lack the group
+# and the socket refuses them. No usermod is needed, only a new shell.
+docker_group_pending() {
+    [[ " $(id -nG "$(id -un)" 2>/dev/null) " == *" docker "* ]] \
+        && [[ " $(id -nG 2>/dev/null) " != *" docker "* ]]
+}
+
 # A daemon that is down and a socket this user may not open both make the
 # docker client exit 1, and only its stderr tells them apart. The fix differs:
 # start the daemon, or join the docker group (not sudo: start.sh refuses it,
@@ -43,8 +51,16 @@ docker_unavailable_reason() {
     case "$err" in
         *"permission denied"*|*"Permission denied"*)
             printf 'Docker is running, but %s may not use it (permission denied on the Docker socket).\n' "$user"
-            printf '      → Join the docker group, open a new shell (or log out and back in), then re-run:\n'
-            printf '          sudo usermod -aG docker %s && newgrp docker\n' "$user"
+            if [[ " $(id -nG 2>/dev/null) " == *" docker "* ]]; then
+                printf '      → %s already has the docker group, and the socket still refuses it.\n' "$user"
+                printf '        Check who may open it:  ls -l /var/run/docker.sock  (expected: group docker, srw-rw----)\n'
+            elif docker_group_pending; then
+                printf '      → %s is already in the docker group; this shell started before that.\n' "$user"
+                printf '        Run  newgrp docker  (or log out and back in), then re-run.\n'
+            else
+                printf '      → Join the docker group, open a new shell (or log out and back in), then re-run:\n'
+                printf '          sudo usermod -aG docker %s && newgrp docker\n' "$user"
+            fi
             printf '      → Not sudo ./start.sh: .env and the certificates would then belong to root.\n' ;;
         *)
             printf 'Docker is not running.\n'
@@ -375,7 +391,11 @@ install_docker_or_die() {
                 "$arch" "$distro" "$codename" | ${SUDO} tee /etc/apt/sources.list.d/docker.list >/dev/null \
                 || docker_install_failed "${SUDO:+$SUDO }tee /etc/apt/sources.list.d/docker.list"
             elevated apt-get update -qq
-            elevated apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ;;
+            # Not -qq: this is a download of about 100 MB, and a quiet apt
+            # prints nothing until it is over — on a slow link that is minutes
+            # of a screen that looks hung. apt's own progress says it is not.
+            info "  Downloading about 100 MB from download.docker.com; apt shows its progress."
+            elevated apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ;;
         *)
             local tmp
             tmp=$(mktemp "${TMPDIR:-/tmp}/get-docker.XXXXXX.sh")
@@ -398,21 +418,35 @@ install_docker_or_die() {
             info "Log out and back in (the group takes effect), then run ./start.sh again."
             exit 0
         fi
-        info "Continuing the installer as the docker group ..."
-        printf '\n'
-        local cmd
-        cmd=$(printf '%q ' bash "${BASH_SOURCE[0]}" "$MODE")
-        exec sg docker -c "${cmd% }" \
+        continue_as_docker_group \
             || die "Could not continue as the docker group. Log out and back in, then run ./start.sh again."
     fi
 }
 
+# Re-runs the installer under the docker group (sg), for a user who is in it
+# while this shell is not: right after the install above, or a usermod from an
+# earlier run whose shell is still open. Only once: OPENNVR_AS_DOCKER_GROUP
+# marks the re-run, so a socket that still refuses ends in the hint, not a
+# loop. Returns 1 when it cannot (no sg, or already the re-run).
+continue_as_docker_group() {
+    [[ -z "${OPENNVR_AS_DOCKER_GROUP:-}" ]] || return 1
+    command -v sg >/dev/null 2>&1 || return 1
+    # exec does not come back, so try sg first: where it wants a group
+    # password (a group from LDAP, or one /etc/gshadow does not list the user
+    # in) the caller's hint has to be what the user sees, not sg's error.
+    sg docker -c true </dev/null >/dev/null 2>&1 || return 1
+    info "Continuing the installer as the docker group ..."
+    printf '\n'
+    local cmd
+    cmd=$(printf '%q ' bash "${BASH_SOURCE[0]}" "$MODE")
+    export OPENNVR_AS_DOCKER_GROUP=1
+    exec sg docker -c "${cmd% }"
+}
+
 check_prerequisites() {
-    command -v docker >/dev/null 2>&1 || install_docker_or_die
-    docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required. Update Docker and re-run."
     local reason owner
-    reason=$(docker_unavailable_reason) && die "$reason"
-    command -v openssl >/dev/null 2>&1 || die "openssl is required to generate credentials"
+    # These two need no Docker, so they come first: a checkout cloned with
+    # sudo has to stop the run before Docker is installed, not after it.
     [[ -f "$BASE_COMPOSE" ]] || die "$BASE_COMPOSE was not found in $PROJECT_ROOT"
     # Everything below writes here (.env, certificates, data/). A checkout made
     # with `sudo git clone` belongs to root, and the first write would die on
@@ -423,6 +457,19 @@ check_prerequisites() {
               printf '      → Give the checkout to the user who runs OpenNVR, then re-run:\n'
               printf '          sudo chown -R %s:%s "%s"' "$(id -un)" "$(id -gn "$(id -un)")" "$PROJECT_ROOT")"
     fi
+    command -v docker >/dev/null 2>&1 || install_docker_or_die
+    docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required. Update Docker and re-run."
+    if reason=$(docker_unavailable_reason); then
+        # In the group, but this shell predates it: carry on as the group
+        # instead of sending the user off to log out. Only for a refused
+        # socket — a stopped daemon is not fixed by the group.
+        if [[ "$reason" == *"permission denied"* ]] && docker_group_pending; then
+            ok "$(id -un) is in the docker group (this shell started before that)"
+            continue_as_docker_group || true
+        fi
+        die "$reason"
+    fi
+    command -v openssl >/dev/null 2>&1 || die "openssl is required to generate credentials"
 }
 
 env_get() {
