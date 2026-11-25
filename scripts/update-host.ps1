@@ -427,12 +427,24 @@ function Invoke-UpdateQueue {
         Invoke-UpdApps @("--app", (Get-UpdKV $appReq APP), "--now", "--yes")
         return
     }
+    # Check now, asked for in the app: this tick looks for new releases of
+    # OpenNVR and the apps instead of waiting for the six-hourly check. It
+    # installs nothing by itself; an automatic install still waits for the
+    # window. Marked first, like the requests above: tried once.
+    $checkReq = "data\update-requests\check-request.env"
+    $checkId = Get-UpdKV $checkReq ID
+    $checkHandled = if (Test-Path "$UpdDir\last-check-request") { (Get-Content "$UpdDir\last-check-request" -Raw).Trim() } else { "" }
+    $force = $false
+    if ($checkId -and $checkId -ne $checkHandled) {
+        [IO.File]::WriteAllText((Join-Path $here "$UpdDir\last-check-request"), "$checkId`n", $Utf8NoBom)
+        $force = $true
+    }
     $mode = Get-UpdKV $policy MODE
     if (-not $mode) { $mode = "auto" }  # nothing saved yet: the default, install releases by itself
     if ($mode -ne "off") {
         $last = Get-UpdKV "$UpdDir\check.env" CHECKED_EPOCH
         $every = if ($env:OPENNVR_UPDATE_CHECK_EVERY) { [long]$env:OPENNVR_UPDATE_CHECK_EVERY } else { 21600 }
-        if (-not $last -or ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$last) -ge $every) {
+        if ($force -or -not $last -or ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$last) -ge $every) {
             Invoke-Update -UpdateArgs @("--dry-run")
         }
         if ($mode -eq "auto" -and (Get-UpdKV "$UpdDir\check.env" CODE -Last) -eq "0") {
@@ -447,7 +459,13 @@ function Invoke-UpdateQueue {
     }
     # Apps have their own mode (APPS_MODE, APP_<ID>_MODE; by default the
     # one above), which updater/policy.py applies.
-    Invoke-UpdApps @("--tick")
+    if ($force) {
+        $saved = $env:OPENNVR_APPS_CHECK_EVERY
+        $env:OPENNVR_APPS_CHECK_EVERY = "0"
+        try { Invoke-UpdApps @("--tick") } finally { $env:OPENNVR_APPS_CHECK_EVERY = $saved }
+    } else {
+        Invoke-UpdApps @("--tick")
+    }
 }
 
 # Called by `up`. The runner is on unless .env says UPDATE_RUNNER=off, so a

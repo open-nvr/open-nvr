@@ -740,13 +740,23 @@ upd_queue() {
         ( upd_apps --app "$(upd_kv "$app_req" APP)" --now --yes ) || true
         return
     fi
+    # Check now, asked for in the app: this tick looks for new releases of
+    # OpenNVR and the apps instead of waiting for the six-hourly check. It
+    # installs nothing by itself; an automatic install still waits for the
+    # window. Marked first, like the requests above: tried once.
+    local check_req=data/update-requests/check-request.env check_id force=0
+    check_id=$(upd_kv "$check_req" ID)
+    if [ -n "$check_id" ] && [ "$check_id" != "$(cat "$UPD_DIR/last-check-request" 2>/dev/null || true)" ]; then
+        echo "$check_id" > "$UPD_DIR/last-check-request"
+        force=1
+    fi
     local mode last now
     mode=$(upd_kv "$policy" MODE)
     mode=${mode:-auto}  # nothing saved yet: the default, install releases by itself
     if [ "$mode" != off ]; then
         last=$(upd_kv "$UPD_DIR/check.env" CHECKED_EPOCH)
         now=$(date +%s)
-        if [ -z "$last" ] || [ $((now - last)) -ge "${OPENNVR_UPDATE_CHECK_EVERY:-21600}" ]; then
+        if [ "$force" = 1 ] || [ -z "$last" ] || [ $((now - last)) -ge "${OPENNVR_UPDATE_CHECK_EVERY:-21600}" ]; then
             ( run_update --dry-run ) || true
         fi
         if [ "$mode" = auto ] && [ "$(upd_kv "$UPD_DIR/check.env" CODE)" = 0 ]; then
@@ -759,7 +769,11 @@ upd_queue() {
     fi
     # Apps have their own mode (APPS_MODE, APP_<ID>_MODE; by default the
     # one above), which updater/policy.py applies.
-    ( upd_apps --tick ) || true
+    if [ "$force" = 1 ]; then
+        ( OPENNVR_APPS_CHECK_EVERY=0; upd_apps --tick ) || true
+    else
+        ( upd_apps --tick ) || true
+    fi
 }
 
 UPD_UNIT=/etc/systemd/system/opennvr-update

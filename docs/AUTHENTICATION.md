@@ -6,7 +6,8 @@ OpenNVR has three ways in and two ways back:
 |---|---|---|
 | Username + password + TOTP | the login page | each account (TOTP enrolled on first login) |
 | **Single sign-on** (OpenID Connect) | *Continue with …* on the login page | a superuser, Access Control → Authentication |
-| Administrator reset | Access Control → Users → Edit → *New password* | a superuser, with their TOTP code |
+| Administrator reset | Access Control → Users → Edit → *New password* | a superuser, with their TOTP code (or single sign-on again) |
+| Host reset | `scripts/reset_password.py` in the core container | whoever has shell access to the host |
 | **E-mailed reset** (*Forgot password?*) | the login page | a superuser configures the mail server once |
 
 Every password change or reset ends the account's other sessions: tokens
@@ -42,6 +43,20 @@ Access Control → Authentication → *Identity provider*:
   never locks the operators out.
 
 A single sign-on account skips the TOTP wall: the provider owns MFA.
+
+### Confirming sensitive actions
+
+Resetting a user's 2FA or password, deleting or reactivating users,
+creating or promoting a superuser, purging a camera and exporting camera
+passwords ask for the administrator's own MFA code. A single sign-on
+administrator has no authenticator app here, so those dialogs show
+**Confirm with single sign-on** instead: a pop-up sends them to the
+provider with `prompt=login` and `max_age=0`, and when they have signed in
+again the action is confirmed for five minutes. If the provider sends
+`auth_time`, it must be recent; a provider that reuses an earlier sign-in
+is refused. Only an existing single sign-on account matched by issuer and
+subject can confirm this way; nothing is created or linked. Audited as
+`auth.sso_step_up`.
 
 ### Linking existing accounts
 
@@ -123,3 +138,14 @@ lockout. Single sign-on accounts have no password to reset.
 Access Control → Users → Edit → *New password*, with the administrator's
 own TOTP code. Audited as `password_reset`. The user's other sessions
 end at once.
+
+With nobody able to sign in as an administrator, reset from the host:
+
+```bash
+docker exec -it opennvr_core python /app/server/scripts/reset_password.py <username>             # asks twice
+docker exec -it opennvr_core python /app/server/scripts/reset_password.py <username> --generate  # prints one
+docker exec -it opennvr_core python /app/server/scripts/disable_mfa.py <username>                # lost authenticator too
+```
+
+The password policy applies, sessions end, a lockout clears, and it is
+audited as `auth.cli_password_reset`. Single sign-on accounts are refused.

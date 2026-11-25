@@ -29,6 +29,7 @@ import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useDateFormat } from '../../i18n'
 import { useConfirm } from '../../components/ui/ConfirmDialog'
+import { StepUpCode, stepUpReady, useSsoStepUp } from '../../components/StepUpCode'
 
 type Factor = {
   id: number
@@ -49,6 +50,7 @@ type Props = {
 export function UserMfaDialog({ user, onClose, onReset, onChanged }: Props) {
   const fmt = useDateFormat()
   const confirm = useConfirm()
+  const sso = useSsoStepUp()
   const [factors, setFactors] = useState<Factor[] | null>(null)
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
@@ -120,8 +122,8 @@ export function UserMfaDialog({ user, onClose, onReset, onChanged }: Props) {
                   <td className="p-2"><Badge variant={f.enabled ? 'success' : 'neutral'}>{f.enabled ? 'On' : 'Off'}</Badge></td>
                   <td className="p-2 text-xs">{f.last_used_at ? fmt.dateTime(f.last_used_at) : 'Not used yet'}</td>
                   <td className="p-2 space-x-2 whitespace-nowrap text-right">
-                    <Button size="sm" disabled={busy || code.length !== 6} onClick={() => act(f, 'toggle')}>{f.enabled ? 'Turn off' : 'Turn on'}</Button>
-                    <Button size="sm" variant="danger" disabled={busy || code.length !== 6} onClick={() => act(f, 'remove')}>Remove</Button>
+                    <Button size="sm" disabled={busy || !stepUpReady(code)} onClick={() => act(f, 'toggle')}>{f.enabled ? 'Turn off' : 'Turn on'}</Button>
+                    <Button size="sm" variant="danger" disabled={busy || !stepUpReady(code)} onClick={() => act(f, 'remove')}>Remove</Button>
                   </td>
                 </tr>
               ))}
@@ -129,10 +131,9 @@ export function UserMfaDialog({ user, onClose, onReset, onChanged }: Props) {
           </table>
         )}
         <label className="flex flex-col gap-1">
-          <span className="text-xs text-[var(--text-dim)]">Your MFA code (needed for each change)</span>
-          <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="123456"
-            className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm tracking-widest"
-            value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))} />
+          <span className="text-xs text-[var(--text-dim)]">{sso ? 'Confirm it is you (needed before a change)' : 'Your MFA code (needed for each change)'}</span>
+          <StepUpCode className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm tracking-widest"
+            value={code} onChange={setCode} />
         </label>
         <div className="flex items-center justify-between gap-2 border-t border-[var(--border)] pt-3">
           <span className="text-xs text-[var(--text-dim)]">Lost every app? Reset removes them all and signs {user.username} out.</span>

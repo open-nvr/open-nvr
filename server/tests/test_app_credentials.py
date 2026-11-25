@@ -607,6 +607,41 @@ def test_a_disabled_camera_is_not_captured(platform, monkeypatch):
     assert r.status_code == 503 and r.json()["detail"] == "Camera is disabled"
 
 
+def test_a_webcam_is_captured_from_its_path(platform, monkeypatch):
+    """A webcam (browser tab, host agent, local USB) publishes into its
+    MediaMTX path and has no rtsp_url. The app snapshot route answered
+    every such camera "no stream URL configured", so a classroom on a
+    webcam was never looked at while live view and recording worked."""
+    from core.camera_source import PUBLISHER_IP_SENTINEL, SOURCE_PUBLISHER
+
+    tc, ids, SessionLocal, key = platform
+    with SessionLocal() as s:
+        cam = s.get(Camera, ids["gate"])
+        cam.rtsp_url, cam.source_type, cam.ip_address = None, SOURCE_PUBLISHER, PUBLISHER_IP_SENTINEL
+        s.commit()
+    calls: list = []
+
+    class _Kai:
+        async def capture_frame_bytes(self, rtsp_url, camera_id):
+            calls.append((rtsp_url, camera_id))
+            return b"\xff\xd8web"
+
+    import services.kai_c_service as kcs
+    monkeypatch.setattr(kcs, "get_kai_c_service", lambda: _Kai())
+    r = tc.get(f"/internal/app/cameras/{ids['gate']}/snapshot", headers=_app(key))
+    assert r.status_code == 200 and r.content == b"\xff\xd8web"
+    assert calls == [("", ids["gate"])]
+
+    # An IP camera with no URL is still refused without a capture.
+    with SessionLocal() as s:
+        cam = s.get(Camera, ids["gate"])
+        cam.source_type = None
+        s.commit()
+    r = tc.get(f"/internal/app/cameras/{ids['gate']}/snapshot", headers=_app(key))
+    assert r.status_code == 503 and r.json()["detail"] == "Camera has no stream URL configured"
+    assert len(calls) == 1
+
+
 def test_the_playback_url_carries_a_credential_for_that_one_path(platform):
     """The roster check decides which camera an app may ASK about; the
     URL it is handed decides which camera it can actually FETCH. Those

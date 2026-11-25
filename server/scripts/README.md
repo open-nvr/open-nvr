@@ -104,6 +104,29 @@ The username is required; the script never picks one for you.
 
 ---
 
+### **`reset_password.py`**
+**Set a user's password from the host**
+
+**Purpose:** Recovery when nobody can use the web UI's password reset, typically the only administrator having forgotten their password. For any other user, prefer **Settings → Users → Edit** (needs your own code) or the e-mailed "forgot password" link.
+
+**Usage (Docker install):**
+```bash
+# Asks for the new password twice (not echoed)
+docker exec -it opennvr_core python /app/server/scripts/reset_password.py <username>
+
+# Or set a random password that meets the policy and print it once
+docker exec -it opennvr_core python /app/server/scripts/reset_password.py <username> --generate
+```
+
+**What it does:**
+1. Checks the new password against the site's password policy
+2. Ends every browser session of the user (bumps `token_version`) and clears a lockout
+3. Writes an `auth.cli_password_reset` audit entry
+4. Leaves two-factor sign-in alone (use `disable_mfa.py` for that)
+5. A single sign-on account is refused: its password lives at the identity provider
+
+---
+
 ## 🗂️ **Subdirectories**
 
 ### **`debug_tools/`**
@@ -150,15 +173,11 @@ docker exec -it opennvr_core python /app/server/scripts/disable_mfa.py johndoe
 
 ### **Reset Admin Password**
 ```bash
-# If admin forgot password, two options:
+# Forgot the password: set a new one on the host
+docker exec -it opennvr_core python /app/server/scripts/reset_password.py admin
 
-# Option 1: Use disable_mfa.py to access, then change via UI
-python scripts/disable_mfa.py admin
-# Login with old password, change in settings
-
-# Option 2: Direct database update (advanced)
-# Create a new script: reset_password.py
-# Or use database client to update hashed_password
+# Lost the authenticator as well: reset two-factor sign-in too
+docker exec -it opennvr_core python /app/server/scripts/disable_mfa.py admin
 ```
 
 ---
@@ -175,6 +194,11 @@ python scripts/disable_mfa.py admin
 - ⚠️ **Requires shell access to the host** - only for administrators
 - ✅ The user must enrol a new authenticator at their next sign-in
 - 📝 Recorded in the audit log as `mfa.cli_reset`
+
+### **reset_password.py**
+- ⚠️ **Requires shell access to the host** - only for administrators
+- ✅ The site's password policy applies; every session of the user ends
+- 📝 Recorded in the audit log as `auth.cli_password_reset`
 
 ---
 

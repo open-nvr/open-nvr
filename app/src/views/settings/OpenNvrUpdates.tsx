@@ -41,6 +41,9 @@ export function OpenNvrUpdates() {
 
   // Failed polls in a row: while core is being replaced, the API is away.
   const [misses, setMisses] = useState(0)
+  // When this browser last asked for a Check now: the page polls quickly
+  // for a while after, so what the host finds shows up without a reload.
+  const [checkAskedAt, setCheckAskedAt] = useState(0)
   const status = useQuery({
     queryKey: ['opennvr-update'],
     queryFn: async () => {
@@ -57,7 +60,8 @@ export function OpenNvrUpdates() {
     refetchInterval: (q) => {
       const s = q.state.data
       const appBusy = s?.apps?.run?.in_progress || s?.apps?.pending_request
-      return misses > 0 || s?.run?.in_progress || s?.pending_request || appBusy ? 3_000 : 60_000
+      const checking = !!s?.pending_check || Date.now() - checkAskedAt < 3 * 60_000
+      return misses > 0 || s?.run?.in_progress || s?.pending_request || appBusy || checking ? 3_000 : 60_000
     },
     retry: false,
   })
@@ -115,8 +119,32 @@ export function OpenNvrUpdates() {
       setBusy(false)
     }
   }
+  // Check now: the host looks for new releases on its next tick (within a
+  // minute) instead of at the next six-hourly check. Installs nothing.
+  const checkPending = !!s.pending_check
+  const mayCheck = canUpdate && s.connected && s.runner.running && !checkPending && !inProgress
+  const checkNow = async () => {
+    setBusy(true)
+    try {
+      await apiService.requestUpdateCheck()
+      setCheckAskedAt(Date.now())
+      showSuccess(t('upd.checkRequested'))
+      qc.invalidateQueries({ queryKey: ['opennvr-update'] })
+    } catch (e) {
+      showError(extractApiError(e, t('upd.checkFailed')))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const checkButton = canUpdate && (
+    <Button size="sm" variant="ghost" onClick={checkNow} disabled={busy || !mayCheck}
+      title={!s.runner.running ? t('upd.noRunner') : t('upd.checkHint')} data-testid="upd-check-now">
+      <RefreshCw size={13} className={checkPending ? 'animate-spin' : undefined} /> {t('upd.checkNow')}
+    </Button>
+  )
+
   // Apps released from the registry (docs/design/app-updates-from-registry.md).
-  const apps = s.apps ?? { apps: [], problems: [], last_check: null, run: null, history: [], pending_request: null }
+  const apps = s.apps ??{ apps: [], problems: [], last_check: null, run: null, history: [], pending_request: null }
   const appMode = (id: string) => s.policy.app_modes?.[id] || s.policy.apps_mode || s.policy.mode
   const appBusy = inProgress || !!s.pending_request || !!apps.run?.in_progress || !!apps.pending_request
   const requestAppUpdate = async (id: string, version: string) => {
@@ -203,10 +231,18 @@ export function OpenNvrUpdates() {
           <span className="text-[var(--text-dim)]">{t('upd.installed')}</span>
           <span className="font-semibold font-mono" data-testid="upd-installed">{s.installed.version}</span>
           {s.installed.commit && <span className="text-[11px] font-mono text-[var(--text-dim)]">{s.installed.commit.slice(0, 12)}</span>}
-          {s.last_check?.at && (
-            <span className="ml-auto text-[11px] text-[var(--text-dim)]">{t('upd.lastChecked', { at: fmt.dateTime(s.last_check.at) })}</span>
-          )}
+          <span className="ml-auto flex items-center gap-2">
+            {s.last_check?.at && (
+              <span className="text-[11px] text-[var(--text-dim)]">{t('upd.lastChecked', { at: fmt.dateTime(s.last_check.at) })}</span>
+            )}
+            {checkButton}
+          </span>
         </div>
+        {checkPending && (
+          <Notice tone="info" icon={<RefreshCw size={15} className="animate-spin" />}>
+            <span data-testid="upd-checking">{t('upd.checking')}</span>
+          </Notice>
+        )}
 
         {inProgress && s.run ? (
           <Notice tone="info" icon={<RefreshCw size={15} className="animate-spin" />}>
@@ -270,9 +306,12 @@ export function OpenNvrUpdates() {
         <section className="border border-[var(--border)] bg-[var(--panel-2)] p-3 space-y-3" data-testid="upd-apps">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-sm font-semibold">{t('upd.apps.title')}</h3>
-            {apps.last_check?.at && (
-              <span className="ml-auto text-[11px] text-[var(--text-dim)]">{t('upd.lastChecked', { at: fmt.dateTime(apps.last_check.at) })}</span>
-            )}
+            <span className="ml-auto flex items-center gap-2">
+              {apps.last_check?.at && (
+                <span className="text-[11px] text-[var(--text-dim)]">{t('upd.lastChecked', { at: fmt.dateTime(apps.last_check.at) })}</span>
+              )}
+              {checkButton}
+            </span>
           </div>
           <p className="text-xs text-[var(--text-dim)]">{t('upd.apps.description')}</p>
 

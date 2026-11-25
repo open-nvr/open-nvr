@@ -103,6 +103,14 @@ get_env_var() {
     grep -E "^${key}=" .env 2>/dev/null | cut -d'=' -f2- | sed -E 's/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//' | tr -d '"' | tr -d "'"
 }
 
+# The user is in the docker group, but this shell started before they joined
+# it: usermod reaches new logins only, so these processes still lack the group
+# and the socket refuses them. No usermod is needed, only a new shell.
+docker_group_pending() {
+    [[ " $(id -nG "$(id -un)" 2>/dev/null) " == *" docker "* ]] \
+        && [[ " $(id -nG 2>/dev/null) " != *" docker "* ]]
+}
+
 # ── Helper: why `docker info` failed ─────────────────────
 # A daemon that is down and a socket this user may not open both make the
 # docker client exit 1, and only its stderr tells them apart. The fix differs:
@@ -117,8 +125,16 @@ docker_unavailable_reason() {
     case "$err" in
         *"permission denied"*|*"Permission denied"*)
             printf 'Docker is running, but %s may not use it (permission denied on the Docker socket).\n' "$user"
-            printf '      → Join the docker group, open a new shell (or log out and back in), then re-run:\n'
-            printf '          sudo usermod -aG docker %s && newgrp docker\n' "$user"
+            if [[ " $(id -nG 2>/dev/null) " == *" docker "* ]]; then
+                printf '      → %s already has the docker group, and the socket still refuses it.\n' "$user"
+                printf '        Check who may open it:  ls -l /var/run/docker.sock  (expected: group docker, srw-rw----)\n'
+            elif docker_group_pending; then
+                printf '      → %s is already in the docker group; this shell started before that.\n' "$user"
+                printf '        Run  newgrp docker  (or log out and back in), then re-run.\n'
+            else
+                printf '      → Join the docker group, open a new shell (or log out and back in), then re-run:\n'
+                printf '          sudo usermod -aG docker %s && newgrp docker\n' "$user"
+            fi
             printf '      → Not sudo ./start.sh: .env and the certificates would then belong to root.\n' ;;
         *)
             printf 'Docker is not running.\n'
@@ -423,10 +439,17 @@ fill_qualcomm_agent_llm() {
 # The search embedder on the NPU: SigLIP2 through ai-adapter's siglip_qnn
 # (docker-compose.accel-qualcomm.yml replaces the CPU clip image for the
 # `embeddings` profile). Filled only when the image exists for this
-# ADAPTER_TAG (or as latest-qualcomm): EVENTS_EMBED_ENRICHMENT on, the
-# `embeddings` profile added to OPENNVR_EXAMPLE_PROFILE so the adapter
-# starts and registers — the same rule as the captioner's fill: an
-# operator's own value is never touched, leaving the flavour resets both.
+# ADAPTER_TAG (or as latest-qualcomm): an EMPTY EVENTS_EMBED_ENRICHMENT
+# goes on and the `embeddings` profile is added to OPENNVR_EXAMPLE_PROFILE
+# so the adapter starts and registers; leaving the flavour resets both.
+# A flag that says `false` is the operator's answer (typed, or given to
+# the installer) and is kept: until 2026-11-25 the fill read false as
+# "unset" and switched the embedder back on at every start, so a Qualcomm
+# board had no way to turn search by meaning off (Ventuno Q with a full
+# disk: the 4 GB image returned after each removal). With the flag false
+# the `embeddings` profile an earlier fill added is taken out again, or
+# the adapters would still start. An `enrichment` pick is the operator's
+# and is left alone.
 # The per-camera `embed` skill assignment stays the operator's gate: the
 # flag and the adapter do nothing for a camera without it.
 fill_qualcomm_embedder() {
@@ -440,8 +463,16 @@ fill_qualcomm_embedder() {
             # than the embedder — and one missing image cancelled every
             # other pull of the project (fresh install, 2026-11-12).
             set_env_var EMBED_ADAPTER_TAG "$tag"
-            case "$(get_env_var EVENTS_EMBED_ENRICHMENT)" in ""|false) set_env_var EVENTS_EMBED_ENRICHMENT true ;; esac
             local profiles; profiles=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
+            if [[ "$(get_env_var EVENTS_EMBED_ENRICHMENT | tr '[:upper:]' '[:lower:]')" == false ]]; then
+                case ",${profiles}," in
+                    *,embeddings,*)
+                        profiles=$(printf '%s' ",${profiles}," | sed -e 's/,embeddings,/,/g' -e 's/^,//' -e 's/,$//')
+                        set_env_var OPENNVR_EXAMPLE_PROFILE "$profiles" ;;
+                esac
+                return 0
+            fi
+            [[ -n "$(get_env_var EVENTS_EMBED_ENRICHMENT)" ]] || set_env_var EVENTS_EMBED_ENRICHMENT true
             case ",${profiles}," in
                 *,embeddings,*|*,enrichment,*) ;;
                 *) set_env_var OPENNVR_EXAMPLE_PROFILE "${profiles:+$profiles,}embeddings" ;;
@@ -545,10 +576,11 @@ reset_stale_accel_fills() {
                 write_env_var STT_ADAPTER parakeet; write_env_var STT_ADAPTER_TAG ""
                 write_env_var STT_ADAPTER_IMAGE ""; write_env_var STT_ADAPTER_MODULE ""; write_env_var STT_ONNX_PROVIDERS "" ;;
             # The NPU embedder has no CPU image here: the flag the fill set
-            # goes back off and the profile it added is removed (an
-            # `enrichment` profile the operator chose is kept).
+            # goes back to empty (off, and still "unset", so a return to
+            # the flavour fills it again) and the profile it added is
+            # removed (an `enrichment` profile the operator chose is kept).
             qualcomm:EVENTS_EMBED_ENRICHMENT:true)
-                write_env_var EVENTS_EMBED_ENRICHMENT false
+                write_env_var EVENTS_EMBED_ENRICHMENT ""
                 local _p; _p=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
                 _p=$(printf '%s' ",${_p}," | sed -e 's/,embeddings,/,/g' -e 's/^,//' -e 's/,$//')
                 write_env_var OPENNVR_EXAMPLE_PROFILE "$_p" ;;

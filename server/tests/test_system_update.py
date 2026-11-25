@@ -316,3 +316,55 @@ def test_app_requests_need_system_update(env, host):  # noqa: F811
     assert env.client.post(f"{URL}/apps/attendly/request", headers=env.jwt("vera")).status_code == 403
     assert env.client.delete(f"{URL}/apps/request", headers=env.jwt("vera")).status_code == 403
     assert env.client.post(f"{URL}/apps/Not_An_Id/request", headers=env.jwt("admin")).status_code == 404
+
+
+# -- Check now ---------------------------------------------------------------
+
+
+def _runner_alive(state):
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (state / "runner.env").write_text(f"LAST_SEEN={now}\n")
+
+
+def test_check_now_lands_for_the_host_and_is_audited(env, host):  # noqa: F811
+    """Check now: a plain file the runner picks up on its next tick; pending
+    until the runner marks it; a second click meanwhile asks nothing new."""
+    state, req = host
+    _runner_alive(state)
+    r = env.client.post(f"{URL}/check", headers=env.jwt("admin"))
+    assert r.status_code == 202, r.text
+    lines = dict(line.split("=", 1) for line in (req / "check-request.env").read_text().splitlines())
+    assert lines["ACTION"] == "check" and lines["REQUESTED_BY"] == "admin" and lines["ID"] == r.json()["request"]
+    assert env.client.get(URL, headers=env.jwt("admin")).json()["pending_check"]["requested_by"] == "admin"
+    again = env.client.post(f"{URL}/check", headers=env.jwt("admin"))
+    assert again.status_code == 202 and again.json() == {"request": None, "already_requested": True}
+    assert dict(line.split("=", 1) for line in (req / "check-request.env").read_text().splitlines())["ID"] == lines["ID"]
+    # The runner marks it taken: no longer pending, and a new one may be asked.
+    (state / "last-check-request").write_text(lines["ID"] + "\n")
+    assert env.client.get(URL, headers=env.jwt("admin")).json()["pending_check"] is None
+    assert env.client.post(f"{URL}/check", headers=env.jwt("admin")).json()["already_requested"] is False
+    sess = env.Session()
+    actions = [a for (a,) in sess.query(env.models.AuditLog.action)
+               .filter(env.models.AuditLog.action == "system.update_check").all()]
+    sess.close()
+    assert len(actions) == 2
+
+
+def test_check_now_needs_a_live_runner_and_the_folders(env, host, monkeypatch):  # noqa: F811
+    from services import update_status
+
+    state, req = host
+    old = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (state / "runner.env").write_text(f"LAST_SEEN={old}\n")
+    r = env.client.post(f"{URL}/check", headers=env.jwt("admin"))
+    assert r.status_code == 409 and "not running" in r.json()["detail"]
+    assert not (req / "check-request.env").exists()
+    _runner_alive(state)
+    monkeypatch.setattr(update_status, "REQUEST_DIR", state / "missing")
+    assert env.client.post(f"{URL}/check", headers=env.jwt("admin")).status_code == 503
+
+
+def test_check_now_needs_system_update(env, host):  # noqa: F811
+    _runner_alive(host[0])
+    assert env.client.post(f"{URL}/check", headers=env.jwt("vera")).status_code == 403
+    assert not (host[1] / "check-request.env").exists()

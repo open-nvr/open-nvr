@@ -200,6 +200,7 @@ jobs:
           - { app: garbage-dumping,            module: garbage_dumping }
           - { app: ppe-check,                  module: ppe_check }
           - { app: gate-watch,                 module: gate_watch }
+          - { app: gold-bar-desk,              module: gold_bar_desk }
           - { app: guard-scan-compliance,      module: guard_scan_compliance }
           - { app: home-assistant-relay,       module: home_assistant_relay }
           - { app: camera-tamper,              module: camera_tamper }
@@ -210,6 +211,7 @@ jobs:
           - { app: occupancy-counting,         module: occupancy_counting }
           - { app: package-delivery,           module: package_delivery }
           - { app: smart-doorbell,             module: smart_doorbell }
+          - { app: xray-screening,             module: xray_screening }
     steps:
       - uses: actions/checkout@v4
 

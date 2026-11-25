@@ -793,8 +793,7 @@ step:
   Investigate finding again, right observation and wrong fact); and
   `qwen3-vl:2b-instruct` twice in 8 runs wrote a reason long enough to
   run out of tokens before the JSON closed (`invalid_output`). The second
-  is a fix for the SDK (a tighter reason, or more tokens for Look),
-  measured on the site cases before and after.
+  is fixed in the SDK ([the reason bounded](#the-reason-bounded-25-november-2026)).
 
 ### The public night-yard cases (30 October 2026)
 
@@ -830,10 +829,38 @@ What it says:
 - **Empty thermal scenes become strangers** (5 of 20 at 768 px).
 - **Reasons that run on**: 6 and 8 runs in 58 wrote a reason long enough
   to run out of tokens before the JSON closed (`invalid_output`), the
-  failure the coco128 check showed. An SDK fix, measured on these cases
-  before and after.
+  failure the coco128 check showed. Fixed in the SDK, measured on these
+  cases before and after ([the reason bounded](#the-reason-bounded-25-november-2026)).
 - Strangers and empty scenes did a little worse at 768 px than at full
   size; with one repeat that is within noise, and three repeats will say.
+
+### The reason bounded (25 November 2026)
+
+The SDK fix for reasons that run on: the answer's schema caps `reason` at
+200 characters (`maxLength`; constrained decoding stops the string there
+and the JSON still closes) and the Look rules ask for one short sentence,
+under 25 words. Same 58 cases, `--max-side 768`, three repeats (174
+answers), CPU limits, 4 threads, before and after on the same machine.
+Raw runs: [`benchmarks/look-public-yard-2026-11-reason-before.json`](benchmarks/look-public-yard-2026-11-reason-before.json),
+[`benchmarks/look-public-yard-2026-11-reason-after.json`](benchmarks/look-public-yard-2026-11-reason-after.json).
+
+| | Pass | 95% interval | p50 / p95 per step | Animals | Strangers | Nobody | Output cut off | Strangers as guards |
+|---|---|---|---|---|---|---|---|---|
+| Before (unbounded reason) | 120/174 (69%) | 0.62-0.75 | 10.9 s / 32.7 s | 46/60 | 19/54 | 55/60 | 23 | 14/54 |
+| After (`maxLength` 200) | **143/174 (82%)** | **0.76-0.87** | **5.1 s / 26.8 s** | 53/60 | 35/54 | 55/60 | **0** | 11/54 |
+
+- **No answer is cut off any more** (23 to 0), and most of the gain is
+  those answers coming back: 18 of the 23 were strangers, which a cut-off
+  answer turned into `unsure`.
+- **Steps are faster**: the model writes fewer tokens, so p50 halved.
+- **The model does not keep to 25 words.** Every reason still runs to the
+  200-character cap and ends mid-sentence; the cap, not the prompt, is
+  what fixes the output. A reason is for a person reading the run, and
+  200 characters still says what was seen.
+- **Strangers become guards** is unchanged within noise (14 to 11 of 54):
+  a fact the model gets wrong, not a format problem.
+- The step times here are lower than in the October run: a different
+  machine. Compare the before and after rows with each other only.
 
 ## Measured: the vision models on coco128 (16 October 2026)
 

@@ -15,6 +15,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing is fetched and no deployment contacts the internet on its own.
   The repository gains a code of conduct, bug and feature issue forms, a
   Discord link in the issue chooser, and a pull-request template.
+- **Workflows guide.** `docs/WORKFLOWS.md`: setting up the model, the
+  workflow file (triggers, conditions, steps, actions, limits), the safety
+  rule, Test and On, Ask a person, trying on recent events, reading a run,
+  what is not there yet, and the API, with a curl walk-through.
+
 - **The last workflow actions.** `save_clip` protects a camera's
   recordings around the moment the run began from retention (`before` /
   `after`, 30 s each by default; again once the rest is recorded),
@@ -72,6 +77,36 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the first app released this way; release manifests no longer pin it.
 
 ### Fixed
+
+- **A first `./start.sh` on a fresh Linux host no longer stops twice
+  after installing Docker** (#1002). A checkout that belongs to root (cloned with
+  `sudo git clone`) is now named before Docker is offered, not after it is
+  installed. When the user is in the docker group but the shell isn't yet
+  (the shell that ran the install, or one opened before a `usermod`), the
+  installer carries on as the group instead of asking for `usermod` again;
+  `start.sh` and `uninstall.sh` say `newgrp docker` for that case.
+  The Docker download now shows apt's progress instead of a silent screen
+  for several minutes.
+- **A Look step's answer always closes.** Its reason had no bound, so a
+  small model could keep explaining until the token budget cut its JSON
+  off: 23 of 174 answers on the public night-yard cases came back
+  `invalid_output`. The answer's schema now caps the reason at 200
+  characters and the prompt asks for one short sentence: 0 cut off, and
+  the pass rate rose from 69% to 82%
+  (`examples/camera-agent/MODELS_AND_LATENCY.md`).
+
+- **A single sign-on administrator can reset 2FA, passwords and users
+  again** (#998). Those actions asked for the administrator's own MFA
+  code, which a single sign-on account never has and may not add, so every
+  one of them failed with "Set up MFA before performing this action". The
+  dialogs now offer **Confirm with single sign-on**: a pop-up signs in at
+  the identity provider again (`prompt=login`) and confirms changes for
+  five minutes. New `scripts/reset_password.py` sets a password from the
+  host, next to `disable_mfa.py`.
+- **A camera URL pasted with a leading or trailing space now works.** The
+  RTSP and substream URLs were saved with the space, MediaMTX refused the
+  source, and live view said "path 'cam-N' is not configured". Adding,
+  editing and importing a camera now strip whitespace from both URLs (#989).
 
 - **The §889 security check no longer reports a camera as ZTE because its
   name or maker contains the letters "zte".** The covered-vendor match was a

@@ -63,6 +63,8 @@ export interface UpdateStatus {
   history: Array<{ finished: string; from: string; to: string; result: string }>
   runner: { last_seen: string | null; running: boolean }
   pending_request: { to: string; requested_by: string; requested_at: string } | null
+  /** A Check now the host runner has not picked up yet. */
+  pending_check?: { requested_by: string; requested_at: string } | null
   /** The hand-off folders are mounted (an install brought up by start.sh / start.ps1). */
   connected: boolean
   policy: UpdatePolicy
@@ -77,4 +79,6 @@ export const updateService = {
   cancelUpdateRequest: () => api.delete('/api/v1/system/update/request'),
   requestAppUpdate: (appId: string) => api.post(`/api/v1/system/update/apps/${encodeURIComponent(appId)}/request`),
   cancelAppUpdateRequest: () => api.delete('/api/v1/system/update/apps/request'),
+  /** Check now: the host looks for new OpenNVR and app releases within a minute. */
+  requestUpdateCheck: () => api.post('/api/v1/system/update/check'),
 }
