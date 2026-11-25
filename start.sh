@@ -423,10 +423,17 @@ fill_qualcomm_agent_llm() {
 # The search embedder on the NPU: SigLIP2 through ai-adapter's siglip_qnn
 # (docker-compose.accel-qualcomm.yml replaces the CPU clip image for the
 # `embeddings` profile). Filled only when the image exists for this
-# ADAPTER_TAG (or as latest-qualcomm): EVENTS_EMBED_ENRICHMENT on, the
-# `embeddings` profile added to OPENNVR_EXAMPLE_PROFILE so the adapter
-# starts and registers — the same rule as the captioner's fill: an
-# operator's own value is never touched, leaving the flavour resets both.
+# ADAPTER_TAG (or as latest-qualcomm): an EMPTY EVENTS_EMBED_ENRICHMENT
+# goes on and the `embeddings` profile is added to OPENNVR_EXAMPLE_PROFILE
+# so the adapter starts and registers; leaving the flavour resets both.
+# A flag that says `false` is the operator's answer (typed, or given to
+# the installer) and is kept: until 2026-11-25 the fill read false as
+# "unset" and switched the embedder back on at every start, so a Qualcomm
+# board had no way to turn search by meaning off (Ventuno Q with a full
+# disk: the 4 GB image returned after each removal). With the flag false
+# the `embeddings` profile an earlier fill added is taken out again, or
+# the adapters would still start. An `enrichment` pick is the operator's
+# and is left alone.
 # The per-camera `embed` skill assignment stays the operator's gate: the
 # flag and the adapter do nothing for a camera without it.
 fill_qualcomm_embedder() {
@@ -440,8 +447,16 @@ fill_qualcomm_embedder() {
             # than the embedder — and one missing image cancelled every
             # other pull of the project (fresh install, 2026-11-12).
             set_env_var EMBED_ADAPTER_TAG "$tag"
-            case "$(get_env_var EVENTS_EMBED_ENRICHMENT)" in ""|false) set_env_var EVENTS_EMBED_ENRICHMENT true ;; esac
             local profiles; profiles=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
+            if [[ "$(get_env_var EVENTS_EMBED_ENRICHMENT | tr '[:upper:]' '[:lower:]')" == false ]]; then
+                case ",${profiles}," in
+                    *,embeddings,*)
+                        profiles=$(printf '%s' ",${profiles}," | sed -e 's/,embeddings,/,/g' -e 's/^,//' -e 's/,$//')
+                        set_env_var OPENNVR_EXAMPLE_PROFILE "$profiles" ;;
+                esac
+                return 0
+            fi
+            [[ -n "$(get_env_var EVENTS_EMBED_ENRICHMENT)" ]] || set_env_var EVENTS_EMBED_ENRICHMENT true
             case ",${profiles}," in
                 *,embeddings,*|*,enrichment,*) ;;
                 *) set_env_var OPENNVR_EXAMPLE_PROFILE "${profiles:+$profiles,}embeddings" ;;
@@ -545,10 +560,11 @@ reset_stale_accel_fills() {
                 write_env_var STT_ADAPTER parakeet; write_env_var STT_ADAPTER_TAG ""
                 write_env_var STT_ADAPTER_IMAGE ""; write_env_var STT_ADAPTER_MODULE ""; write_env_var STT_ONNX_PROVIDERS "" ;;
             # The NPU embedder has no CPU image here: the flag the fill set
-            # goes back off and the profile it added is removed (an
-            # `enrichment` profile the operator chose is kept).
+            # goes back to empty (off, and still "unset", so a return to
+            # the flavour fills it again) and the profile it added is
+            # removed (an `enrichment` profile the operator chose is kept).
             qualcomm:EVENTS_EMBED_ENRICHMENT:true)
-                write_env_var EVENTS_EMBED_ENRICHMENT false
+                write_env_var EVENTS_EMBED_ENRICHMENT ""
                 local _p; _p=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
                 _p=$(printf '%s' ",${_p}," | sed -e 's/,embeddings,/,/g' -e 's/^,//' -e 's/,$//')
                 write_env_var OPENNVR_EXAMPLE_PROFILE "$_p" ;;
