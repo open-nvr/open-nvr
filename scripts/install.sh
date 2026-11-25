@@ -1714,10 +1714,11 @@ configure_voice_search() {
 # vector per visit, so Footage Search finds "a person by the gate at
 # night" from the frame itself. The embedder is its own container in
 # docker-compose.apps.yml; start.sh starts it whenever the flag is true.
-# Default on where the embedder has an accelerator (the Qualcomm NPU,
-# where start.sh's fill switches it on anyway), off on the CPU, where it
-# is a model call per visit beside detection and recording. An existing
-# .env keeps the operator's last answer.
+# Default on where the embedder has an accelerator (the Qualcomm NPU),
+# off on the CPU, where it is a model call per visit beside detection and
+# recording. A "no" is written as false and start.sh's qualcomm fill
+# keeps it (it fills only an empty flag). An existing .env keeps the
+# operator's last answer.
 configure_embeddings_flag() {
     local cur default="n" where
     cur=$(env_get EVENTS_EMBED_ENRICHMENT)
