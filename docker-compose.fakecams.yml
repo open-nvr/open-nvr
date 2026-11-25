@@ -57,6 +57,8 @@ services:
       - FAKECAM_SUBSTREAM=${FAKECAM_SUBSTREAM:-}
       - FAKECAM_SUBSTREAM_MIN_WIDTH=${FAKECAM_SUBSTREAM_MIN_WIDTH:-640}
       - FAKECAM_SUBSTREAM_FPS=${FAKECAM_SUBSTREAM_FPS:-10}
+      - FAKECAM_IMAGE_SECONDS=${FAKECAM_IMAGE_SECONDS:-4}
+      - FAKECAM_IMAGE_CANVAS=${FAKECAM_IMAGE_CANVAS:-1280x720}
     volumes:
       # NOTE: if this file is missing, Docker silently creates a DIRECTORY in
       # its place and the container dies with exit 127. Keep it in the repo.

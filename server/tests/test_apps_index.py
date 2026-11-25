@@ -203,6 +203,8 @@ _EXPECTED_IDS = {
     "garbage-dumping",
     "ppe-check",
     "attendly",
+    "gold-bar-desk",
+    "xray-screening",
 }
 
 
