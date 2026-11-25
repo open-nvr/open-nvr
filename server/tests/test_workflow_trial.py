@@ -221,6 +221,9 @@ def test_a_trial_with_nothing_to_try_is_done_at_once(env):
 @pytest.fixture()
 def api(env, monkeypatch):
     monkeypatch.setattr(wf_router, "audit_request", lambda db, request, **kw: None)
+    # The fixture's alerts are dated from NOW; on the real clock they age out
+    # of /try's seven-day window a week after NOW was written.
+    monkeypatch.setattr(wf_router, "_now", lambda: NOW)
     app = FastAPI()
     app.include_router(wf_router.router, prefix="/api/v1")
     user = {"u": _User(1, {"workflows.view", "workflows.manage"})}
