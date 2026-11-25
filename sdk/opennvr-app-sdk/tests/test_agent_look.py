@@ -23,6 +23,7 @@ from opennvr_app_sdk.agent import (
     look_messages,
     run_look,
 )
+from opennvr_app_sdk.agent.decision import REASON_MAX_CHARS
 
 SPEC = DecisionSpec(options=("delivery", "cab", "visitor"),
                     fields={"company": ("dhl", "ups", "other")})
@@ -77,6 +78,8 @@ def test_the_schema_allows_the_options_and_unsure_only():
     # The reason is written before the decision (see DecisionSpec.schema).
     assert list(s["properties"]) == ["reason", "company", "decision", "confidence"]
     assert s["required"] == list(s["properties"])
+    # A bounded reason: an unbounded one ran past the token budget.
+    assert s["properties"]["reason"]["maxLength"] == REASON_MAX_CHARS
 
 
 def test_read_rechecks_what_the_schema_should_have_enforced():
