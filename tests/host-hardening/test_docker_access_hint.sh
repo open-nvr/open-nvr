@@ -55,6 +55,15 @@ cat > "$BIN/uname" <<'SHIM'
 case "${1:-}" in -m) echo x86_64 ;; *) echo Linux ;; esac
 SHIM
 chmod +x "$BIN/uname"
+# The hint depends on the docker group (none, pending, or already held);
+# these cases are the user in no docker group, whoever runs them.
+REAL_ID=$(command -v id)
+cat > "$BIN/id" <<SHIM
+#!/usr/bin/env bash
+[ "\$1" = -nG ] && { $REAL_ID -un; exit 0; }
+exec $REAL_ID "\$@"
+SHIM
+chmod +x "$BIN/id"
 
 ME="$(id -un)"
 

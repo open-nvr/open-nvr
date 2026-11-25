@@ -191,6 +191,7 @@ jobs:
           - ppe-check
           - gate-watch
           - gate-controller
+          - gold-bar-desk
           - home-assistant-relay
           - inference-listener
           - intrusion-detection
@@ -200,6 +201,7 @@ jobs:
           - occupancy-counting
           - package-delivery
           - smart-doorbell
+          - xray-screening
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6

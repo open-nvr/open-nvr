@@ -1,0 +1,38 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# gold-bar-desk config for running the app by hand, outside compose.
+#
+
+# ── Video ──────────────────────────────────────────────────────────
+# Frames come from the desk camera's stream, through a grant core mints
+# for THIS app and THIS camera; pick the camera in the App Catalog.
+# Full width: a bar must be ~30 px wide to be segmented.
+fps: 2.0
+frame_width: 1920
+
+# ── The model ──────────────────────────────────────────────────────
+# Copied into the weights volume by fastsam-weights-init.
+model_path: "./FastSAM-s.onnx"
+inference_threads: 2
+
+# ── The shift ──────────────────────────────────────────────────────
+# 0 learns the count from the first 30 s; better to enter the issued
+# count in the App Catalog.
+bars_at_start: 0
+missing_after_s: 25.0
+missing_min_frames: 50
+min_analysis_fps: 1.0
+near_body_s: 1.0
+near_body_cooldown_s: 60.0
+
+# ── Where results go ───────────────────────────────────────────────
+webhook_url: null
+nats_alerts_url: "nats://localhost:4222"
+nats_alerts_token: "changeme"
+
+# ── App contract (spec §03) ────────────────────────────────────────
+contract_port: 9212
+contract_bind_host: "0.0.0.0"
+contract_host: "localhost"
+opennvr_url: "http://localhost:8000"
