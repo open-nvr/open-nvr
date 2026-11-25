@@ -1,0 +1,3971 @@
+{
+ "meta": {
+  "model": "qwen3-vl:2b-instruct",
+  "hardware": "cpu",
+  "repeat": 3,
+  "think": "off",
+  "max_side": 768,
+  "engine": "opennvr_app_sdk.workflows.run_ai_step",
+  "cases": "look-public/cases.csv",
+  "templates": "tools/look_templates.yml",
+  "templates_sha256": "a64e9b38fe414252d5c1d12e8d4be5e235638e986df38fca85f0fd36c78700db"
+ },
+ "summary": {
+  "n": 174,
+  "pass": 143,
+  "pass_ci": [
+   0.7582197000383915,
+   0.8715542111275001
+  ],
+  "unsure": 0,
+  "errors": 0,
+  "seconds_p50": 5.132,
+  "seconds_p95": 26.777,
+  "confusion": {
+   "ignore who=animal": {
+    "alert who=stranger": 5,
+    "ignore who=animal": 53,
+    "ignore who=guard": 2
+   },
+   "alert who=stranger": {
+    "alert who=stranger": 35,
+    "ignore who=guard": 11,
+    "ignore who=nobody": 6,
+    "ignore who=animal": 2
+   },
+   "ignore who=nobody": {
+    "ignore who=nobody": 55,
+    "alert who=stranger": 2,
+    "ignore who=guard": 3
+   }
+  },
+  "templates": {
+   "yard_threat": {
+    "n": 174,
+    "pass": 143,
+    "pass_ci": [
+     0.7582197000383915,
+     0.8715542111275001
+    ],
+    "unsure": 0,
+    "errors": 0,
+    "seconds_p50": 5.132,
+    "seconds_p95": 26.777,
+    "confusion": {
+     "ignore who=animal": {
+      "alert who=stranger": 5,
+      "ignore who=animal": 53,
+      "ignore who=guard": 2
+     },
+     "alert who=stranger": {
+      "alert who=stranger": 35,
+      "ignore who=guard": 11,
+      "ignore who=nobody": 6,
+      "ignore who=animal": 2
+     },
+     "ignore who=nobody": {
+      "ignore who=nobody": 55,
+      "alert who=stranger": 2,
+      "ignore who=guard": 3
+     }
+    },
+    "qualifies": false
+   }
+  },
+  "qualifies": false,
+  "gate": 0.8,
+  "seconds_limit": 120.0
+ },
+ "runs": [
+  {
+   "case": "yard_threat:animal/ena24.Coyote.7150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image is a night-vision capture showing a faint, blurry shape in the distance, with a small bright spot. The shape is not clearly defined, and the context of a camera in a yard at night makes it a",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 26.113,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Coyote.7150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image is a night-vision capture showing a faint, blurry shape in the center, with a small light source. The shape is not clearly defined, and there is no visible uniform, reflective vest, torch, a",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.336,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Coyote.7150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image is a night-vision capture showing a faint, blurry shape with a small, bright light. The shape is not clearly defined, and the light is a single point, which is consistent with a person's eye",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.429,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Coyote.7423.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision capture showing a silhouetted animal in a grassy area. The shape and posture are consistent with a coyote, and there is no human or animal-like figure visible. The presence",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.055,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Coyote.7423.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision capture showing a silhouetted, elongated shape in the grassy area, which is consistent with the appearance of a coyote. The shape has a distinct outline and posture, and it",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.456,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Coyote.7423.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision capture showing a silhouetted animal in a grassy area, with no human features or typical patrol gear visible. The shape and posture are consistent with a coyote or similar\u72ac",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.372,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5516.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a large, furry animal with a curled tail, likely a dog, in a yard at night. It is clearly visible and not a person, guard, or shadow. The animal is in motion, and the scene is not a 'n",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.162,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5516.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a large, furry animal with a curled tail, likely a dog, in a yard at night. It appears to be in motion, and the scene is illuminated by a camera's infrared light, making it a clear, un",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.763,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5516.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a large, furry animal with a curled tail, likely a dog, in a yard at night. The animal is clearly visible and appears to be moving. There is no person, guard, or shadow visible. The RE",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.483,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5689.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision capture showing a dark, blurry shape in the middle of a grassy area. The shape has the silhouette of a large animal, possibly a deer or similar creature, moving through the",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.774,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5689.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, blurry figure in the distance, consistent with a moving animal in a grassy area. The shape is not clearly humanoid and lacks the features of a person or guard. The presence of ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.534,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5689.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, blurry shape in the grass at night, which is consistent with a wild animal in a natural environment. The shape is not clearly visible, but it appears to be a large, dark form. ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.358,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5705.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision capture showing a dark, indistinct figure in the distance, with a faint outline that appears to be a standing animal. The shape is consistent with a deer or similar animal,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.464,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5705.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision capture showing a dark, blurry figure in the distance, consistent with a deer or similar animal in a grassy area. The figure is not clearly visible, but its shape and the h",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.275,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5705.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, blurry figure in the distance, which is consistent with a deer in a natural environment. The shape and posture are not clearly visible, but the context of a night camera and a ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.152,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5722.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a dark, blurry figure in the background with a faint light, which is consistent with a person in a uniform and reflective vest, possibly on patrol. The presence of a torch is implied, ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.467,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5722.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a dark, blurry figure in the background with a faint light, which is consistent with a person in a uniform and reflective vest, possibly on patrol, but the image is too blurry and indi",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.153,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5722.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, blurry shape in the background with a faint light source, which is consistent with a person or animal in the night. The presence of a small, bright dot is a likely indication, ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.137,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5778.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dog with a reflective collar in a grassy area at night, captured by a camera. The dog is clearly visible, and there is no person, animal, or guard in the frame. The image is a night-",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.808,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5778.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, nocturnal scene with a dog standing on grass, illuminated by the camera's night vision. The dog has a reflective collar and glowing eyes, which are consistent with a dog in a 2",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.387,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Dog.5778.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, nocturnal scene with a dog standing on grass. The dog has a reflective collar, and its eyes are illuminated by the camera's infrared light, indicating it is a real animal. The ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.26,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6707.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a large, dark, furry animal in a forest at night, captured by a camera. The animal's shape and movement are consistent with a bear, and it is not a person, a guard, or a shadow. The RE",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.431,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6707.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a large, dark, furry animal in a forest at night, captured by a camera. The animal's shape and movement are consistent with a bear, and there is no human or other visible object that a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.397,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6707.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, blurry shape in the foreground that appears to be a large animal moving through a wooded area. The shape is consistent with a large mammal, and the context of the night and the",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.334,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6739.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a creature with glowing eyes, which is consistent with a wildlife camera capturing a nocturnal animal. There is no human visible, no uniform or reflective vest, and no torch. The scene",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.852,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6739.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision camera shot of a wooded area. A creature with glowing eyes is visible on the right, which is consistent with a wildlife animal. The presence of the creature and the context",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.119,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6739.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a night-vision camera in a wooded area. A creature with glowing eyes is visible on the right, which is consistent with a wildlife animal. There is no uniform, reflective vest, torch, a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.436,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6742.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, wooded area at night with a faint outline of a person on the right side, but the details are too blurry to confirm a person's features. The person appears to be a small, dark, ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.006,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6742.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a dark, wooded area at night with a faint, bright shape on the right edge that appears to be a person's head and shoulders. The shape is consistent with a person, and the context of a ",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.264,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6742.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a dark, wooded area at night with a faint outline of a person on the right side, but the details are blurry and indistinct. The person appears to be partially visible, but it is not a ",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.432,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6768.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision camera shot showing a creature with a long tail and a slender body, consistent with a cat. The animal is in motion, and the environment appears to be a yard with grass and\u704c",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.725,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6768.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a nocturnal animal, likely a cat, in a grassy area with a stone wall. The animal is clearly visible and has the characteristics of a cat, including its body shape and tail. There is no",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.314,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Domestic_Cat.6768.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a nocturnal animal, likely a cat, in a grassy area near a stone wall. The animal is in motion, and the scene is captured in night vision. There is no human visible, no uniform or torch",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.406,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Grey_Fox.4382.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a nocturnal animal in a wooded area, consistent with a fox, captured by a camera trap. The presence of the animal is evident from its shape, posture, and the surrounding foliage. The '",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.81,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Grey_Fox.4382.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a nocturnal animal, likely a fox, in a forested area with leaf litter. The animal's shape, posture, and tail are consistent with a fox. The scene is not a person, a guard, or a shadow,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.822,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Grey_Fox.4382.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a nocturnal animal, likely a fox, in a wooded area with leaf litter. The animal's posture and features are consistent with a fox, and there is no human presence, uniform, or torch. The",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.717,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Grey_Fox.4390.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a nocturnal animal, likely a fox, in a forested area with its eyes reflecting the camera's light. The scene is not a person, a guard, or a shadow, and there is no visible uniform or a ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.314,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Grey_Fox.4390.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a nocturnal animal, likely a fox, in a forested area with its eyes reflecting the camera's light. The scene is not a person, a guard, or a shadow, and there is no visible uniform or a ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.724,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Grey_Fox.4390.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a nocturnal animal, likely a fox, in a forested area with its eyes reflecting the camera's light. The scene is not a person, a guard, or a shadow, and there is no visible uniform or a ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.01,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Northern_Raccoon.3718.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision camera capture showing a dark, vegetated area. There is no clear human figure, uniform, or reflective vest visible. The shape in the lower right is consistent with a large,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.402,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Northern_Raccoon.3718.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision camera shot showing a dark, vegetated area. There is no clear human figure, uniform, or reflective vest visible. The shape in the lower right is consistent with a rounded, ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.172,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Northern_Raccoon.3718.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image is a night-vision camera shot showing a dark, vegetated area. There is no clear human figure, uniform, or reflective vest visible. The shape in the lower right is consistent with a rounded, ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.022,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Northern_Raccoon.3801.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a raccoon in a wooded area, captured in a night-vision setting. The animal's features, such as its eyes, ears, and fur, are clearly visible, and it is not wearing any uniform or gear. ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.811,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Northern_Raccoon.3801.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a raccoon in a nighttime, wooded area, captured by a camera. The animal's features, such as its eyes, ears, and fur, are clearly visible, and it is not wearing any uniform or carrying,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.838,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Northern_Raccoon.3801.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a raccoon in a natural, wooded environment, captured in a night-vision setting. The animal's features, such as its distinct facial markings and fur, are clearly visible. The scene is a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.948,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Northern_Raccoon.3972.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, wooded area with a faint, blurry shape on the ground that appears to be a small animal, possibly a raccoon, near a tree. The lighting is from a camera, and there is no visible,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.245,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Northern_Raccoon.3972.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, wooded area with a faint, blurry shape on the ground that appears to be a small animal, likely a raccoon, in the lower left. The scene is illuminated by a camera's infrared or ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.898,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Northern_Raccoon.3972.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, wooded area with a faint, blurry shape on the ground that appears to be a small animal, possibly a raccoon, in motion. There is no visible person, uniform, reflective vest, or ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.614,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Red_Fox.3298.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a blurry, moving shape in the foreground, consistent with a fox in motion. The setting is a cemetery with gravestones and a large tree, and the scene is captured in infrared, which is ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.571,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Red_Fox.3298.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a blurry, moving shape in the foreground that is consistent with a fox in motion. The setting appears to be a cemetery with gravestones and trees, and the black-and-white nature of the",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.381,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Red_Fox.3298.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a blurry, moving shape in the foreground that is consistent with a fox in motion. The setting is a cemetery with tombstones and trees, and the black-and-white nature of the image, as a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.443,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Red_Fox.3468.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, outdoor scene at night with a faint, glowing light from a small, elongated shape in the distance, which is consistent with a small animal moving in the yard. There is no person",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.946,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Red_Fox.3468.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, outdoor scene at night with a faint, glowing light from a small, elongated shape in the distance, which is consistent with a small animal moving in the yard. The presence of a ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.324,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Red_Fox.3468.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a dark, outdoor scene at night with a faint, glowing light from a small animal in the distance, consistent with a nocturnal creature. The shape and context are not clearly distinguish-",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.647,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Virginia_Opossum.1996.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a creature with a long, curved tail and a body shape consistent with an animal, likely a rat or similar rodent, in a natural, outdoor setting. The presence of the animal is evident in ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.194,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Virginia_Opossum.1996.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a creature with a long, curved tail and a body shape consistent with a large rodent, likely a raccoon or similar animal, in a natural setting. The presence of the animal is evident in ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.113,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Virginia_Opossum.1996.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a creature with a long, curved tail and a body shape consistent with an animal, likely a marsupial or similar, in a natural setting. The presence of the animal is evident from its form",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.48,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:animal/ena24.Virginia_Opossum.2471.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a large, furry animal in a natural setting at night, with a visible tail and body shape consistent with a bear. The scene is not a person, a shadow, or a reflection, and there is no un",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.444,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:animal/ena24.Virginia_Opossum.2471.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a large, furry animal in a natural, outdoor setting at night. The animal appears to be moving, and there is no visible human or animal-like features that would suggest a guard, a stray",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.544,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:animal/ena24.Virginia_Opossum.2471.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "animal"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a large, furry animal in a natural, outdoor setting at night. The animal is clearly visible and appears to be moving. There is no human figure, no uniform, no torch, and no shadow or a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.225,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-00.17-05-00.bus.G506.f5327.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person sitting on a bench near the entrance of a building, wearing a dark jacket and light-colored pants. There is a person standing nearby with a suitcase. The scene includes a few,",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 24.764,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-00.17-05-00.bus.G506.f5327.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a person in a uniform with a reflective vest and a torch, which are typical features of a guard on patrol. The person is standing near a bench and appears to be in a position of duty, ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.278,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-00.17-05-00.bus.G506.f5327.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a person in a uniform with a reflective vest and a torch, which are typical features of a guard on patrol. The person is standing near a bench and appears to be in a position that is a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.292,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-00.17-05-00.bus.G506.f6979.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The person is wearing a dark jacket and jeans, and is entering a building. The figure is clearly visible and has a posture consistent with a person walking into a building. There is no evidence of a g",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 24.872,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-00.17-05-00.bus.G506.f6979.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The person at the entrance is wearing a dark jacket and jeans, and is holding a torch. The scene is well-lit, and the person's posture and the presence of the torch suggest they are a guard on patrol.",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.805,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-00.17-05-00.bus.G506.f6979.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The person at the entrance is wearing a dark jacket and jeans, and is holding a torch. The person is also wearing a reflective vest, which is consistent with a guard on patrol. The scene is well-lit, ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.581,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-01.17-05-01.bus.G505.f1035.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a bus with people boarding and alighting, and a covered area with people on the ground. There is no visible person in uniform with a torch or any other guard-like appearance. The scene",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.823,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-01.17-05-01.bus.G505.f1035.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a bus with people boarding and alighting, and a covered area with people on the ground. There is no visible person in uniform with a torch or any animal. The scene appears to be a bus\u505c",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.596,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-01.17-05-01.bus.G505.f1035.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a bus with people boarding and alighting, and a covered area with people. There is no visible person in uniform with a torch or any animal. The scene appears to be a bus stop with no c",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.691,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-01.17-05-01.bus.G505.f4393.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a bus, a person standing near the bus, and a person entering the bus. There is no visible guard, animal, or shadow. The person is wearing a uniform and a reflective vest, and is usinga",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.97,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-01.17-05-01.bus.G505.f4393.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a bus, a person standing near the entrance, and another person entering the bus. There is no visible guard, animal, or shadow. The person is wearing a uniform and a reflective vest, a ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.207,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-00-01.17-05-01.bus.G505.f4393.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a bus with a person standing near the entrance, and another person entering. The scene is well-lit, and there are no shadows or reflections that suggest a person or animal. The person,",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.488,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.admin.G329.f305.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The person is a silhouette with a dark shape, but there is no visible uniform, reflective vest, torch, or any clear indication of an animal. The scene appears to be a stairwell with no other people or",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 25.005,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.admin.G329.f305.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person walking down a staircase in a building. The person is a silhouette, and there is no visible uniform, reflective vest, torch, or animal. The scene is not empty, and there is no",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.868,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.admin.G329.f305.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The person is a silhouette on a staircase, and the lighting is from above, making it appear as a shadow. There is no visible uniform, reflective vest, torch, or any other identifying features of a pat",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.521,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.admin.G329.f4036.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person standing on a staircase in a building. The person is wearing a dark jacket and pants, and there is a light source from the upper level, casting a shadow on the floor. The view",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 25.378,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.admin.G329.f4036.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person standing on a staircase in a building. The person is wearing a dark jacket and pants, and there is a light source from above, but no visible equipment like a torch or uniform.",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.876,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.admin.G329.f4036.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person standing on a staircase in a building, wearing a dark jacket and jeans. The person is not wearing a uniform or a reflective vest, and there is no visible torch. The lighting, ",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.588,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.bus.G509.f5653.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The person is seen entering a dark tunnel, and the image is from a camera at night. The person is wearing a dark uniform and has a reflective vest, which is consistent with a guard on patrol. The view",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.09,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.bus.G509.f5653.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The person is seen descending a set of stairs into a dark tunnel, and there is no visible uniform, reflective vest, torch, or any indication of a guard. The figure appears to be a person, but the lack",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.762,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.bus.G509.f5653.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The person is seen descending stairs into a dark tunnel, and the figure appears to be wearing a dark jacket and boots. The lighting is dim, and the person is not wearing a uniform or reflective vest. ",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.487,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.bus.G509.f5777.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark area, but the person is not clearly visible. The person appears to be entering a dark tunnel or underpass, and the shape and posture are consistent with a person. A ",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 25.408,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.bus.G509.f5777.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a person in the dark, descending a staircase into a dark area. The figure is silhouetted, and there is no visible uniform, reflective vest, or torch. The shape and posture are not that",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.183,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-05-00.17-10-00.bus.G509.f5777.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "animal"
+   },
+   "reason": "The image shows a person in a dark area, but the details are not clear enough to confirm if it's a guard, a stranger, an animal, or a shadow. The person appears to be entering a dark tunnel or under a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.856,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.admin.G326.f1813.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a person in a dark jacket and pants, walking down a staircase with a bag. The person is wearing a uniform-like jacket and has a reflective vest, which is consistent with a guard. The w",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 24.727,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.admin.G326.f1813.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark jacket and pants walking down a staircase, with a door and tiled walls. There is no visible uniform, reflective vest, torch, or animal. The person appears to be a 'n",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.86,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.admin.G326.f1813.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark jacket and pants walking down a staircase, with a door and tiled walls. There is no visible uniform, reflective vest, torch, or animal. The person appears to be a 'n",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.057,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.admin.G326.f7170.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark coat and plaid shirt stepping out of a doorway, holding a bag. The person is clearly visible and appears to be a human, not a guard, animal, or shadow. The lighting,",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 25.794,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.admin.G326.f7170.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark coat and plaid shirt stepping out of a door, holding a bag. The person is wearing a uniform-like appearance, but no reflective vest or torch is visible. The scene is",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.859,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.admin.G326.f7170.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark coat and plaid shirt stepping out of a door, holding a bag. The person appears to be a human, and the lighting and angle suggest it's a real person, not a shadow or\u8c78",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.272,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.school.G423.f1614.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a person in a dark hallway with lockers, but the figure is a silhouette with no discernible features or equipment. The person is not wearing a uniform or a reflective vest, and there's",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.357,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.school.G423.f1614.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark hallway with lockers, but the person is a silhouette and appears to be moving. The lighting is dim, and the figure is not clearly visible. The person's shape and the",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.225,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.school.G423.f1614.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a person in a dark hallway with lockers, but the person is a silhouette and there is no visible uniform, reflective vest, or torch. The person's shape is consistent with a shadow or a ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.735,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.school.G423.f2302.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a person in a dark hallway with lockers, but the person is not clearly visible. The figure is a silhouette, and the lighting is dim, making it difficult to confirm if it is a person, a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.599,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.school.G423.f2302.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a person in a dark uniform and a reflective vest, standing in a hallway with lockers. The person is clearly visible and appears to be a guard on patrol. The lighting and the context of",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.891,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-07.17-30-01.17-35-01.school.G423.f2302.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark hallway with lockers, but the person is not clearly visible. The shape and posture suggest a person, but there is no definitive evidence of a uniform, reflective vis",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.762,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-10-02.17-15-02.school.G424.f3282.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in the foreground, near a white SUV, with a visible hand and bag. The person is wearing a dark top and appears to be in motion, possibly exiting the vehicle. The surrounding\u74b0\u5883",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 26.068,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-10-02.17-15-02.school.G424.f3282.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in the foreground near a white SUV, with a red pickup truck and several other vehicles. The person appears to be a person, not a guard, and there is no clear indication of an ",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.136,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-10-02.17-15-02.school.G424.f3282.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in the foreground near a white SUV, wearing a dark top and holding a bag. The person is clearly visible and appears to be a human, not a guard, animal, or shadow. The scene is",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.249,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-10-02.17-15-02.school.G424.f3398.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a parking lot with several vehicles and a person standing near a white SUV. The person is wearing a dark jacket and appears to be in a parking area. There is no visible uniform, torch,",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 25.87,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-10-02.17-15-02.school.G424.f3398.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The scene shows a parking lot with several vehicles and a person standing near a white SUV. The person is wearing a dark jacket and appears to be in a parking area, but there is no visible uniform, no",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.108,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-10-02.17-15-02.school.G424.f3398.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a parking lot with several vehicles and a person standing near a white SUV. The person appears to be a human, and there are no clear signs of a guard, animal, or reflection. The scene,",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.011,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-25-01.17-30-01.school.G419.f138.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark jacket standing on a staircase, and another person is entering through a door. The scene is well-lit, and there are no shadows, bags, or animals visible. The person,",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 27.12,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-25-01.17-30-01.school.G419.f138.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a person in a dark uniform and reflective vest standing on a staircase, near an exit door. The person is clearly visible and appears to be a guard on patrol. The scene is well-lit, and",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.938,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-25-01.17-30-01.school.G419.f138.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark jacket standing on a staircase, and another person in a dark jacket walking out of a door. The scene is well-lit from the outside, and there is no visible animal, no",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.471,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-25-04.17-30-04.school.G300.f603.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person walking on a sidewalk, and the scene includes a red pickup truck, a concrete area, and a trash bin. There is no visible uniform, reflective vest, torch, or guard equipment. A ",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 26.299,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-25-04.17-30-04.school.G300.f603.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person walking on a sidewalk, wearing a dark jacket and pants, with a visible head and feet. There is no uniform, reflective vest, torch, or any indication of an animal. The person's",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.586,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-11.17-25-04.17-30-04.school.G300.f603.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person walking on a sidewalk, wearing a dark jacket and pants, with a visible head and legs. The person is not in a uniform or wearing a reflective vest, and there is no torch. The v",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.957,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-13.17-10-00.17-15-00.school.G421.f7712.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark hooded outfit standing near the entrance, with a reflection of a person visible in the glass door. The person is wearing a dark hood and is standing in a way that is",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 26.201,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-13.17-10-00.17-15-00.school.G421.f7712.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a black hooded outfit walking near the entrance, with a uniformed individual in the background. The person in the foreground appears to be a person in a black hooded outfit",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.269,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-13.17-10-00.17-15-00.school.G421.f7712.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a person in a dark hooded outfit near the entrance, with a reflection of a person visible in the glass door. The person is wearing a dark hooded garment, and the reflection suggests a ",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 4.906,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-13.17-10-00.17-15-00.school.G421.f7957.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The scene is a well-lit indoor space with tables, chairs, a couch, and a person in the background near the entrance. There is no visible person in the foreground or in the immediate vicinity of the ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 26.1,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-13.17-10-00.17-15-00.school.G421.f7957.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a well-lit indoor space with tables, chairs, a couch, and a person in the background near the entrance. The person is wearing a dark jacket and appears to be entering the building. The",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.408,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:stranger/meva.2018-03-13.17-10-00.17-15-00.school.G421.f7957.jpg",
+   "template": "yard_threat",
+   "expected": "alert",
+   "expected_fields": {
+    "who": "stranger"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a well-lit indoor space with tables, chairs, a couch, and a few people. One person is visible near the entrance, wearing a dark jacket and carrying a bag. There is no uniform, no torch",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 6.21,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.11-40-00.11-45-00.school.G474.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a black and white, night-time shot of a yard with a curved path, poles, and a building in the background. There is no visible person, animal, or uniformed figure. The only object that is ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 27.497,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.11-40-00.11-45-00.school.G474.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark, curved path with several poles and a small building in the background. There is no clear evidence of a person, and the scene appears to be empty, with no distinct features that",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.448,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.11-40-00.11-45-00.school.G474.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a black and white night shot of a yard with a curved path, several poles, and a small building in the background. There is no clear human figure, no visible animal, and no uniform or vest",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.943,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.11-45-00.11-50-00.school.G474.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a black and white, low-resolution outdoor scene with a curved path and several poles. There is no clear human figure visible, and the surrounding area appears to be a grassy yard with no ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 27.207,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.11-45-00.11-50-00.school.G474.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a black and white, low-resolution outdoor scene with a winding path and some structures in the background. There is no clear, distinct human figure visible. The presence of a person is un",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.002,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.11-45-00.11-50-00.school.G474.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a black and white, low-resolution night view of a yard with a curved path. There is a person-shaped silhouette in the center of the path, but it is too blurry and indistinct to be clearly",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.507,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-15-00.16-20-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a building with a car parked outside. There is a faint outline of a person near the entrance, but it is not clearly visible. The shape and posture are ambiguous, and the image is grain",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 26.94,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-15-00.16-20-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a building with a car and a person's silhouette on the right side, but the person is not clearly visible. The shape and position are consistent with a guard on patrol, but the image is",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.335,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-15-00.16-20-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a building with a car parked outside. There is no visible person, and the shape of the figure is not clear enough to identify a guard or an animal. The figure appears to be a shadow or",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.22,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-20-00.16-25-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a low-resolution, grainy night view of a building and a car. There is no visible person, and the shape of a person is not discernible. The only object that could be a person is a small, h",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 27.83,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-20-00.16-25-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a low-resolution, grainy night view of a building with a car and a doorway. There is no clear silhouette of a person, no visible uniform or reflective vest, and no animal or bag. The only",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 6.167,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-20-00.16-25-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image is a low-resolution, grainy night view of a building with a car and a doorway. There is no clear evidence of a person, uniform, reflective vest, torch, or any distinct shape of a guard. The ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.708,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.bus.G475.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is blurry and shows a dark, elongated shape on the ground that is not clearly a person, but it could be a shadow or a reflection. There is no clear evidence of a person, uniform, or torch. A",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 28.019,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.bus.G475.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a black and white photo of a yard with a paved area, grass, and a distant building. There is no clear evidence of a person, uniform, reflective vest, torch, or any distinct shape that can",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.368,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.bus.G475.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a black and white, low-resolution outdoor scene with a large paved area, a grassy slope, and a distant building. There is no clear, distinct human figure, uniform, or reflective vest. The",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.663,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.hospital.G476.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a structure that appears to be a small building or shed with a roof, supported by pillars. There is no visible person, animal, or shadow in the frame. The scene is dark, and the image,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 28.548,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.hospital.G476.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a structure that appears to be a guard post or a small building with a dark, possibly reflective, area on the roof. There is no visible person, animal, or shadow in the frame. The lack",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.826,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.hospital.G476.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a structure that appears to be a guard post or a small building, with no visible person, animal, or shadow. The scene is dark and grainy, suggesting it's a night-time view, but there's",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.225,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a night-vision view of a building with a car and a person's silhouette. The silhouette is too indistinct to identify a person clearly, and there is no visible uniform, reflective vest, or",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 27.401,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is grainy and shows a building with a car and a doorway. There is no clear evidence of a person, uniform, or reflective vest. The shape is too indistinct to confirm a guard or a stranger. It",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.292,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a night-vision view showing a building, a car, and a person's silhouette on the ground. The silhouette is too indistinct to identify a person clearly, and there is no visible uniform, a '",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.451,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.school.G474.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a vehicle on a path, and there is no person visible. The scene is dark, and the only potential human figure is a shadow or reflection, but the details are too blurry to confirm a guard",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 26.451,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.school.G474.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a vehicle on a path, and there is no person, guard, animal, or shadow visible. The scene is too blurry and lacks clear details to identify a person or object that could be a guard or a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.908,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.school.G474.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a vehicle on a path, with no visible person, uniform, or reflective vest. The scene appears to be a park or yard with no clear indication of a guard or animal. The black and white, low",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.128,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.school.G474.t60.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a vehicle on a path, but there is no person, animal, or guard visible. The scene appears to be a dark outdoor area with a path and some structures in the background, but no human or an",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 26.657,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.school.G474.t60.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a vehicle on a path, with no visible person, uniform, or reflective vest. The scene is dark, and there is no clear evidence of a guard, animal, or shadow. The image is blurry and lacks",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.097,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-30-00.16-35-00.school.G474.t60.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "alert",
+   "fields": {
+    "who": "stranger"
+   },
+   "reason": "The image shows a vehicle on a path, with no visible person, uniform, or reflective vest. The scene is dark, and there is no clear indication of a guard or animal. The object is a vehicle, not a human",
+   "unsure_reason": null,
+   "rule": 1,
+   "confidence": 1.0,
+   "seconds": 5.073,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-35-00.16-40-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a low-resolution, grainy night view of a building with a car parked outside. There is no visible person, uniform, reflective vest, torch, or animal. The only object that could be a person",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 26.777,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-35-00.16-40-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a low-resolution, grainy night view of a building with a car and a doorway. There is no visible person, uniform, reflective vest, torch, or animal. The shape of the figure is ambiguous, a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.178,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.16-35-00.16-40-00.hospital.G479.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a low-resolution, grainy night view of a building with a car parked outside. There is no visible person, uniform, reflective vest, torch, or animal. The shape of the figure is ambiguous, ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.888,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.admin.G326.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dimly lit interior with a door and a staircase. There is no visible person, and the area is illuminated by a fluorescent light. The scene appears to be empty, with no clear evidence,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 26.476,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.admin.G326.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dimly lit interior with a door, tiled walls, and a staircase. There is no visible person, and the area is not illuminated by a person or a light source. The scene appears to be a non",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.798,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.admin.G326.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dimly lit interior with a door and a staircase. There is no visible person, and the scene appears to be a static, non-illuminated environment. The presence of a person is not evident",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.306,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G331.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows an indoor waiting area with benches, a door, and a small light source. There is no visible person, and the scene is empty of any people, animals, or guards. The lighting and shadows do",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.455,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G331.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark, empty indoor space with benches, a door, and a few objects. There is no person visible, and the lighting is from a single source, creating shadows. The scene is not illuminated",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.523,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G331.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows an indoor space with benches, a doorway, and a reflection in a window. There is no person visible, and the scene is empty of any human or animal form. The lighting and shadows suggest,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.885,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G331.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows an indoor space with benches, a door, and a reflection in a window. There is no person visible, and the scene is dark with no clear indication of a guard, animal, or stranger. The only",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.644,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G331.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows an indoor space with benches, a door, and a wall. There is no visible person, animal, or guard. The only potential object is a shadow on the wall, but it is not clearly discernible. A ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.892,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G331.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark interior space with benches, a door, and a window, but no person is clearly visible. The lighting is dim, and there are no visible signs of an animal or a guard. The only object",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.172,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G475.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is grainy and shows a dark, irregular shape on the ground that could be a shadow or a bag, but there is no clear evidence of a person, uniform, or reflective vest. The shape is too indistinc",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 26.546,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G475.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is grainy and shows a dark, irregular shape on the ground that is likely a shadow or a bag, but the shape is not clearly distinguishable. The presence of a person is not evident from the low",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.737,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G475.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is grainy and shows a dark, irregular shape on the ground that could be a shadow or a reflection, but there is no clear evidence of a person, uniform, or reflective vest. The shape is too am",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.324,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G505.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark outdoor area with pillars and a light source, but there is no visible person, animal, or uniform. The scene appears to be a static structure with no clear indication of a person",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.567,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G505.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark outdoor area with pillars and a light source. There is no visible person, animal, or shadow. The scene appears to be empty, with no clear indication of a guard or a stranger. It",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.583,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G505.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark outdoor area with pillars and a light source, but there is no visible person, animal, or uniform. The scene appears to be a static structure with no clear indication of a person",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.149,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G505.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a structure with pillars and a light, but no person is visible. The scene is dark, and there are no clear signs of a person, animal, or guard. The lighting and shadows suggest a lackl,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.495,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G505.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a structure with pillars and a light, but no person is visible. The dark area is likely a shadow or a reflection, and there is no clear evidence of a person, animal, or guard. The lack",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.943,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G505.t240.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a structure with pillars and a light, but no person is visible. The scene is dark and there are no clear signs of a person, animal, or guard. The lighting and shadows suggest a static,",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.796,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G506.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark outdoor area with a building, columns, and benches. There is no visible person, animal, or reflection. The scene appears to be empty, and the only potential object is a shadow, ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.75,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G506.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark outdoor area with a building entrance, columns, and benches. There is no visible person, animal, or shadow that matches the description of a guard. The scene appears to be empty",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.492,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G506.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark outdoor area with a building, columns, and benches. There is no visible person, and the scene is too dark to see any clear details of a person, animal, or reflection. The object",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 5.116,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G509.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark, enclosed structure with stairs and railings, and there is no visible person, animal, or reflection. The scene is empty, and the lighting suggests it's night. The lack of any un",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 26.301,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G509.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark, enclosed structure with stairs and railings, and there is no visible person, animal, or reflection. The scene appears to be a dark outdoor area with no clear indication of a 'g",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.827,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.bus.G509.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark, enclosed structure with stairs and railings, and there is no visible person, animal, or reflection. The scene is empty, and the only light source is from the camera, making it ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.493,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.hospital.G476.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a building with a dark, rectangular shape that appears to be a person in the foreground, but the details are too blurry and indistinct to confirm it as a guard, stranger, animal, or a ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.806,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.hospital.G476.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image is a night-vision view of a building, but there is no visible person, animal, or guard. The scene appears to be empty, with no clear evidence of a person, and the image is grainy and low in ",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.634,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.hospital.G476.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a building with a dark, rectangular shape that is likely a shadow or a reflection, and there is no visible person, animal, or uniform. The scene appears to be a static, non-lit area, a",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.618,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.hospital.G479.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "guard"
+   },
+   "reason": "The image shows a building with a door and windows, and there is a faint outline of a person in the foreground. The person appears to be standing near the door, and the shape is consistent with a man.",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 25.598,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [
+    "who"
+   ],
+   "pass": false,
+   "repeat": 0
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.hospital.G479.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark, outdoor scene with a building and what appears to be a structure with vertical lines, possibly a security camera or a light source. There is no clear silhouette of a person, no",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.384,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 1
+  },
+  {
+   "case": "yard_threat:nobody/meva.2018-03-11.23-55-00.00-00-00.hospital.G479.t150.jpg",
+   "template": "yard_threat",
+   "expected": "ignore",
+   "expected_fields": {
+    "who": "nobody"
+   },
+   "decision": "ignore",
+   "fields": {
+    "who": "nobody"
+   },
+   "reason": "The image shows a dark, grainy scene with a structure that appears to be a building with windows and a door. There is no visible person, animal, or shadow in the frame. The scene is too blurry and ind",
+   "unsure_reason": null,
+   "rule": 2,
+   "confidence": 1.0,
+   "seconds": 4.497,
+   "error": null,
+   "raw": null,
+   "wrong_fields": [],
+   "pass": true,
+   "repeat": 2
+  }
+ ]
+}

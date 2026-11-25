@@ -71,6 +71,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A Look step's answer always closes.** Its reason had no bound, so a
+  small model could keep explaining until the token budget cut its JSON
+  off: 23 of 174 answers on the public night-yard cases came back
+  `invalid_output`. The answer's schema now caps the reason at 200
+  characters and the prompt asks for one short sentence: 0 cut off, and
+  the pass rate rose from 69% to 82%
+  (`examples/camera-agent/MODELS_AND_LATENCY.md`).
+
 - **A single sign-on administrator can reset 2FA, passwords and users
   again** (#998). Those actions asked for the administrator's own MFA
   code, which a single sign-on account never has and may not add, so every
