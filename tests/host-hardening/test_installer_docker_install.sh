@@ -14,7 +14,7 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 TESTS_RUN=0
 TESTS_FAILED=0
@@ -114,8 +114,11 @@ run_installer() {
     done
     rm -rf "$STATE"; mkdir -p "$STATE"; : > "$STATE/calls.log"
     rm -f "$SHIMS/docker"
+    # PRE_DOCKER: a docker shim that is already installed; RUN_IN: a checkout
+    # other than the repository.
+    [ -n "${PRE_DOCKER:-}" ] && cp "$PRE_DOCKER" "$SHIMS/docker"
     (
-        cd "$REPO_ROOT" || exit 99
+        cd "${RUN_IN:-$REPO_ROOT}" || exit 99
         printf '%s' "$input" | env -i HOME="$HOME" TERM=dumb \
             PATH="${SHIMS}:${TOOLS}" FAKE_STATE="$STATE" FAKE_SHIMS="$SHIMS" \
             OPENNVR_OS_RELEASE="$(os_release "$flavour")" "${envs[@]}" \
@@ -135,6 +138,7 @@ if [ "$rc" -eq 0 ] \
    && calls | grep -q "^sudo systemctl enable --now docker$" \
    && calls | grep -q "^sudo usermod -aG docker ${ME}$" \
    && calls | grep -q "^sg docker -c bash .*scripts/install.sh install" \
+   && calls | grep -q "^sudo apt-get install -y docker-ce " \
    && ! calls | grep -q "get.docker.com" \
    && ! calls | grep -qE "snap|docker\.io|docker-compose-v2"; then
     pass
@@ -236,10 +240,10 @@ fi
 
 # ── 5. a step that fails says which, why, and every way out ──────────
 start_test "apt-get install fails: the step, Ubuntu's docs page, the by-hand route, what was left"
-out=$(run_installer ubuntu "" OPENNVR_INSTALL_DOCKER=1 FAKE_FAIL="apt-get install -y -qq docker-ce"); rc=$?
+out=$(run_installer ubuntu "" OPENNVR_INSTALL_DOCKER=1 FAKE_FAIL="apt-get install -y docker-ce"); rc=$?
 if [ "$rc" -ne 0 ] \
    && echo "$out" | grep -q "Unable to locate package docker-ce (fake)" \
-   && echo "$out" | grep -q "Installing Docker failed at:  sudo apt-get install -y -qq docker-ce" \
+   && echo "$out" | grep -q "Installing Docker failed at:  sudo apt-get install -y docker-ce" \
    && echo "$out" | grep -q "https://docs.docker.com/engine/install/ubuntu/" \
    && echo "$out" | grep -q "usermod -aG docker ${ME}" \
    && echo "$out" | grep -q "OPENNVR_DOCKER_INSTALL=script" \
@@ -312,6 +316,142 @@ $(calls)
 output:
 $out"
 fi
+
+# ── 7. a checkout the user cannot write to stops it before the install ─
+# Seen on a fresh Ubuntu VM (2026-11-25): a `sudo git clone` checkout got
+# Docker installed, the installer re-ran as the docker group, and only then
+# said the folder belongs to root.
+start_test "a read-only checkout is named before Docker is offered"
+RO="$WORK/checkout"
+mkdir -p "$RO/scripts"
+cp "$REPO_ROOT/scripts/install.sh" "$RO/scripts/"
+cp "$REPO_ROOT/docker-compose.yml" "$RO/"
+chmod 555 "$RO"
+if [ -w "$RO" ]; then
+    skip "cannot make a folder read-only here"
+else
+    out=$(RUN_IN="$RO" run_installer ubuntu "" OPENNVR_INSTALL_DOCKER=1); rc=$?
+    if [ "$rc" -ne 0 ] && echo "$out" | grep -q "is not writable by ${ME}" \
+       && ! echo "$out" | grep -q "Docker is not installed" \
+       && [ ! -s "$STATE/calls.log" ]; then
+        pass
+    else
+        fail "rc=${rc}; calls:
+$(calls)
+output:
+$out"
+    fi
+fi
+chmod 755 "$RO"
+
+# ── 8. in the docker group, but this shell started before that ──────
+# Same VM: after the chown, ./start.sh from the shell that ran the install
+# said "permission denied on the Docker socket" and told the user to run
+# usermod, which had already been done. The installer now carries on as the
+# group, the way it does right after installing Docker.
+DENIED="$WORK/docker.denied"
+cat > "$DENIED" <<'SHIM'
+#!/usr/bin/env bash
+case "$1 ${2:-}" in
+    "compose version") echo "Docker Compose version v2.29.0"; exit 0 ;;
+esac
+echo "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: dial unix /var/run/docker.sock: connect: permission denied" >&2
+exit 1
+SHIM
+chmod +x "$DENIED"
+# id: the group database lists docker for the user (FAKE_IN_GROUP=1); this
+# process has it only as the sg re-run (OPENNVR_AS_DOCKER_GROUP=1), as a
+# real sg would give it.
+REAL_ID=$(command -v id)
+cat > "$SHIMS/id" <<SHIM
+#!/usr/bin/env bash
+if [ "\$1" = -nG ]; then
+    if [ -n "\${2:-}" ]; then
+        [ "\${FAKE_IN_GROUP:-0}" = 1 ] && echo "\$($REAL_ID -un) docker" || $REAL_ID -un
+    else
+        [ -n "\${OPENNVR_AS_DOCKER_GROUP:-}" ] && echo "\$($REAL_ID -un) docker" || $REAL_ID -un
+    fi
+    exit 0
+fi
+exec $REAL_ID "\$@"
+SHIM
+chmod +x "$SHIMS/id"
+
+start_test "in the group but not this shell: continues under sg, no usermod"
+out=$(PRE_DOCKER="$DENIED" run_installer ubuntu "" FAKE_IN_GROUP=1); rc=$?
+if [ "$rc" -eq 0 ] && calls | grep -q "^sg docker -c bash .*scripts/install.sh install$" \
+   && echo "$out" | grep -q "this shell started before that" \
+   && ! calls | grep -q "usermod" && ! echo "$out" | grep -q "permission denied on the Docker socket"; then
+    pass
+else
+    fail "rc=${rc}; calls:
+$(calls)
+output:
+$out"
+fi
+
+start_test "the re-run (with the group) still refused: the socket's owner, no usermod, no second sg"
+out=$(PRE_DOCKER="$DENIED" run_installer ubuntu "" FAKE_IN_GROUP=1 OPENNVR_AS_DOCKER_GROUP=1); rc=$?
+if [ "$rc" -ne 0 ] && ! calls | grep -q "^sg " \
+   && echo "$out" | grep -q "already has the docker group, and the socket still refuses it" \
+   && echo "$out" | grep -q "ls -l /var/run/docker.sock" \
+   && ! echo "$out" | grep -q "sudo usermod"; then
+    pass
+else
+    fail "rc=${rc}; calls:
+$(calls)
+output:
+$out"
+fi
+
+# sg that cannot switch quietly (a group password, LDAP): its exec would end
+# the installer with sg's own error, so the hint is printed instead.
+start_test "sg cannot switch: the newgrp hint, no exec"
+mv "$SHIMS/sg" "$WORK/sg.keep"
+printf '#!/usr/bin/env bash\nprintf "sg %%s\\n" "$*" >> "$FAKE_STATE/calls.log"\necho "sg: failed to crypt password" >&2\nexit 1\n' > "$SHIMS/sg"
+chmod +x "$SHIMS/sg"
+out=$(PRE_DOCKER="$DENIED" run_installer ubuntu "" FAKE_IN_GROUP=1); rc=$?
+mv "$WORK/sg.keep" "$SHIMS/sg"
+if [ "$rc" -ne 0 ] && ! calls | grep -q "^sg docker -c bash" \
+   && echo "$out" | grep -q "already in the docker group; this shell started before that" \
+   && echo "$out" | grep -q "newgrp docker" \
+   && ! echo "$out" | grep -q "sudo usermod"; then
+    pass
+else
+    fail "rc=${rc}; calls:
+$(calls)
+output:
+$out"
+fi
+
+DOWN="$WORK/docker.down"
+sed 's/^echo "permission denied.*/echo "Cannot connect to the Docker daemon at unix:\/\/\/var\/run\/docker.sock. Is the docker daemon running?" >\&2/' "$DENIED" > "$DOWN"
+chmod +x "$DOWN"
+start_test "in the group but the daemon is down: 'not running', no sg"
+out=$(PRE_DOCKER="$DOWN" run_installer ubuntu "" FAKE_IN_GROUP=1); rc=$?
+if [ "$rc" -ne 0 ] && ! calls | grep -q "^sg " \
+   && echo "$out" | grep -q "Docker is not running" \
+   && ! echo "$out" | grep -q "this shell started before that"; then
+    pass
+else
+    fail "rc=${rc}; calls:
+$(calls)
+output:
+$out"
+fi
+
+start_test "not in the group at all: the usermod hint, no sg"
+out=$(PRE_DOCKER="$DENIED" run_installer ubuntu ""); rc=$?
+if [ "$rc" -ne 0 ] && ! calls | grep -q "^sg " \
+   && echo "$out" | grep -q "sudo usermod -aG docker ${ME}"; then
+    pass
+else
+    fail "rc=${rc}; calls:
+$(calls)
+output:
+$out"
+fi
+rm -f "$SHIMS/id"
 
 echo ""
 echo "Tests run: ${TESTS_RUN}, failed: ${TESTS_FAILED}"
