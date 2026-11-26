@@ -26,8 +26,16 @@ yard_threat:
     A camera in the yard detected a person at night. Say what is actually
     there: a guard on patrol (uniform, reflective vest, torch), a stranger,
     an animal, or nobody (a shadow, a bag, a reflection or an empty scene).
+    For a guard, say which sign of one you can see; if you can see none,
+    say none.
   decision: [ignore, alert]
-  fields: { who: [guard, stranger, animal, nobody] }
+  fields:
+    who: [guard, stranger, animal, nobody]
+    guard_sign: [uniform_or_vest, torch, none]
+  # A guard is ignored only on a sign the model can see. "Guard" with no
+  # sign is the step's worst mistake (a stranger let through), so it
+  # alerts: a false alarm costs a look, a missed stranger costs the site.
   rules:
     - { when: { who: stranger }, then: alert }
+    - { when: { who: guard, guard_sign: none }, then: alert }
     - { when: { who: [guard, animal, nobody] }, then: ignore }
