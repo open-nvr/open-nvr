@@ -45,7 +45,7 @@ import { ASPECT_OPTIONS, isCustomAspect } from '../lib/aspect'
 import { parseRtspUrl, rtspPortFromUrl, syncCameraIdentity } from '../lib/cameraIdentity'
 import type { IdentityField } from '../lib/cameraIdentity'
 import { formatDuration } from '../lib/time'
-import { stopSession } from '../lib/webcamSessions'
+import { stopSession, useWebcamSessions } from '../lib/webcamSessions'
 import { Modal } from '../components/Modal'
 import { useHostAgent } from '../components/HostWebcamPicker'
 import { ServerWebcamPicker } from '../components/ServerWebcamPicker'
@@ -265,6 +265,7 @@ export function Cameras() {
   // null while we genuinely don't know yet — the "Media Server is not running"
   // banner must not flash during the first round trip.
   const mediamtxAvailable = mtxQuery.isPending ? null : mtxQuery.data?.status === 'ok'
+  const webcamSessions = useWebcamSessions()
 
   useEffect(() => {
     if (camsQuery.isError) {
@@ -357,6 +358,21 @@ export function Cameras() {
     }
     if (c.live_online === true) return { variant: 'success', label: 'Online' }
     if (c.live_online === false) {
+      // A browser webcam has no source to dial: it is down because no tab is
+      // sending it, or because a tab is and its video cannot get through.
+      // Only this tab's own session is known here.
+      if (c.source_type === 'publisher' && !c.source_device) {
+        const mine = webcamSessions.find((s) => s.cameraId === c.id)
+        if (mine && mine.state.kind !== 'live') {
+          const reason = mine.state.kind === 'retrying' || mine.state.kind === 'error' ? mine.state.reason : 'Connecting'
+          return { variant: 'warning', label: "Can't reach server", title: reason }
+        }
+        return {
+          variant: 'warning',
+          label: 'Not publishing',
+          title: 'No browser is sending this webcam. Open its publish page on the device with the camera and press Start.',
+        }
+      }
       return { variant: 'warning', label: 'Disconnected', title: 'Stream not receiving data' }
     }
     // Unknown, NOT offline: the recorder keeps this state in memory and

@@ -286,6 +286,9 @@ def _to_spec(c: dict) -> CameraSpec:
         # This camera's overrides of the global knobs (tuning.py); the
         # per-camera fps there wins over the listing's fps and the env.
         tuning=tuning,
+        # An app keeps this camera at full decode right now (a class
+        # running). Absent on older cores = no lease.
+        stay_active=c.get("stay_active") is True,
     )
 
 

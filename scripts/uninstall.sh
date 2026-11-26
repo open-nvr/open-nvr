@@ -38,8 +38,8 @@
 #              of another stack runs is never touched.
 #   footage    cam-<n>*, orphaned, .evidence, .hevc_cache under RECORDINGS_PATH;
 #              anything else in that folder stays, and so does the folder.
-#   host       the update runner and the host agent, only when they run from
-#              this folder.
+#   host       the update runner, the host agent and the Docker-waits-for-NTP
+#              drop-ins, only when they come from this folder.
 #
 # No `docker ... prune` and no forced image or volume removal, ever: Docker's
 # own refusal is what protects something another container still uses.
@@ -378,6 +378,13 @@ host_agent_unit() {
 
 priv() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi; }
 
+# Docker waiting for NTP at boot (scripts/time-sync.sh), only if this folder
+# set it up: the drop-in names the folder it came from.
+TIME_SYNC_DROPIN="$SYSTEMD_DIR/docker.service.d/opennvr-time-sync.conf"
+time_sync_wait_ours() {
+    [ -f "$TIME_SYNC_DROPIN" ] && grep -qxF "# Installed by OpenNVR (./start.sh time-sync-wait) from $ROOT" "$TIME_SYNC_DROPIN"
+}
+
 show_list() {
     local title="$1" list="$2"
     [ -n "$list" ] || return 0
@@ -397,6 +404,9 @@ show_plan() {
         systemd) say "The update runner: the opennvr-update systemd timer (asks for sudo)" ;;
         launchd) say "The update runner: the org.opennvr.update launchd job" ;;
     esac
+    if [ "$TIME_SYNC" = 1 ]; then
+        say "Docker waiting for NTP at boot: the opennvr-time-sync.conf systemd drop-ins (asks for sudo)"
+    fi
     case "$HOST_AGENT" in
         systemd) say "The host agent: the $HOST_UNIT systemd service (asks for sudo)" ;;
         launchd) say "The host agent: the org.opennvr.host launchd job" ;;
@@ -643,6 +653,20 @@ remove_runner() {
     esac
 }
 
+remove_time_sync_wait() {
+    [ "$TIME_SYNC" = 1 ] || return 0
+    local unit
+    unit=$(sed -n 's/^# opennvr-enabled-unit=//p' "$TIME_SYNC_DROPIN")
+    [ -z "$unit" ] || priv systemctl disable "$unit" >/dev/null 2>&1 || true
+    # shellcheck disable=SC2046 # one path per word, none with spaces
+    if priv rm -f $(ls "$SYSTEMD_DIR"/*.service.d/opennvr-time-sync.conf 2>/dev/null); then
+        priv systemctl daemon-reload >/dev/null 2>&1 || true
+        ok "Docker no longer waits for NTP at boot"
+    else
+        failed "could not remove the time-sync drop-ins: ./start.sh time-sync-wait disable"
+    fi
+}
+
 remove_host_agent() {
     case "$HOST_AGENT" in
         systemd)
@@ -677,6 +701,7 @@ remove_firewall() {
 collect
 RUNNER="$(runner_unit)"
 HOST_AGENT="$(host_agent_unit)"
+TIME_SYNC=0; time_sync_wait_ours && TIME_SYNC=1
 REC_ROOT="$(recordings_root)"
 KEEP_HARDENING=0
 
@@ -701,6 +726,7 @@ printf '\n'
 # the runner is gone, so it is the last one.
 remove_runner
 remove_host_agent
+remove_time_sync_wait
 wait_for_update
 
 # Stop first, then remove. `docker rm -f` on a running container is a

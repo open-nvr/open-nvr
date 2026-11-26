@@ -92,6 +92,38 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Browser webcam that can't reach the server now says why, on the right side** (#1025).
+  The publish page used to blame the viewer's network for a missing port 8189.
+  It now names the router or firewall in front of the server, and explains why
+  it can work from home broadband but not from mobile data. The hint also
+  appears when a session that was live loses its path (laptop moved to a
+  hotspot). The Cameras list shows *Not publishing* or *Can't reach server*
+  for a browser webcam instead of a bare *Disconnected*. New
+  `docs/REMOTE_ACCESS.md` covers the 443 + 8189 forwards, two servers behind
+  one public IP, and how to check from the MediaMTX log.
+
+- **A step of the system clock no longer takes the media server "down" or
+  leaves recordings on the old time** (#1023). On a board with no
+  battery-backed clock, NTP can step the time long after the stack started
+  (seen: +50 min); an admin can also set it by hand. Core's cached MediaMTX
+  tokens are now re-minted as soon as the wall clock moves, instead of being
+  rejected as expired for up to four minutes. Core also watches for steps of
+  more than 10 s: it reconnects every recording camera stream (a 1-3 s gap),
+  because a stream connected before the step kept dating its segments by
+  the old clock, so footage landed at the wrong time and the camera read
+  "Recording stalled" while it recorded. Each step is written to the audit
+  log (`system.clock_jump`) with its size; footage recorded between the step
+  and the reconnect keeps its wrong time. The dashboard's health bar gains a
+  **Clock** chip: "Not synced" (a warning) while the kernel says no time
+  server disciplines the clock, the same flag `timedatectl` shows, and
+  "Changed +10 min" for an hour after a step. Hidden on Docker Desktop and
+  WSL2, whose host sets the clock without NTP. And on a Linux host with no
+  working hardware clock (none, or one reading before 2020), `up` offers once
+  to make Docker start after NTP has set the clock: a drop-in orders
+  `docker.service` after `time-sync.target` and enables the time service's
+  own wait (`systemd-time-wait-sync` or `chrony-wait`), capped at 120 s so an
+  offline site still starts. `./start.sh time-sync-wait status|enable|disable`;
+  `TIME_SYNC_WAIT=off` in `.env` opts out; `uninstall` removes it.
 - **A first `./start.sh` on a fresh Linux host no longer stops twice
   after installing Docker** (#1002). A checkout that belongs to root (cloned with
   `sudo git clone`) is now named before Docker is offered, not after it is

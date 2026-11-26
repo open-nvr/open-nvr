@@ -404,6 +404,17 @@ undetected while idle (it is still in the recording). Set
 `DETECT_DECODE_IDLE=none` for always-full decode when sub-second detector
 reaction matters more than CPU.
 
+Per camera and for a while, an app can ask for the same: a **stay-active
+lease** (`PUT /internal/app/cameras/{id}/stay-active`, core's listing
+then says `stay_active: true`). Attendly takes one on a room's camera
+for each class, because students sit still and an idling camera missed
+their faces for minutes. While it holds, the camera never idles, and a
+person the face route has not named after its attempts gets a crop of
+the current frame tried every 6 s (`FACE_RETRY_EVERY_S`) while in view
+— their best crop does not improve when they merely look up. The lease
+starting or ending restarts the camera's worker on the next reconcile
+tick.
+
 ## Candidate detectors & the eval harness
 
 YOLOv8n is the shipped default, but the detector rides a seam — and the

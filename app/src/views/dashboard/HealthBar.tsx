@@ -4,7 +4,7 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { clsx } from 'clsx'
-import { useTranslation } from '../../i18n'
+import { useDateFormat, useTranslation } from '../../i18n'
 import { useCameraStatusConnected } from '../../hooks/useCameraStatus'
 import {
   useCameras,
@@ -67,6 +67,21 @@ function acceleratorWord(effective: string): string {
   return first.replace('ExecutionProvider', '')
 }
 
+/** How long the Clock chip warns after the server's clock was stepped. */
+const CLOCK_JUMP_WARN_MS = 60 * 60 * 1000
+
+/** A clock step as an operator reads it: "+10 min", "−45 s", "+2 h 5 min". */
+function formatClockStep(deltaSeconds: number): string {
+  const sign = deltaSeconds < 0 ? '−' : '+'
+  const s = Math.round(Math.abs(deltaSeconds))
+  if (s < 60) return `${sign}${s} s`
+  const m = Math.round(s / 60)
+  if (m < 60) return `${sign}${m} min`
+  const h = Math.floor(m / 60)
+  const rest = m % 60
+  return `${sign}${h} h${rest ? ` ${rest} min` : ''}`
+}
+
 function formatUptime(s: number): string {
   const d = Math.floor(s / 86400)
   const h = Math.floor((s % 86400) / 3600)
@@ -83,6 +98,7 @@ function formatUptime(s: number): string {
  */
 export function HealthBar({ actions }: { actions?: ReactNode }) {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const core = useCoreHealth()
   const mtx = useMediaMtxHealth()
   const kaic = useKaiCHealth()
@@ -156,6 +172,35 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
     ? `${t0Backend.requested ? `${t0Backend.requested} requested · ` : ''}${t0Backend.effective || 'CPUExecutionProvider'} in use`
     : t0?.reason === 'unreachable' ? t('dashboard.health.detectionDownHint') : undefined
 
+  // The server's clock (#1023). Recording times, MFA codes and certificates
+  // all ride on it: unsynchronised is a standing warning, a step is one for
+  // an hour after it (streams were reconnected, but footage from just before
+  // carries the old time). No chip when sync cannot be known (Docker
+  // Desktop / WSL2, whose host sets the clock) and nothing has stepped it.
+  const clock = core.data?.clock
+  const jump = clock?.last_jump ?? null
+  const serverNow = core.data?.server_time ? Date.parse(core.data.server_time) : NaN
+  const jumpRecent = jump != null && Number.isFinite(serverNow)
+    && Math.abs(serverNow - Date.parse(jump.at)) < CLOCK_JUMP_WARN_MS
+  const clockLevel: Level = !clock ? 'unknown'
+    : clock.synchronized === false || jumpRecent ? 'warn'
+      : clock.synchronized ? 'ok' : 'unknown'
+  const showClock = clock != null && (clock.synchronized != null || jump != null)
+  const clockValue = jumpRecent && jump
+    ? t('dashboard.health.clockChanged', { delta: formatClockStep(jump.delta_seconds) })
+    : clock?.synchronized === false ? t('dashboard.health.clockNotSynced')
+      : clock?.synchronized ? t('dashboard.health.clockSynced') : '…'
+  const clockTitle = [
+    clock?.synchronized === false ? t('dashboard.health.clockNotSyncedHint') : null,
+    jump
+      ? t('dashboard.health.clockChangedHint', {
+          delta: formatClockStep(jump.delta_seconds),
+          time: fmt.dateTime(jump.at),
+          n: jump.streams_restarted,
+        })
+      : null,
+  ].filter(Boolean).join('\n\n') || undefined
+
   const problems: string[] = []
   if (coreLevel === 'crit') problems.push(t('dashboard.health.coreApi'))
   if (mtxLevel === 'crit') problems.push(t('dashboard.health.mediaServer'))
@@ -167,6 +212,7 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
   if (diskLevel === 'warn') warnings.push(rotationText && rotation?.unreachable ? rotationText : t('dashboard.health.storage'))
   if (resourceAlerts > 0) warnings.push(t('dashboard.health.resources'))
   if (!socketUp) warnings.push(t('dashboard.health.liveEvents'))
+  if (clockLevel === 'warn') warnings.push(`${t('dashboard.health.clock')}: ${clockValue}`)
 
   const overall: Level = problems.length ? 'crit' : warnings.length ? 'warn' : coreLevel === 'unknown' ? 'unknown' : 'ok'
   const verdict =
@@ -240,6 +286,14 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
           value={disk ? `${formatBytes(disk.free)} ${t('dashboard.free')}${rotation ? ` · ${t('dashboard.health.rotatingShort')}` : ''}` : diskLevel === 'crit' ? t('dashboard.health.error') : '…'}
           title={rotation?.description ?? (disk ? `${disk.path} · ${Math.round(disk.percent)}% ${t('dashboard.used')}` : res.data?.disk_error ?? undefined)}
         />
+        {showClock && (
+          <Chip
+            level={clockLevel}
+            label={t('dashboard.health.clock')}
+            value={clockValue}
+            title={clockTitle}
+          />
+        )}
       </div>
 
       <div className="ml-auto flex items-stretch shrink-0">

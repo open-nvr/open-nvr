@@ -207,6 +207,13 @@ class CameraSpec:
     # per-label object filters. Tuning() = inherit everything. Hashable,
     # so a change restarts the worker on the next reconcile tick.
     tuning: Tuning = Tuning()
+    # An app holds a stay-active lease on this camera (core's listing
+    # ``stay_active``; Attendly while a class runs): no idle decode, and
+    # people the face route has not named yet keep being tried on fresh
+    # crops (dispatch.FACE_RETRY_EVERY_S). Baked, so the lease starting
+    # or ending restarts the worker on the next reconcile tick — which
+    # starts ACTIVE anyway.
+    stay_active: bool = False
 
 
 def _tap_kind(url: str | None) -> str:
@@ -1312,9 +1319,31 @@ class CameraWorker:
         """The adaptive-decode state machine for this worker, or None when
         adaptive decode is off or the frames come from an injected source
         (no ffmpeg to flip). A seam: a test hands the loop an idle one."""
+        if self.spec.stay_active:
+            # A class is running: a student sitting still must not send
+            # the camera to keyframes-only and out of the face route.
+            log.info("tier0 %s: staying active (an app holds this camera awake)",
+                     self.spec.camera_id)
+            return None
         if self.decode_idle and self._frame_source is None:
             return AdaptiveDecode(self.decode_idle, self.decode_skip, self.decode_idle_after)
         return None
+
+    def _fresh_crop_for(self, frame):
+        """``track -> crop`` of THIS frame, for the face route's retries
+        on a camera that stays active. The frame is converted once, and
+        only if some track is actually due a retry."""
+        from .detector import to_bgr
+        from .tracking import _crop_bgr
+
+        held: list = []
+
+        def crop(track):
+            if not held:
+                held.append(to_bgr(frame.data, frame.width, frame.height))
+            return _crop_bgr(held[0], track.box, margin=0.25)
+
+        return crop
 
     def _run_gate(self, result, frame) -> None:
         """Gate the tracks (shadow by default) and publish the decisions (audit)."""
@@ -1336,7 +1365,9 @@ class CameraWorker:
                 # The face route keeps asking about people it started on
                 # while their crop improves (none on other cameras).
                 follow_up_faces(self.spec.camera_id, result.tracks, self.router,
-                                self.dispatcher, self._face_follow)
+                                self.dispatcher, self._face_follow,
+                                fresh_crop=self._fresh_crop_for(frame)
+                                if self.spec.stay_active else None)
         except Exception:
             log.debug("tier0 %s: gate error", self.spec.camera_id, exc_info=True)
 

@@ -21,6 +21,7 @@
 #   ./start.sh token        # re-print the first-time setup token
 #   ./start.sh update       # update to the latest release (scripts/update-host.sh)
 #   ./start.sh auto-update enable|disable|status   # the runner for in-app updates
+#   ./start.sh time-sync-wait enable|disable|status   # no RTC: Docker waits for NTP at boot
 #   ./start.sh host-agent install|uninstall|status|logs   # USB webcams + host monitoring
 #   ./start.sh uninstall    # remove OpenNVR, apps, data and footage (typed confirmation; --dry-run first)
 # ============================================================
@@ -2322,6 +2323,10 @@ run_up() {
     # shellcheck source=scripts/update-host.sh
     . "$(dirname "$0")/scripts/update-host.sh"
     run_update_runner_refresh || true
+    # No working RTC: Docker waits for NTP at boot (scripts/time-sync.sh, #1023).
+    # shellcheck source=scripts/time-sync.sh
+    . "$(dirname "$0")/scripts/time-sync.sh"
+    run_time_sync_wait_refresh || true
     print_community_links
 }
 
@@ -2577,6 +2582,14 @@ case "$COMMAND" in
     run_auto_update "${2:-status}"
     ;;
 
+  time-sync-wait)
+    # Hosts with no working RTC: Docker starts once NTP has set the clock.
+    # shellcheck source=scripts/time-sync.sh
+    . "$(dirname "$0")/scripts/time-sync.sh"
+    shift
+    run_time_sync_wait "$@"
+    ;;
+
   host-agent)
     # The agent on this machine: USB webcams and host monitoring.
     # shellcheck source=scripts/host-agent.sh
@@ -2595,7 +2608,7 @@ case "$COMMAND" in
 
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update|host-agent|uninstall]"
+    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update|time-sync-wait|host-agent|uninstall]"
     exit 1
     ;;
 esac
