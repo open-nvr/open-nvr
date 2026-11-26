@@ -921,10 +921,10 @@ def test_core_authenticates_its_own_admin_calls(monkeypatch) -> None:
     settings.mediamtx_admin_token was set, and nothing in the deployment
     ever set it."""
     sys.path.insert(0, str(REPO_ROOT / "server"))
+    from core.short_lived_token import ShortLivedTokenCache
     from services.mediamtx_admin_service import MediaMtxAdminService
 
-    monkeypatch.setattr(MediaMtxAdminService, "_token", None, raising=False)
-    monkeypatch.setattr(MediaMtxAdminService, "_token_until", 0.0, raising=False)
+    monkeypatch.setattr(MediaMtxAdminService, "_token_cache", ShortLivedTokenCache(240.0))
     monkeypatch.setattr(
         "services.mediamtx_jwt_service.MediaMtxJwtService.create_admin_token",
         classmethod(lambda cls, expiry_minutes=5: "minted.jwt.token"),
@@ -940,10 +940,10 @@ def test_a_failure_to_mint_does_not_break_the_call(monkeypatch) -> None:
     refuses with a 401 the caller already handles — not an exception from
     inside the header builder."""
     sys.path.insert(0, str(REPO_ROOT / "server"))
+    from core.short_lived_token import ShortLivedTokenCache
     from services.mediamtx_admin_service import MediaMtxAdminService
 
-    monkeypatch.setattr(MediaMtxAdminService, "_token", None, raising=False)
-    monkeypatch.setattr(MediaMtxAdminService, "_token_until", 0.0, raising=False)
+    monkeypatch.setattr(MediaMtxAdminService, "_token_cache", ShortLivedTokenCache(240.0))
     monkeypatch.setattr(
         "services.mediamtx_jwt_service.MediaMtxJwtService.create_admin_token",
         classmethod(lambda cls, expiry_minutes=5: (_ for _ in ()).throw(

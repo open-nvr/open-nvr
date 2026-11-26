@@ -40,15 +40,15 @@ This service maps our CameraConfig into PathConf fields and handles RTSP stream 
 NOTE: All public methods are async — callers must await them.
 """
 
+import asyncio
 import re
-import threading
-import time
 from typing import Any
 
 import httpx
 
 from core.config import settings
 from core.logging_config import mediamtx_logger
+from core.short_lived_token import ShortLivedTokenCache
 from services.storage_service import get_effective_recordings_base_path
 from services.stream_service import _build_stream_name
 from utils.path_mapper import get_mediamtx_recording_path
@@ -358,14 +358,12 @@ def _validate_patch_payload(payload: dict[str, Any]) -> None:
 class MediaMtxAdminService:
     """Async HTTP client wrapper for MediaMTX admin API v3."""
 
-    #: Cached admin JWT and the monotonic time it stops being usable.
-    #: create_admin_token() mints a 5-minute token and signing is RSA, so
-    #: minting one per call would put a signature on every path read.
-    #: Refreshed a minute early, because a token that expires in flight
-    #: is a 401 on a real operation.
-    _token: str | None = None
-    _token_until: float = 0.0
-    _token_lock = threading.Lock()
+    #: Cached admin JWT. create_admin_token() mints a 5-minute token and
+    #: signing is RSA, so minting one per call would put a signature on
+    #: every path read. Refreshed a minute early, because a token that
+    #: expires in flight is a 401 on a real operation; and re-minted at
+    #: once when the wall clock jumps (issue #1023).
+    _token_cache = ShortLivedTokenCache(reuse_s=240.0)
 
     @classmethod
     def _admin_token(cls) -> str | None:
@@ -376,24 +374,19 @@ class MediaMtxAdminService:
             # static credential still wins: their token is not ours to
             # replace.
             return settings.mediamtx_admin_token
-        now = time.monotonic()
-        with cls._token_lock:
-            if cls._token and now < cls._token_until:
-                return cls._token
-            try:
-                from services.mediamtx_jwt_service import MediaMtxJwtService
+        from services.mediamtx_jwt_service import MediaMtxJwtService
 
-                cls._token = MediaMtxJwtService.create_admin_token(expiry_minutes=5)
-                cls._token_until = now + 240.0
-            except Exception as exc:  # noqa: BLE001
-                # Do not fail the call here — let MediaMTX answer 401 and
-                # the caller's own error path report it. The one time
-                # this legitimately happens is the first seconds after
-                # boot, before core has written its signing key.
-                mediamtx_logger.warning(
-                    "could not mint a MediaMTX admin token: %s", exc)
-                cls._token, cls._token_until = None, 0.0
-            return cls._token
+        try:
+            return cls._token_cache.get(
+                lambda: MediaMtxJwtService.create_admin_token(expiry_minutes=5))
+        except Exception as exc:  # noqa: BLE001
+            # Do not fail the call here — let MediaMTX answer 401 and
+            # the caller's own error path report it. The one time
+            # this legitimately happens is the first seconds after
+            # boot, before core has written its signing key.
+            mediamtx_logger.warning(
+                "could not mint a MediaMTX admin token: %s", exc)
+            return None
 
     @classmethod
     def _headers(cls) -> dict[str, str]:
@@ -1621,6 +1614,100 @@ class MediaMtxAdminService:
             except Exception:  # pragma: no cover - best effort
                 pass
         return MediaMtxAdminService._to_result(name, resp)
+
+    @staticmethod
+    async def restart_recording_paths(
+        *, pause_s: float = 1.0, add_attempts: int = 3
+    ) -> dict[str, list[str]]:
+        """Reconnect every recording camera path, keeping its exact config.
+
+        After the wall clock jumps, MediaMTX keeps dating a stream's
+        segments from the clock as it was when the source connected: its
+        NTP estimator compares "now" on Go's monotonic clock, so a step of
+        the wall clock never resets it (issue #1023). Only a new source
+        does. Replacing a path with identical config is a no-op in
+        MediaMTX, so this deletes the path and adds its own config back:
+        a 1-3 s gap in that camera's live view and recording, and segments
+        dated by the corrected clock from then on.
+
+        The live config is re-added as is, not rebuilt from the database,
+        so whatever is running (a paused recording, a hand override)
+        survives. Camera paths only (``mediamtx_stream_prefix``), and only
+        those recording: a live-only path's timestamps are not kept.
+        Sequential with a pause, so a large site does not see a burst of
+        config reloads.
+        """
+        done: dict[str, list[str]] = {"restarted": [], "failed": []}
+        if not MediaMtxAdminService.is_configured():
+            return done
+
+        base = MediaMtxAdminService._base()
+        prefix = settings.mediamtx_stream_prefix
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            confs: list[dict[str, Any]] = []
+            for page in range(_PATHS_MAX_PAGES):
+                resp = await client.get(
+                    base + "/config/paths/list",
+                    headers=MediaMtxAdminService._headers(),
+                    params={"itemsPerPage": _PATHS_PAGE_SIZE, "page": page},
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                confs.extend(i for i in body.get("items") or [] if isinstance(i, dict))
+                if page + 1 >= int(body.get("pageCount") or 1):
+                    break
+
+            targets = [
+                c for c in confs
+                if str(c.get("name") or "").startswith(prefix) and c.get("record")
+            ]
+            for i, conf in enumerate(targets):
+                if i:
+                    await asyncio.sleep(pause_s)
+                name = str(conf["name"])
+                try:
+                    resp = await client.delete(
+                        base + f"/config/paths/delete/{name}",
+                        headers=MediaMtxAdminService._headers(),
+                    )
+                    if resp.status_code == 404:
+                        continue  # removed meanwhile (camera deleted/paused)
+                    resp.raise_for_status()
+                except Exception as exc:
+                    mediamtx_logger.warning(
+                        "clock jump: could not remove path %s for restart: %s", name, exc)
+                    done["failed"].append(name)
+                    continue
+
+                added, err = False, "not attempted"
+                for attempt in range(add_attempts):
+                    try:
+                        resp = await client.post(
+                            base + f"/config/paths/add/{name}",
+                            headers=MediaMtxAdminService._headers(),
+                            json=conf,
+                        )
+                        # "path already exists": a concurrent provision put
+                        # it back first, which is just as good.
+                        if resp.is_success or (
+                            resp.status_code == 400 and "already exists" in resp.text
+                        ):
+                            added = True
+                            break
+                        err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    except Exception as exc:
+                        err = str(exc)
+                    await asyncio.sleep(attempt + 1)
+                if added:
+                    done["restarted"].append(name)
+                else:
+                    # The camera is now without a path until the next
+                    # provision (camera save or core restart). Say so loudly.
+                    mediamtx_logger.error(
+                        "clock jump: path %s removed but could not be re-added: %s",
+                        name, err)
+                    done["failed"].append(name)
+        return done
 
     @staticmethod
     async def path_status(camera_id: int, camera_ip: str) -> dict[str, Any]:

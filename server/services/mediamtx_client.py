@@ -31,7 +31,6 @@ Provides:
 from __future__ import annotations
 
 import asyncio
-import threading
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -40,6 +39,7 @@ import httpx
 
 from core.config import settings
 from core.logging_config import recording_logger
+from core.short_lived_token import ShortLivedTokenCache
 
 # Cap concurrent MediaMTX requests so a large camera fleet can't stampede it.
 _FANOUT_LIMIT = 8
@@ -116,10 +116,8 @@ async def check_available() -> bool:
     return available
 
 
-#: Cached playback JWT and when it stops being usable (monotonic).
-_playback_token: str | None = None
-_playback_token_until: float = 0.0
-_playback_token_lock = threading.Lock()
+#: Cached playback JWT; see core.short_lived_token for why both clocks.
+_playback_token_cache = ShortLivedTokenCache(reuse_s=240.0)
 
 
 def playback_auth() -> dict[str, str]:
@@ -141,22 +139,16 @@ def playback_auth() -> dict[str, str]:
     MediaMTX with a 401 that the caller already handles as "unavailable",
     rather than here with an exception it does not.
     """
-    global _playback_token, _playback_token_until
-    now = time.monotonic()
-    with _playback_token_lock:
-        if _playback_token and now < _playback_token_until:
-            return {"jwt": _playback_token}
-        try:
-            from services.mediamtx_jwt_service import MediaMtxJwtService
+    from services.mediamtx_jwt_service import MediaMtxJwtService
 
-            _playback_token = MediaMtxJwtService.create_admin_token(expiry_minutes=5)
-            _playback_token_until = now + 240.0
-        except Exception as exc:  # noqa: BLE001
-            recording_logger.warning(
-                f"could not mint a MediaMTX playback token: {exc}")
-            _playback_token, _playback_token_until = None, 0.0
-            return {}
-        return {"jwt": _playback_token}
+    try:
+        token = _playback_token_cache.get(
+            lambda: MediaMtxJwtService.create_admin_token(expiry_minutes=5))
+    except Exception as exc:  # noqa: BLE001
+        recording_logger.warning(
+            f"could not mint a MediaMTX playback token: {exc}")
+        return {}
+    return {"jwt": token}
 
 
 def _fmt_rfc3339(dt: datetime) -> str:
