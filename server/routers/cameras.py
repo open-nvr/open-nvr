@@ -2122,6 +2122,7 @@ async def delete_camera(
                     "camera_name": camera_name,
                     "deleted_at": camera.deleted_at.isoformat(),
                     "stream_teardown": (teardown or {}).get("status", "failed"),
+                    "stream_teardown_http_status": (teardown or {}).get("http_status"),
                     "skill_claims_released": released_claims,
                 },
                 ip=request.client.host if request and request.client else None,
