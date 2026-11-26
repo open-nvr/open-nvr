@@ -19,6 +19,8 @@ import { webcamOfflineLabel } from '../../../lib/hostAgent'
 import { OverlayLayersButton } from '../../../components/live/OverlayLayersButton'
 
 const TOUR_MS = 15_000
+/** How long before a page flip the next page starts playing, hidden. */
+const PRELOAD_LEAD_MS = 5_000
 const SLOT_OPTIONS = [1, 4, 6, 9] as const
 type Slots = (typeof SLOT_OPTIONS)[number]
 
@@ -227,11 +229,28 @@ export function LiveWallWidget({ editing, onRemove }: { editing?: boolean; onRem
 
   const touring = prefs.tour && pages > 1 && !spotCam && !editing
   const paused = hover || !visible
+  // The page started early, hidden under the one showing (as on a tour wall),
+  // so a flip never shows "Connecting…".
+  const [preloadPage, setPreloadPage] = useState<number | null>(null)
   useEffect(() => {
     if (!touring || paused) return
-    const id = window.setTimeout(() => setPage((p) => (p + 1) % pages), TOUR_MS)
-    return () => window.clearTimeout(id)
+    const nextPage = (current + 1) % pages
+    const warm = window.setTimeout(() => setPreloadPage(nextPage), Math.max(0, TOUR_MS - PRELOAD_LEAD_MS))
+    const id = window.setTimeout(() => setPage(nextPage), TOUR_MS)
+    return () => {
+      window.clearTimeout(warm)
+      window.clearTimeout(id)
+      // Held (hover, hidden tab, spotlight) the hidden page stops: it would
+      // otherwise keep a second page of streams open for as long as it lasts.
+      setPreloadPage(null)
+    }
   }, [touring, paused, current, pages])
+  const pageCams = (p: number) => ordered.slice(p * prefs.slots, p * prefs.slots + prefs.slots)
+  const upNext = preloadPage != null && preloadPage !== current && preloadPage < pages ? preloadPage : null
+  const gridStyle = (n: number) => {
+    const [c, r] = gridFor(n)
+    return { gridTemplateColumns: `repeat(${c}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${r}, minmax(0, 1fr))` }
+  }
 
   const step = (d: number) => setPage((p) => (Math.min(p, pages - 1) + d + pages) % pages)
 
@@ -301,20 +320,41 @@ export function LiveWallWidget({ editing, onRemove }: { editing?: boolean; onRem
             </Link>
           </div>
         ) : (
-          <div
-            className="absolute inset-0 grid gap-px bg-[#1a1f29]"
-            style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))` }}
-          >
-            {tiles.map((c) => (
-              <LiveTile
-                key={c.id}
-                cam={c}
-                playing={visible}
-                spotlit={spotCam?.id === c.id}
-                onSpotlight={() => setSpotlight((s) => (s === c.id ? null : c.id))}
-              />
-            ))}
-          </div>
+          <>
+            {/* The page on screen. Keyed by page, so the page started early
+                is this same element once it shows, already playing; tiles
+                are keyed by camera, so a spotlit camera keeps its stream. */}
+            <div
+              key={`page-${current}-${prefs.slots}`}
+              className="absolute inset-0 z-[1] grid gap-px bg-[#1a1f29]"
+              style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))` }}
+            >
+              {tiles.map((c) => (
+                <LiveTile
+                  key={c.id}
+                  cam={c}
+                  playing={visible}
+                  spotlit={spotCam?.id === c.id}
+                  onSpotlight={() => setSpotlight((s) => (s === c.id ? null : c.id))}
+                />
+              ))}
+            </div>
+            {/* Under the page on screen, which covers it: not opacity 0, as
+                Chrome does not start a video it is told is invisible. */}
+            {upNext != null && (
+              <div
+                key={`page-${upNext}-${prefs.slots}`}
+                aria-hidden="true"
+                inert
+                className="absolute inset-0 z-0 pointer-events-none grid gap-px bg-[#1a1f29]"
+                style={gridStyle(pageCams(upNext).length)}
+              >
+                {pageCams(upNext).map((c) => (
+                  <LiveTile key={c.id} cam={c} playing={visible} spotlit={false} onSpotlight={() => undefined} />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
     </WidgetFrame>
