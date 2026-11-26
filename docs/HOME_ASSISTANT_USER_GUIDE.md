@@ -151,6 +151,29 @@ with the picture and clip (a blueprint is shipped:
 when the token is revoked, and an Assist tool that answers "what's on the
 driveway camera" from the same data.
 
+## OpenNVR calling Home Assistant (workflows)
+
+The two ways above bring OpenNVR into Home Assistant. The other way round,
+a workflow's `home_assistant` action calls a Home Assistant service:
+unlock a door, turn on the floodlights, arm the alarm.
+
+1. In Home Assistant, create a user for OpenNVR that may do only what the
+   workflows should, log in as it, and make a **long-lived access token**
+   (profile → *Security*).
+2. In OpenNVR, *Settings → Integrations → Add → Home Assistant*: the Home
+   Assistant URL (`http://homeassistant.local:8123`) and the token. *Test*
+   checks both.
+3. In a workflow:
+
+   ```yaml
+   "Let in":
+     - home_assistant: { service: lock.unlock, data: { entity_id: lock.gate } }
+   ```
+
+The action moves things, so it may only follow a person's reply or a plain
+rule ([WORKFLOWS.md](WORKFLOWS.md#4-the-safety-rule)). With more than one
+Home Assistant integration, name it: `to: house`.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
