@@ -3,13 +3,14 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-// The entrance, right now, beside the figures about it.
+// One of an app's cameras, live, beside the figures about it.
 //
-// The rest of the page is history: what was screened, how it scored,
-// who was flagged. This is the one panel that answers "what is
-// happening at the door" — and with the app's own boxes drawn on it, it
-// also shows the screening logic working, which is the difference
-// between trusting a compliance figure and merely reading one.
+// The rest of an app page is history and counters: what was screened,
+// what went missing, who was flagged. This is the one panel that answers
+// "what is happening there now" — and with the app's own boxes drawn on
+// it, it also shows the app's logic working, which is the difference
+// between trusting a figure and merely reading one. Used by the guard
+// compliance page and by every app's own page (views/AppView.tsx).
 //
 // Lifted from LiveView's tile (views/LiveView.tsx), minus the drag,
 // PTZ and camera-assignment machinery a dashboard panel has no use for.
@@ -27,21 +28,38 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CameraOff, Minimize2, PictureInPicture2, Settings2, VideoOff } from 'lucide-react'
+import { OverlayLayersButton } from './OverlayLayersButton'
 import { apiService } from '../../lib/apiService'
 import { rebaseToCurrentOrigin } from '../../lib/streamUrl'
 import { useCameraStatus } from '../../hooks/useCameraStatus'
-import { VideoPlayer } from '../../components/VideoPlayer'
-import { Card, CardContent } from '../../components/ui'
+import { VideoPlayer } from '../VideoPlayer'
+import { Card, CardContent } from '../ui'
 
 type Urls = { whep?: string; hls?: string; token?: string }
 
 /** Where the floating panel was last left. */
 const POS_KEY = 'opennvr.guardscan.livePos'
+/** …and how big it was made. */
+const SIZE_KEY = 'opennvr.liveCameraPanel.popSize'
+const SIZE_DEFAULT = { w: 420, h: 300 }
+//: Small enough to tuck in a corner, never so small the picture is lost.
+const SIZE_MIN = { w: 280, h: 190 }
+
+type Corner = 'nw' | 'ne' | 'sw' | 'se'
+const CORNERS: { corner: Corner; place: string; cursor: string; path: string }[] = [
+  { corner: 'nw', place: 'left-0 top-0', cursor: 'cursor-nwse-resize', path: 'M2 10 L10 2 M2 14 L14 2' },
+  { corner: 'ne', place: 'right-0 top-0', cursor: 'cursor-nesw-resize', path: 'M6 2 L14 10 M2 2 L14 14' },
+  { corner: 'sw', place: 'left-0 bottom-0', cursor: 'cursor-nesw-resize', path: 'M2 6 L10 14 M2 2 L14 14' },
+  { corner: 'se', place: 'right-0 bottom-0', cursor: 'cursor-nwse-resize', path: 'M14 6 L6 14 M14 2 L2 14' },
+]
 
 export function LiveCameraPanel({
   cameraId, cameraName, cameras = [], onSelectCamera, emptyMessage, onPickCameras,
-  overlayEnabled, popped = false, onTogglePop,
+  overlayEnabled, popped = false, onTogglePop, layerScope = 'app',
 }: {
+  /** The view, for the overlay layers it keeps (lib/overlayLayerStore):
+   *  'app:<app id>' on an app's page. */
+  layerScope?: string
   cameraId: number | null
   cameraName: string
   /** The cameras this panel may show — the app's picked cameras. With
@@ -76,6 +94,58 @@ export function LiveCameraPanel({
     }
   })
   const dragFrom = useRef<{ x: number; y: number } | null>(null)
+
+  // How big the floating panel is. A grip on every corner; each keeps
+  // the OPPOSITE corner where it is, as window managers do.
+  const [size, setSize] = useState(() => {
+    try {
+      const v = JSON.parse(window.localStorage.getItem(SIZE_KEY) || 'null')
+      return v && typeof v.w === 'number' && typeof v.h === 'number'
+        ? { w: Math.max(SIZE_MIN.w, v.w), h: Math.max(SIZE_MIN.h, v.h) }
+        : SIZE_DEFAULT
+    } catch {
+      return SIZE_DEFAULT
+    }
+  })
+  const startResize = (corner: Corner) => (down: React.PointerEvent) => {
+    down.preventDefault()
+    down.stopPropagation()
+    const grip = down.currentTarget as HTMLElement
+    grip.setPointerCapture(down.pointerId)
+    const from = { x: down.clientX, y: down.clientY, w: size.w, h: size.h, px: pos.x, py: pos.y }
+    // Growing to the left or up moves only the far edges; the panel is
+    // placed by its right and bottom offsets, so growing to the right or
+    // down also shifts those by the same amount.
+    const east = corner === 'ne' || corner === 'se'
+    const south = corner === 'sw' || corner === 'se'
+    let at = { w: from.w, h: from.h, x: from.px, y: from.py }
+    const move = (e: PointerEvent) => {
+      const dx = e.clientX - from.x
+      const dy = e.clientY - from.y
+      const w = Math.round(Math.min(window.innerWidth - 16, Math.max(SIZE_MIN.w, from.w + (east ? dx : -dx))))
+      const h = Math.round(Math.min(window.innerHeight - 16, Math.max(SIZE_MIN.h, from.h + (south ? dy : -dy))))
+      at = {
+        w, h,
+        x: east ? from.px + (w - from.w) : from.px,
+        y: south ? from.py + (h - from.h) : from.py,
+      }
+      setSize({ w: at.w, h: at.h })
+      setPos({ x: at.x, y: at.y })
+    }
+    const up = () => {
+      grip.releasePointerCapture(down.pointerId)
+      grip.removeEventListener('pointermove', move)
+      grip.removeEventListener('pointerup', up)
+      try {
+        window.localStorage.setItem(SIZE_KEY, JSON.stringify({ w: at.w, h: at.h }))
+        window.localStorage.setItem(POS_KEY, JSON.stringify({ x: at.x, y: at.y }))
+      } catch {
+        // Not remembering a size is not an error.
+      }
+    }
+    grip.addEventListener('pointermove', move)
+    grip.addEventListener('pointerup', up)
+  }
 
   const startDrag = (down: React.PointerEvent) => {
     if (!popped) return
@@ -155,12 +225,27 @@ export function LiveCameraPanel({
     // must not do to a live picture.
     <Card
       className={popped
-        ? 'fixed z-40 flex w-[420px] flex-col shadow-2xl'
+        ? 'fixed z-40 flex flex-col shadow-2xl'
         : 'h-full'}
       style={popped
-        ? { right: 24 - pos.x, bottom: 24 - pos.y, height: 300 }
+        ? { right: 24 - pos.x, bottom: 24 - pos.y, width: size.w, height: size.h }
         : undefined}
     >
+      {popped && CORNERS.map(({ corner, place, cursor, path }) => (
+        <div
+          key={corner}
+          role="separator"
+          aria-label="Resize the floating camera"
+          title="Drag to resize"
+          onPointerDown={startResize(corner)}
+          className={`absolute z-10 h-3 w-3 touch-none ${place} ${cursor}`}
+        >
+          {/* The usual two-stroke resize grip, drawn into its corner. */}
+          <svg viewBox="0 0 16 16" className="h-3 w-3 text-[var(--text-dim)]" aria-hidden="true">
+            <path d={path} stroke="currentColor" strokeWidth="1.5" fill="none" />
+          </svg>
+        </div>
+      ))}
       <CardContent className="flex h-full flex-col gap-2 p-3">
         {/* No expand button of our own: the player carries one in its
             own controls — which its layout keeps at every size, down to
@@ -190,6 +275,10 @@ export function LiveCameraPanel({
               {cameraName || 'Live'}
             </h3>
           )}
+          <div className="ml-auto flex items-center gap-0.5">
+          {/* What is drawn on the picture: shared with every view of
+              this camera (components/live/OverlayLayersButton). */}
+          <OverlayLayersButton cameraId={cameraId} scope={layerScope} />
           {onTogglePop && (
             <button
               type="button"
@@ -198,7 +287,7 @@ export function LiveCameraPanel({
               title={popped
                 ? 'Dock it back beside the list'
                 : 'Float it — drag by this bar to put it where you want'}
-              className="ml-auto rounded p-1 text-[var(--text-dim)]
+              className="rounded p-1 text-[var(--text-dim)]
                          hover:bg-[var(--panel)] hover:text-[var(--text)]"
             >
               {/* Not an ✕. A cross on a floating panel reads as "close
@@ -207,6 +296,7 @@ export function LiveCameraPanel({
               {popped ? <Minimize2 size={13} /> : <PictureInPicture2 size={13} />}
             </button>
           )}
+          </div>
         </div>
 
         <div className="min-h-[112px] flex-1 overflow-hidden rounded bg-black">
@@ -237,6 +327,7 @@ export function LiveCameraPanel({
               onAuthExpired={handleAuthExpired}
               cameraId={cameraId}
               showDetections
+              overlayScope={layerScope}
               className="h-full w-full"
             />
           ) : (

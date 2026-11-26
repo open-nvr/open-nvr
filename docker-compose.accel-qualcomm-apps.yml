@@ -183,6 +183,28 @@ services:
       timeout: 5s
       start_period: 900s
       retries: 20
+  # Not an adapter: an app that runs its own model (FastSAM-s), built with
+  # onnxruntime-qnn and given the NPU. ~14 ms a frame on the HTP against
+  # ~850 ms on the CPU; at the CPU's ~1 frame a second the missing-bar rule
+  # ran short of looks and raised false alarms. Falls back to the CPU, and
+  # says so in its log, when the NPU cannot be used.
+  gold-bar-desk:
+    profiles: [apps, gold-bar-desk]
+    build:
+      args:
+        ACCEL: qualcomm
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
+    environment:
+      - GOLD_BAR_DESK_ONNX_PROVIDERS=${GOLD_BAR_DESK_ONNX_PROVIDERS:-QNNExecutionProvider:htp}
 
 volumes:
   opennvr_siglip_qnn_cache:

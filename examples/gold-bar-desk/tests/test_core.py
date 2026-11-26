@@ -86,6 +86,8 @@ class Scene:
 def monitor(scene, bars_at_start=0, **settings):
     events = []
     s = DeskSettings(**{"learn_s": 3.0, "missing_after_s": 10.0, "extra_after_s": 10.0,
+                        # Old rule unless a test asks for the "with the worker" stage.
+                        "bars_with_worker": 0,
                         "missing_min_frames": 10,
                         "default_bar_area": BAR_W * BAR_H / (W * H), **settings})
     mon = DeskMonitor(scene.segment, zones(), s, events.append, bars_at_start=bars_at_start)
@@ -175,8 +177,13 @@ def test_a_starved_camera_pauses_the_missing_alarm_and_says_so():
     t = run(mon, scene, t, 120, step=2.5)
     assert alerts(events, "bar_missing") == []
     assert mon.too_slow is True
+    # The rate that paused it is kept, not re-measured later: asked a
+    # moment afterwards it has often recovered, and "1.1 fps; needs 1"
+    # read as nonsense on the page.
+    assert mon.slow_fps == pytest.approx(0.4)
     run(mon, scene, t, 40, step=0.5)
     assert mon.too_slow is False
+    assert mon.slow_fps is None
     assert len(alerts(events, "bar_missing")) == 1
 
 
@@ -327,7 +334,84 @@ def test_recount_starts_the_shift_again():
     assert mon.baseline == 11
 
 
+def test_a_new_shift_asked_mid_frame_is_applied_by_the_next_frame():
+    """Actions run on the web server's thread. A shift reset that landed
+    while a frame was being analysed crashed it; now it is a request the
+    next frame applies, so nothing is reset under a frame in flight."""
+    scene = Scene(12)
+    mon, events = monitor(scene, bars_at_start=12)
+    t = run(mon, scene, 0, 5)
+    mon.request_new_shift(0)
+    assert mon.baseline == 12               # not yet: no frame since
+    t = run(mon, scene, t, 1)
+    assert mon.baseline is None             # learning again
+    t = run(mon, scene, t, 40)
+    assert mon.baseline == 12
+    mon.request_new_shift(11)
+    run(mon, scene, t, 1)
+    assert mon.baseline == 11
+
+
+def test_acknowledge_is_applied_by_the_next_frame():
+    scene = Scene(12)
+    mon, events = monitor(scene, bars_at_start=12)
+    t = run(mon, scene, 0, 5)
+    scene.bars.pop()
+    t = run(mon, scene, t, 30)
+    assert mon.count_alarm == "missing"
+    mon.request_acknowledge()
+    run(mon, scene, t, 0.5)
+    assert mon.count_alarm is None
+
+
 @pytest.mark.parametrize("value", [0.0012, "0.0012"])
 def test_settings_come_from_config(value):
     s = DeskSettings.from_config({"default_bar_area": value, "unknown": 3})
     assert s.default_bar_area == pytest.approx(0.0012)
+
+
+# ── a bar with the worker ──
+
+def notes(events):
+    return [e["text"] for e in events if e.get("type") == "note"]
+
+
+def test_one_bar_out_of_view_is_with_the_worker_not_missing():
+    """Trimming: one bar out of the camera's view for longer than the
+    missing window is the worker's, an amber stage with a note, not an
+    alarm; when it comes back the note says so."""
+    scene = Scene(12)
+    mon, events = monitor(scene, bars_at_start=12, bars_with_worker=1, with_worker_s=60.0)
+    t = run(mon, scene, 0, 5)
+    held = scene.bars.pop()
+    t = run(mon, scene, t, 40)
+    assert alerts(events, "bar_missing") == []
+    assert mon.with_worker is not None and mon.with_worker[0] == 1
+    assert notes(events) == ["1 bar with the worker (out of view 10 s)"]
+    scene.bars.append(held)
+    run(mon, scene, t, 3)
+    assert mon.with_worker is None
+    assert notes(events)[-1].startswith("all 12 bars back in view after")
+    assert alerts(events, "bar_missing") == []
+
+
+def test_a_bar_kept_from_view_too_long_raises_the_alarm_and_says_why():
+    scene = Scene(12)
+    mon, events = monitor(scene, bars_at_start=12, bars_with_worker=1, with_worker_s=60.0)
+    t = run(mon, scene, 0, 5)
+    scene.bars.pop()
+    run(mon, scene, t, 70)
+    missing = alerts(events, "bar_missing")
+    assert len(missing) == 1
+    assert "with the worker" in missing[0]["detail"]
+    assert mon.with_worker is None
+
+
+def test_two_bars_out_of_view_alarm_at_the_usual_time():
+    scene = Scene(12)
+    mon, events = monitor(scene, bars_at_start=12, bars_with_worker=1, with_worker_s=600.0)
+    t = run(mon, scene, 0, 5)
+    scene.bars.pop()
+    scene.bars.pop()
+    run(mon, scene, t, 15)
+    assert len(alerts(events, "bar_missing")) == 1

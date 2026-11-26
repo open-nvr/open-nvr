@@ -29,6 +29,8 @@ import { useClickOutside } from '../hooks/useClickOutside'
 import { useTranslation } from '../i18n'
 import { useConfirm } from './ui/ConfirmDialog'
 import { useUnackedAlerts } from '../lib/queries'
+import { AlarmReviewer } from './alarms/AlertReview'
+import type { InboxAlert } from '../services/alertsInboxService'
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
 const RING_MODES: RingMode[] = ['none', 'ping', 'continuous']
@@ -197,6 +199,8 @@ export function AlertBell() {
   const { t } = useTranslation()
   const confirm = useConfirm()
   const [open, setOpen] = useState(false)
+  // Outside the dropdown, so closing the list does not close the review.
+  const [reviewing, setReviewing] = useState<InboxAlert | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   useClickOutside(panelRef, open, () => setOpen(false))
   useAudioUnlock()
@@ -357,7 +361,14 @@ export function AlertBell() {
                   >
                     {a.severity}
                   </span>
-                  <div className="flex-1 min-w-0">
+                  {/* The alarm itself opens its review — photo, footage —
+                      so the bell is a way in, not only a counter. */}
+                  <button
+                    type="button"
+                    className="flex-1 min-w-0 text-left hover:underline"
+                    title="Review: photo and footage"
+                    onClick={() => { setReviewing(a); setOpen(false) }}
+                  >
                     <div className="truncate font-medium">{a.title}</div>
                     <div className="text-[11px] text-[var(--text-dim)] truncate">
                       {[a.source_name, a.camera_id,
@@ -365,7 +376,7 @@ export function AlertBell() {
                         .filter(Boolean)
                         .join(' · ')}
                     </div>
-                  </div>
+                  </button>
                   <button
                     className="p-1 hover:bg-[var(--panel-2)]"
                     title="Acknowledge"
@@ -389,6 +400,7 @@ export function AlertBell() {
           </div>
         </div>
       )}
+      {reviewing && <AlarmReviewer alert={reviewing} onClose={() => setReviewing(null)} />}
     </div>
   )
 }
