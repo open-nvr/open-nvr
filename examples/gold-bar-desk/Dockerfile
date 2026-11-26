@@ -11,11 +11,18 @@
 # volume mounted read-only at /weights.
 
 FROM python:3.11-slim AS runtime
-# cpu (default) or qualcomm: the Qualcomm flavour adds onnxruntime-qnn so
-# the segmentation model can run on the Hexagon NPU (~14 ms a frame where
-# the CPU takes ~850 ms). Built that way by
-# docker-compose.accel-qualcomm-apps.yml.
-ARG ACCEL=cpu
+# auto (default), cpu or qualcomm. onnxruntime-qnn lets the segmentation
+# model run on a Qualcomm Hexagon NPU (~14 ms a frame where the CPU takes
+# ~850 ms). auto adds it to every arm64 build: the image CI publishes is
+# one multi-arch image, and a site that installs it from the registry (the
+# App Catalog pins it) never builds with ACCEL=qualcomm, so an arm64 image
+# without it left Qualcomm boards on the CPU. On other arm64 boards it is
+# inert: the app tries the NPU only when GOLD_BAR_DESK_ONNX_PROVIDERS asks
+# for it and /dev/fastrpc-cdsp is there. amd64 builds never carry it.
+# cpu leaves it out everywhere; qualcomm insists on it.
+ARG ACCEL=auto
+# Set by buildx for each platform it builds (amd64, arm64).
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -35,11 +42,16 @@ RUN pip install --no-cache-dir \
 # onnxruntime (it needs >= 1.24.2) and bundles the QAIRT user-space; the
 # host lends the fastrpc device and two libraries. Pinned like
 # detect-pipeline's: the plugin tracks a QAIRT release.
-RUN case "${ACCEL}" in \
-      cpu) ;; \
-      qualcomm) pip install --no-cache-dir "onnxruntime>=1.24.2,<2" onnxruntime-qnn==2.7.0 ;; \
-      *) echo "unknown ACCEL=${ACCEL} (cpu|qualcomm)" >&2; exit 1 ;; \
-    esac
+RUN arch="${TARGETARCH:-$(uname -m)}"; \
+    case "${ACCEL}" in \
+      cpu) want=no ;; \
+      qualcomm) want=yes ;; \
+      auto) case "$arch" in arm64|aarch64) want=yes ;; *) want=no ;; esac ;; \
+      *) echo "unknown ACCEL=${ACCEL} (auto|cpu|qualcomm)" >&2; exit 1 ;; \
+    esac; \
+    if [ "$want" = yes ]; then \
+      pip install --no-cache-dir "onnxruntime>=1.24.2,<2" onnxruntime-qnn==2.7.0; \
+    fi
 
 COPY sdk/opennvr-app-sdk /opt/opennvr-app-sdk
 RUN pip install --no-cache-dir /opt/opennvr-app-sdk
