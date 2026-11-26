@@ -862,6 +862,39 @@ Raw runs: [`benchmarks/look-public-yard-2026-11-reason-before.json`](benchmarks/
 - The step times here are lower than in the October run: a different
   machine. Compare the before and after rows with each other only.
 
+### A guard only on a sign the model can see (27 November 2026)
+
+The step's worst mistake is a stranger called a guard: the rules then say
+`ignore`, and someone walks through the yard unreported. The change: the
+step reports `guard_sign` (`uniform_or_vest`, `torch`, `none`) beside
+`who`, the prompt asks for the sign it can see, and a rule alerts on a
+guard with no sign, so a guard is ignored only on visible evidence. Same
+58 cases, `--max-side 768`, three repeats (174 answers), CPU limits, 4
+threads, before and after on the same machine. Raw runs:
+[`benchmarks/look-public-yard-2026-11-guard-before.json`](benchmarks/look-public-yard-2026-11-guard-before.json),
+[`benchmarks/look-public-yard-2026-11-guard-after.json`](benchmarks/look-public-yard-2026-11-guard-after.json).
+
+| | Pass | 95% interval | p50 / p95 | Strangers let through | Strangers called guards | False alarms |
+|---|---|---|---|---|---|---|
+| Before | 134/174 (77%) | 0.70-0.83 | 5.6 s / 32.2 s | 25/54 | 17/54 | 10/120 |
+| After | **152/174 (87%)** | **0.82-0.92** | 6.6 s / 32.4 s | **8/54** | **7/54** | 14/120 |
+
+- **The step qualifies** for the first time: the interval's lower bound
+  is above 0.80 and p95 is well inside CPU's 120 s.
+- **The prompt did it, not the rule.** Asked to name a guard's sign, the
+  model stopped calling most strangers guards; the 7 it still called
+  guards all came with a claimed `uniform_or_vest`, and it never answered
+  a guard with `none`, so the rule never fired here. It stays as the
+  safety net for a model that does.
+- **False alarms rose a little** (10 to 14 of 120, animals and empty
+  scenes called strangers), the cost the step is meant to pay.
+- **No real guard is in these cases** (no public set has one), so this
+  cannot show whether a real guard now alerts. That needs the site's
+  recording, before a site relies on the step.
+- The stranger count moves between runs (11 of 54 called guards in the
+  25 November run, 17 here, the same template): compare rows measured
+  together.
+
 ## Measured: the vision models on coco128 (16 October 2026)
 
 `tools/vqa_eval.py` asks each model the agent's questions on coco128's
