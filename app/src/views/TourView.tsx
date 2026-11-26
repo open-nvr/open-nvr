@@ -762,14 +762,16 @@ function TourTile({ cameraId, cam, pausedCamera, playing, spotlit, cover, labelC
         </div>
       )}
 
-      {/* What is drawn on the picture: top-left, clear of the label band
-          and of the overlay's own count in the top-right corner. */}
+      {/* What is drawn on the picture: bottom-right, just above the label
+          band. The top corners are under the tour's own title and controls
+          when one camera fills the page, and the very bottom-right is the
+          alarm's dismiss button. */}
       {detectionsPreferred() && (
         <OverlayLayersButton
           cameraId={cameraId}
           scope="tour"
           variant="video"
-          className="absolute left-1.5 top-1.5 z-20 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+          className="absolute right-2 bottom-10 z-20 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
         />
       )}
 
