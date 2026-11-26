@@ -244,3 +244,56 @@ jobs:
           set -euo pipefail
           docker run --rm --entrypoint python "opennvr/${{ matrix.app }}:ci" \
             -c "import ${{ matrix.module }}; print('OK: ${{ matrix.module }} imports inside the image')"
+
+  # Gold Bar Desk's arm64 image carries onnxruntime-qnn (ACCEL=auto), so a
+  # Qualcomm board that installs the published image can put the model on
+  # its NPU. Only the publish workflow builds arm64, on main: without this
+  # job a broken arm64 install step would first show up after the merge.
+  # Built under QEMU (slow, so only this app); checks the plugin is there,
+  # imports, registers with onnxruntime, and reports the image's size.
+  gold-bar-desk-arm64:
+    name: example/gold-bar-desk (arm64 + NPU runtime)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        id: buildx3
+        uses: docker/setup-buildx-action@v3
+        continue-on-error: true
+      - name: Set up Docker Buildx (retry)
+        if: steps.buildx3.outcome == 'failure'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build gold-bar-desk image (arm64)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: examples/gold-bar-desk/Dockerfile
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: opennvr/gold-bar-desk:ci-arm64
+          cache-from: type=gha,scope=gold-bar-desk-arm64
+          cache-to: type=gha,scope=gold-bar-desk-arm64,mode=max
+
+      - name: NPU runtime smoke
+        run: |
+          set -euo pipefail
+          docker image ls opennvr/gold-bar-desk:ci-arm64 --format 'image size: {{.Size}}'
+          docker run --rm --platform linux/arm64 --entrypoint python opennvr/gold-bar-desk:ci-arm64 -c "
+          import onnxruntime as ort, onnxruntime_qnn as q
+          import gold_bar_desk
+          from bar_desk.segmenter import wants_npu, npu_unavailable
+          ort.register_execution_provider_library('QNNExecutionProvider', q.get_library_path())
+          assert wants_npu('QNNExecutionProvider:htp')
+          # No Hexagon device in CI: the app must say so and stay on the CPU.
+          reason = npu_unavailable()
+          assert reason and 'fastrpc' in reason, reason
+          print('OK: onnxruntime', ort.__version__, '+ onnxruntime-qnn, registered; without the device:', reason)
+          "
