@@ -52,6 +52,11 @@ ENV PYTHONPATH=/app
 # bar_desk/segmenter.py). The egress proxy would refuse it anyway, but
 # would raise an alert for every attempt.
 ENV ORT_DISABLE_TELEMETRY=1
+# numpy's OpenBLAS starts one worker per core at import and lets them spin
+# waiting for work. The app's only matrix work is one small multiply a
+# frame (the bar outlines), so on a Ventuno Q seven idle workers burned
+# ~2.5 of 8 cores: 340% CPU at 4 analysed frames a second, 95% with one.
+ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 
 ENTRYPOINT ["python", "gold_bar_desk.py"]
 CMD ["--config", "config.yml"]
