@@ -1,0 +1,37 @@
+[project]
+name = "opennvr-example-ros2-bridge"
+version = "0.1.0"
+description = "OpenNVR ROS 2 bridge, phase 1: events and alerts out to ROS 2 topics (read-only)"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+
+# The SDK owns the bus loop and the app contract. rclpy and std_msgs
+# come from the ROS 2 install in the image (ros:jazzy-ros-base), not
+# from PyPI, and are imported only when publishing; the tests need
+# neither.
+dependencies = [
+    "opennvr-app-sdk",
+]
+
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+ros2-bridge = "ros2_bridge:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

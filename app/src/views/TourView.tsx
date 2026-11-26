@@ -44,6 +44,7 @@ import { VideoPlayer } from '../components/VideoPlayer'
 import { detectionsPreferred } from '../lib/detectionFeed'
 import { cameraState, STATE_INK } from './dashboard/WidgetFrame'
 import { webcamOfflineLabel } from '../lib/hostAgent'
+import { OverlayLayersButton } from '../components/live/OverlayLayersButton'
 
 /** The bar hides after this long without the mouse moving. */
 const BAR_HIDE_MS = 3_000
@@ -732,6 +733,7 @@ function TourTile({ cameraId, cam, pausedCamera, playing, spotlit, cover, labelC
           muted
           displayAspectOverride={cam?.display_aspect_ratio}
           showDetections={detectionsPreferred()}
+          overlayScope="tour"
           offlineLabel={webcamOfflineLabel(cam as any)}
           cameraId={cameraId}
           cover={cover}
@@ -758,6 +760,19 @@ function TourTile({ cameraId, cam, pausedCamera, playing, spotlit, cover, labelC
             </>
           )}
         </div>
+      )}
+
+      {/* What is drawn on the picture: bottom-right, just above the label
+          band. The top corners are under the tour's own title and controls
+          when one camera fills the page, and the very bottom-right is the
+          alarm's dismiss button. */}
+      {detectionsPreferred() && (
+        <OverlayLayersButton
+          cameraId={cameraId}
+          scope="tour"
+          variant="video"
+          className="absolute right-2 bottom-10 z-20 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+        />
       )}
 
       {/* Label band */}

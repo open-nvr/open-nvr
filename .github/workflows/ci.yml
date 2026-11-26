@@ -201,6 +201,7 @@ jobs:
           - loitering-detection
           - occupancy-counting
           - package-delivery
+          - ros2-bridge
           - smart-doorbell
           - xray-screening
     steps:

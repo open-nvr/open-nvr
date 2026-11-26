@@ -53,6 +53,7 @@ import { PREDEFINED_LAYOUTS, type LayoutDefinition } from '../lib/liveLayouts'
 import { ToursMenu } from '../components/live/ToursMenu'
 import { webcamOfflineLabel } from '../lib/hostAgent'
 import { PtzPad } from '../components/PtzPad'
+import { OverlayLayersButton } from '../components/live/OverlayLayersButton'
 
 /** The dashboard wall's still-tile background, for tiles with no picture. */
 const NO_PICTURE_BG = 'repeating-linear-gradient(135deg, #07090d 0 10px, #0b0f16 10px 20px)'
@@ -786,6 +787,7 @@ function Tile({
             offlineLabel={webcamOfflineLabel(assignedCamera as any)}
             cameraId={cameraId}
             showDetections={showDetections}
+            overlayScope="live"
             onTogglePtz={
               ptzOpen || (!noPtz && assignedCamera?.ptz_supported !== false)
                 ? () => setPtzOpen(!ptzOpen)
@@ -892,6 +894,17 @@ function Tile({
             </span>
           </div>
         </>
+      )}
+
+      {/* What is drawn on the picture, for this camera everywhere
+          (components/live/OverlayLayersButton). Beside "change camera". */}
+      {cameraId != null && showDetections && (
+        <OverlayLayersButton
+          cameraId={cameraId}
+          scope="live"
+          variant="video"
+          className="absolute right-9 top-8 z-30 opacity-0 group-hover/tile:opacity-100 focus-visible:opacity-100 transition-opacity"
+        />
       )}
 
       {/* Change camera — any tile that has one. Choosing which camera sits

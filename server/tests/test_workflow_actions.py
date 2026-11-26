@@ -1,6 +1,6 @@
 # Copyright (c) 2026 OpenNVR
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
-"""The last Phase 1 actions: save_clip, ptz_preset and webhook."""
+"""The last Phase 1 actions: save_clip, ptz_preset, webhook and home_assistant."""
 
 from __future__ import annotations
 
@@ -221,6 +221,86 @@ def test_the_destinations_are_checked_when_the_file_is_saved(env, hooks):
     bad = catalog.check(flow("webhook: { to: old }"), env.db)
     assert [str(e) for e in bad.errors] == [
         "then[0].webhook.to: 'old' is not an approved destination on this site"]
+
+
+# ── home_assistant ────────────────────────────────────────────────────
+
+
+def ha_flow(spec: str) -> str:
+    """A home_assistant action where it is allowed: under a plain rule."""
+    return flow(f"if: {{ site_mode: [home] }}\n    then:\n      - home_assistant: {spec}")
+
+
+@pytest.fixture()
+def house(env, monkeypatch):
+    from services import site_mode
+    from services.integration_service import IntegrationService
+    monkeypatch.setattr(site_mode, "current_mode", lambda db: "home")
+    env.db.add(Integration(name="house", type="home_assistant", enabled=True,
+                           config={"url": "http://ha.local:8123", "token": "t"}))
+    env.db.add(Integration(name="ticketing", type="webhook", enabled=True,
+                           config={"url": "https://tickets.example/hook"}))
+    env.db.commit()
+    calls = []
+
+    async def call(integration, service, data):
+        calls.append((integration.name, service, data))
+        return {"success": True, "message": f"{service} called (HTTP 200)"}
+    monkeypatch.setattr(IntegrationService, "call_home_assistant", staticmethod(call))
+    return calls
+
+
+def test_home_assistant_calls_the_service_with_its_data(env, house):
+    steps = run(env, ha_flow('{ service: lock.unlock, data: { entity_id: lock.gate, '
+                             'note: "{camera}" } }'))
+    assert (steps[-1].kind, steps[-1].outcome) == ("home_assistant", "done")
+    assert house == [("house", "lock.unlock", {"entity_id": "lock.gate", "note": "yard"})]
+
+
+def test_home_assistant_by_name_and_when_there_is_none(env, house):
+    steps = run(env, ha_flow("{ service: lock.unlock, to: ticketing }"))
+    assert steps[-1].outcome == "failed"
+    assert "no enabled Home Assistant integration named 'ticketing'" in steps[-1].reason
+    assert house == []
+
+
+def test_home_assistant_with_two_must_name_one(env, house):
+    env.db.add(Integration(name="cabin", type="home_assistant", enabled=True,
+                           config={"url": "http://cabin:8123", "token": "t"}))
+    env.db.commit()
+    steps = run(env, ha_flow("{ service: light.turn_on }"))
+    assert steps[-1].outcome == "failed" and "name one with to: cabin, house" in steps[-1].reason
+    steps = run(env, ha_flow("{ service: light.turn_on, to: cabin }"))
+    assert steps[-1].outcome == "done" and house[-1][0] == "cabin"
+
+
+def test_home_assistant_rest_call(monkeypatch):
+    import httpx
+
+    from services.integration_service import IntegrationService
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, str(request.url), request.headers["authorization"],
+                     request.content))
+        return httpx.Response(200, json=[])
+    integ = Integration(name="house", type="home_assistant", enabled=True,
+                        config={"url": "http://ha.local:8123/", "token": "abc"})
+    out = asyncio.run(IntegrationService.call_home_assistant(
+        integ, "lock.unlock", {"entity_id": "lock.gate"},
+        transport=httpx.MockTransport(handler)))
+    assert out == {"success": True, "message": "lock.unlock called (HTTP 200)"}
+    assert seen == [("POST", "http://ha.local:8123/api/services/lock/unlock", "Bearer abc",
+                     b'{"entity_id":"lock.gate"}')]
+
+    refused = asyncio.run(IntegrationService.call_home_assistant(
+        integ, "lock.unlock", {}, transport=httpx.MockTransport(lambda r: httpx.Response(401))))
+    assert refused == {"success": False,
+                       "message": "Home Assistant returned 401 (the token was refused)"}
+    test = asyncio.run(IntegrationService._test_home_assistant(
+        integ, transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, json={"message": "API running."}))))
+    assert test["success"] is True
 
 
 # ── Test mode ─────────────────────────────────────────────────────────
