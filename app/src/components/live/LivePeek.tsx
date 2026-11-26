@@ -9,6 +9,7 @@ import { rebaseToCurrentOrigin } from '../../lib/streamUrl'
 import { Modal } from '../Modal'
 import { VideoPlayer } from '../VideoPlayer'
 import { detectionsPreferred } from '../../lib/detectionFeed'
+import { OverlayLayersButton } from './OverlayLayersButton'
 
 type PeekCamera = {
   name: string
@@ -55,6 +56,7 @@ export function LivePeek({ cameraId, cam, onClose, footer }: {
             cameraId={cameraId}
             className="w-full h-full"
             showDetections={detectionsPreferred()}
+            overlayScope="peek"
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-sm text-white/60">
@@ -62,12 +64,13 @@ export function LivePeek({ cameraId, cam, onClose, footer }: {
           </div>
         )}
       </div>
-      {(details || footer) && (
-        <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-[var(--text-dim)]">
-          <span className="truncate">{details}</span>
+      <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-[var(--text-dim)]">
+        <span className="truncate">{details}</span>
+        <span className="flex items-center gap-2">
+          {detectionsPreferred() && <OverlayLayersButton cameraId={cameraId} scope="peek" />}
           {footer}
-        </div>
-      )}
+        </span>
+      </div>
     </Modal>
   )
 }

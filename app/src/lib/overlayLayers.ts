@@ -48,7 +48,8 @@ export function layerOf(source: string, label: string, layer?: string | null): O
   return { key: `${source}|${kind}`, name, group: source.replace(/^app:/, '') }
 }
 
-/** Remembered per camera, in this browser. */
-export function hiddenLayersKey(cameraId: number): string {
-  return `opennvr.overlay.hidden.${cameraId}`
+/** Remembered per camera and per view (lib/overlayLayerStore's scope:
+ *  'live', 'dashboard', 'tour', 'peek', 'app:<id>'), in this browser. */
+export function hiddenLayersKey(cameraId: number, scope: string): string {
+  return `opennvr.overlay.hidden.${cameraId}.${scope}`
 }
