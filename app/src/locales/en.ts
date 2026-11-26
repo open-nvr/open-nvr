@@ -435,6 +435,7 @@ export const translations: TranslationCatalog = {
   'video.fullscreen': 'Fullscreen',
   'video.exitFullscreen': 'Exit fullscreen',
   'video.reconnecting': 'Reconnecting…',
+  'video.connecting': 'Connecting…',
   'video.noSignal': 'No signal detected',
   'video.noSignalShort': 'No signal',
   'video.hlsFallback': 'Real-time video cannot reach this server from your network, so live view is a second or two behind. Ask your administrator if you need real-time video.',

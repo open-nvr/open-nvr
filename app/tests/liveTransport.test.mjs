@@ -171,6 +171,33 @@ test('the frame watchdog trips only when the count stands still long enough', ()
   assert.equal(live(71, 15000), false, 'one new frame resets it')
 })
 
+test('before the first frame, arriving packets wait for a slow keyframe', () => {
+  // A camera with a 15 s I-frame interval: bytes flow, nothing decodes yet.
+  const waiting = makeStallTracker(8000, 30000)
+  assert.equal(waiting(0, 0, 0), false)
+  assert.equal(waiting(0, 3000, 40_000), false)
+  assert.equal(waiting(0, 9000, 120_000), false, 'not a stall at 8 s while bytes arrive')
+  assert.equal(waiting(0, 15000, 200_000), false)
+  assert.equal(waiting(25, 18000, 260_000), false, 'the keyframe came')
+  assert.equal(waiting(25, 27000, 260_000), true, 'after the first frame the 8 s rule is back')
+
+  const never = makeStallTracker(8000, 30000)
+  never(0, 0, 0)
+  for (let t = 3000; t < 30000; t += 3000) assert.equal(never(0, t, t * 10), false)
+  assert.equal(never(0, 30000, 300_000), true, 'no keyframe in 30 s gives up')
+
+  const silent = makeStallTracker(8000, 30000)
+  silent(0, 0, 0)
+  assert.equal(silent(0, 3000, 0), false)
+  assert.equal(silent(0, 8000, 0), true, 'no bytes at all is still a stall at 8 s')
+
+  const dried = makeStallTracker(8000, 30000)
+  dried(0, 0, 0)
+  dried(0, 3000, 5000)
+  assert.equal(dried(0, 9000, 5000), false, 'bytes stopped 6 s ago')
+  assert.equal(dried(0, 11000, 5000), true, 'bytes stopped 8 s ago')
+})
+
 test('no DELETE for a never-connected session MediaMTX has already dropped', () => {
   assert.equal(shouldDeleteSession(true, MEDIAMTX_HANDSHAKE_MS * 5), true)
   assert.equal(shouldDeleteSession(false, 2000), true)

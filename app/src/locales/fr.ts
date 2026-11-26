@@ -413,6 +413,7 @@ export const translations: TranslationCatalog = {
   'video.fullscreen': 'Plein écran',
   'video.exitFullscreen': 'Quitter le plein écran',
   'video.reconnecting': 'Reconnexion…',
+  'video.connecting': 'Connexion…',
   'video.noSignal': 'Aucun signal détecté',
   'video.noSignalShort': 'Pas de signal',
   'video.hlsFallback': 'La vidéo en temps réel ne peut pas atteindre ce serveur depuis votre réseau ; la vue en direct a une à deux secondes de retard. Demandez à votre administrateur si vous avez besoin du temps réel.',
