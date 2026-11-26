@@ -1,0 +1,34 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# ROS 2 bridge — config template. Copy to config.yml and run:
+#
+#   python ros2_bridge.py --config config.yml
+
+# The apps bus. The bridge runs on the OpenNVR box, so NATS never leaves it.
+nats_url: "nats://nats-apps:4222"
+nats_token: null
+
+# Topics: /<namespace>/<site>/<camera>/<schema> and /<namespace>/<site>/alerts.
+namespace: opennvr
+site: dock_east
+
+# The event schemas to publish (docs/EVENT_CONTRACTS.md). Each needs its
+# events: scope; the four below are declared by the app.
+events:
+  - detection.observed.v1
+  - plate.recognized.v1
+  - visit.recorded.v1
+  - occupancy.changed.v1
+alerts: true
+
+# Only these cameras ("cam3" or "3"); empty is every camera.
+cameras: []
+
+# A camera's frame on the robot's side, for the robot's tf tree. The
+# default is the camera's topic name (cam3).
+frame_ids: {}
+#  cam23: gate_camera
+
+# Log what would be published instead of publishing: try it with no ROS 2.
+dry_run: false

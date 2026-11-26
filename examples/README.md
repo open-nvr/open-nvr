@@ -443,6 +443,31 @@ python home_assistant_relay.py --config config.yml
 
 ---
 
+### [`ros2-bridge/`](ros2-bridge)
+
+**OpenNVR's events on ROS 2 topics, for robots and fleet managers.**
+Phase 1 of the ROS 2 bridge RFC (discussion #985): detections, plates,
+visits, occupancy and alerts published as JSON on
+`/opennvr/<site>/<camera>/<schema>` and `/opennvr/<site>/alerts`, with
+QoS per topic and a stamp that says which time it is. Read-only:
+nothing comes back from ROS 2.
+
+| | |
+|---|---|
+| Pattern | domain-event and alert subscriber → rclpy publisher |
+| Adapters | (none) |
+| Difficulty | ⭐⭐ intermediate |
+| Best for learning | Consuming contracted events, keeping ROS out of the testable core |
+| Tests | 24 (no ROS 2 needed) |
+
+```bash
+cd examples/ros2-bridge && uv sync --extra dev
+cp config.example.yml config.yml      # site, events; dry_run: true without ROS 2
+python ros2_bridge.py --config config.yml
+```
+
+---
+
 ## 💡 More on the roadmap
 
 These are explicitly welcome contributions
