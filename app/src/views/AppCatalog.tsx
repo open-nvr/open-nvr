@@ -32,7 +32,7 @@ import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
-import { useTranslation } from '../i18n'
+import { useDateFormat, useTranslation, type DateFormatters } from '../i18n'
 import { useConfirm } from '../components/ui/ConfirmDialog'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { GeometryEditor } from './apps/GeometryEditor'
@@ -1538,7 +1538,10 @@ function GaugeView({ view, value }: { view: StateViewSpec; value: any }) {
   )
 }
 
-function fmtWhen(v: unknown): string {
+/** A feed's time as the operator reads it. The formatters come from the
+ *  caller's useDateFormat(): the operator's language and format, not the
+ *  browser's (tests/test_ui_date_localisation.py). */
+function fmtWhen(v: unknown, fmt: DateFormatters): string {
   if (v == null) return ''
   if (typeof v === 'number') {
     // epoch seconds or ms → relative age
@@ -1558,8 +1561,8 @@ function fmtWhen(v: unknown): string {
     if (!Number.isNaN(d.getTime())) {
       const today = new Date().toDateString() === d.toDateString()
       return today
-        ? d.toLocaleTimeString()
-        : d.toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        ? fmt.time(d, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : fmt.dateTime(d, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })
     }
   }
   return text
@@ -1593,6 +1596,7 @@ function LogView({ view, value, appId }: { view: StateViewSpec; value: any; appI
   // A recent-events feed: array of strings or {message/text, time/ts, level}.
   // A line with an "alert_id" (and its "camera") is an alarm the app
   // raised: it gets a Review button that opens the alarm itself.
+  const fmt = useDateFormat()
   if (!Array.isArray(value) || value.length === 0) return null
   const limit = view.limit ?? 12
   const rows = value.slice(-limit).reverse()
@@ -1603,7 +1607,7 @@ function LogView({ view, value, appId }: { view: StateViewSpec; value: any; appI
         {rows.map((row, i) => {
           const isObj = row != null && typeof row === 'object'
           const msg = isObj ? row.message ?? row.text ?? row.msg ?? JSON.stringify(row) : String(row)
-          const when = isObj ? fmtWhen(row.time ?? row.ts ?? row.timestamp ?? row.at) : ''
+          const when = isObj ? fmtWhen(row.time ?? row.ts ?? row.timestamp ?? row.at, fmt) : ''
           const level = isObj ? String(row.level ?? row.severity ?? '') : ''
           const dot = level === 'high' || level === 'error' ? 'var(--danger,#ef4444)'
             : level === 'warn' || level === 'warning' ? 'var(--warning,#f59e0b)'
@@ -1630,6 +1634,7 @@ function LogView({ view, value, appId }: { view: StateViewSpec; value: any; appI
 function GalleryView({ view, value }: { view: StateViewSpec; value: any }) {
   // A thumbnail wall: array of {image|url|src (data-uri or path), label, time}.
   // For LPR plate crops, package-on-porch snapshots, doorbell faces.
+  const fmt = useDateFormat()
   if (!Array.isArray(value) || value.length === 0) return null
   const limit = view.limit ?? 12
   const items = value.slice(-limit).reverse()
@@ -1641,7 +1646,7 @@ function GalleryView({ view, value }: { view: StateViewSpec; value: any }) {
           const isObj = it != null && typeof it === 'object'
           const src = isObj ? it.image ?? it.url ?? it.src ?? it.thumbnail : typeof it === 'string' ? it : undefined
           const caption = isObj ? it.label ?? it.plate ?? it.name ?? it.caption : undefined
-          const when = isObj ? fmtWhen(it.time ?? it.ts ?? it.timestamp ?? it.at) : ''
+          const when = isObj ? fmtWhen(it.time ?? it.ts ?? it.timestamp ?? it.at, fmt) : ''
           return (
             <div key={i} className="border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
               {src ? (
@@ -1869,6 +1874,7 @@ function OverlayPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
 
 function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }) {
   const queryClient = useQueryClient()
+  const fmt = useDateFormat()
   const { showSuccess, showError } = useSnackbar()
   const [draft, setDraft] = useState('')
   const eg = app.egress
@@ -1946,7 +1952,7 @@ function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
               <div key={dest} className="flex items-center gap-2 flex-wrap">
                 <Badge variant="destructive">{dest}</Badge>
                 <span className="text-[var(--text-dim)]">
-                  {d.count}× · last {fmtWhen(d.last_seen)}
+                  {d.count}× · last {fmtWhen(d.last_seen, fmt)}
                 </span>
                 {isAdmin && (
                   <Button variant="outline" onClick={() => addHost(dest)} disabled={save.isPending}>
