@@ -30,6 +30,15 @@ import cv2
 import numpy as np
 
 
+def _span(seconds: float) -> str:
+    """12 s, 3 min, 3 min 20 s: a duration as a person reads it."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return "%d s" % seconds
+    m, sec = divmod(seconds, 60)
+    return "%d min" % m if sec == 0 else "%d min %d s" % (m, sec)
+
+
 @dataclass
 class DeskSettings:
     missing_after_s: float = 25.0     # full count unseen this long -> alarm
@@ -39,6 +48,14 @@ class DeskSettings:
     # of 2) the time rule alone raised a false alarm on footage where
     # nothing went missing. 50 is 25 s at the intended 2 fps.
     missing_min_frames: float = 50
+    # Trimming means one bar in the worker's hands, and often below his arm
+    # or in his lap, out of the overhead camera's view for longer than
+    # missing_after_s. Up to this many bars out of view are treated as "with
+    # the worker": an amber status, no alarm, until with_worker_s. More bars
+    # out of view than this alarm at missing_after_s as before. 0 turns the
+    # stage off (every bar out of view alarms at missing_after_s).
+    bars_with_worker: float = 1
+    with_worker_s: float = 180.0
     # Below this many analysed frames a second, the missing-bar alarm is
     # PAUSED, not guessed. The full count shows only in brief moments, and
     # at 0.3 fps (a loaded test box) the app missed so many of them that
@@ -220,6 +237,9 @@ class DeskMonitor:
         self.frame_gap = 0.0                     # seconds since the previous look
         self._gaps: deque = deque(maxlen=10)
         self.too_slow = False                    # missing-bar alarm paused
+        # A bar (or bars_with_worker of them) out of view past
+        # missing_after_s, not yet alarming: (bars, since t), else None.
+        self.with_worker: tuple[int, float] | None = None
         self._pending_shift: int | None = None   # see request_new_shift()
         self._pending_ack = False
         self.slow_fps: float | None = None       # the rate that paused it
@@ -244,6 +264,7 @@ class DeskMonitor:
         self.full_seen_at = None
         self.count_alarm = None
         self.high_since = None
+        self.with_worker = None
 
     # The app's actions arrive on the web server's thread while analyse()
     # runs on the camera's. Resetting the count under a frame in flight
@@ -277,6 +298,10 @@ class DeskMonitor:
                 self.full_seen_at = None
             self.baseline = int(bars)
             self.given_baseline = True
+
+    def _note(self, text: str, t: float) -> None:
+        """A line for the app's Recent feed: no alert, just the record."""
+        self.on_event({"type": "note", "text": text, "t": t})
 
     def _alert(self, kind: str, severity: str, title: str, detail: str, t: float,
                frame, box=None) -> None:
@@ -415,14 +440,39 @@ class DeskMonitor:
         while self._recent and t - self._recent[0][0] > self.s.missing_after_s:
             self._recent.popleft()
         unseen = t - self.full_seen_at
-        if unseen >= self.s.missing_after_s and \
+        # How many bars have been out of view ever since the full count was
+        # last seen: the best count since then, against the start.
+        best_since = max([n for ts, n in self._recent if ts > self.full_seen_at] or [total])
+        out = max(0, self.baseline - best_since)
+        limit = self.s.missing_after_s
+        holding = (0 < out <= self.s.bars_with_worker
+                   and unseen >= self.s.missing_after_s
+                   and self.count_alarm != "missing")
+        if holding:
+            limit = max(limit, self.s.with_worker_s)
+            if self.with_worker is None:
+                self.with_worker = (out, self.full_seen_at)
+                self._note("%d bar%s with the worker (out of view %d s)" % (
+                    out, "" if out == 1 else "s", unseen), t)
+            else:
+                self.with_worker = (out, self.with_worker[1])
+        elif self.with_worker is not None and unseen == 0:
+            self._note("all %d bars back in view after %s" % (
+                self.baseline, _span(t - self.with_worker[1])), t)
+            self.with_worker = None
+        if unseen >= limit and \
                 self.frames_since_full >= self.s.missing_min_frames and \
                 self.count_alarm != "missing":
             self.count_alarm = "missing"
             since = [n for ts, n in self._recent if ts > self.full_seen_at] or [total]
             best = max(since)
             gone = self.baseline - best
+            held = self.with_worker is not None
+            self.with_worker = None
             self._alert("bar_missing", "high", "Possible missing bar",
+                        ("A bar has been with the worker, out of view, for %s: longer "
+                         "than the %s allowed. " % (_span(unseen), _span(self.s.with_worker_s))
+                         if held else "") +
                         "Not all %d bars have been seen at once for %d s; the most "
                         "seen since was %d (in the trays, on the balance and in "
                         "hand), so up to %d bar%s unaccounted for." % (

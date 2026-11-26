@@ -53,7 +53,7 @@ from opennvr_app_sdk.alerts import AlertSource, build_dispatcher
 from opennvr_app_sdk.domain_events import DomainEventPublisher
 
 sys.path.insert(0, str(Path(__file__).parent))
-from bar_desk.core import DeskMonitor, DeskSettings, Zones, draw  # noqa: E402
+from bar_desk.core import DeskMonitor, DeskSettings, Zones, _span, draw  # noqa: E402
 
 log = logging.getLogger("gold-bar-desk")
 
@@ -134,6 +134,17 @@ MANIFEST = AppManifest(
               description="One bar is nearly always in hand or under an arm, so "
                           "this is not 'the count is low'. It is 'the full count "
                           "has not been seen even once for this long'."),
+        Param("bars_with_worker", int, default=1, group="Alarms",
+              label="Bars a worker may hold out of view",
+              description="Trimming keeps a bar in the worker's hands, often below "
+                          "the camera's view. Up to this many bars out of view show as "
+                          "'with the worker' (amber) instead of alarming, until the time "
+                          "below. More bars out of view alarm as usual. 0: every bar out "
+                          "of view alarms."),
+        Param("with_worker_s", float, default=180.0, group="Alarms",
+              label="Seconds a bar may stay with the worker",
+              description="After this long out of view, a bar with the worker raises "
+                          "the missing-bar alarm."),
         Param("missing_min_frames", int, default=50, advanced=True,
               label="...and over at least this many analysed frames",
               group="Alarms",
@@ -227,6 +238,8 @@ class DeskConfig(BaseAppConfig):
     bars_at_start: int = 0
     missing_after_s: float = 25.0
     missing_min_frames: int = 50
+    bars_with_worker: int = 1
+    with_worker_s: float = 180.0
     min_analysis_fps: float = 1.0
     near_body_s: float = 1.0
     near_body_cooldown_s: float = 60.0
@@ -479,6 +492,9 @@ class DeskApp(FrameApp):
 
     def on_event(self, worker: CameraWorker, event: dict) -> None:
         when = _when(event["t"])
+        if event["type"] == "note":
+            self._note(worker, when, event["text"], "info")
+            return
         if event["type"] == "weighing":
             self._on_weighing(worker, event, when)
             return
@@ -502,7 +518,10 @@ class DeskApp(FrameApp):
             images={"scene": path} if path else {},
             # Plain types only: a numpy value here makes the alert
             # unserialisable, and it is dropped before it is sent.
-            evidence={"observed_at": float(event["t"]),
+            # ISO with its zone: core reads observed_at only in that form
+            # (alerts_inbox._parse_fired_at) and dropped the bare float this
+            # sent, so the review placed its footage by the firing time.
+            evidence={"observed_at": _when(event["t"]),
                       "bars": _int(mon.last.get("bars")),
                       "at_start": _int(mon.baseline),
                       "in_trays": _int(mon.last.get("in_trays")),
@@ -690,6 +709,10 @@ class DeskApp(FrameApp):
             return "%s · POSSIBLE MISSING BAR" % head
         if mon.count_alarm == "extra":
             return "%s · EXTRA BAR" % head
+        if mon.with_worker is not None:
+            n, since = mon.with_worker
+            return "%s · %d with the worker for %s" % (
+                head, n, _span(result.get("t", since) - since))
         if (result.get("bars") or 0) >= mon.baseline or mon.full_seen_at is None:
             return "%s · all accounted for" % head
         return "%s · all accounted for, all seen together %s" % (
@@ -725,6 +748,10 @@ class DeskApp(FrameApp):
             return "POSSIBLE MISSING BAR — all %d not seen together" % mon.baseline
         if mon.count_alarm == "extra":
             return "EXTRA BAR — %s on the desk, %d expected" % (last.get("bars", "?"), mon.baseline)
+        if mon.with_worker is not None and last.get("t") is not None:
+            n, since = mon.with_worker
+            return "%d bar%s with the worker for %s — alarm at %s" % (
+                n, "" if n == 1 else "s", _span(last["t"] - since), _span(mon.s.with_worker_s))
         # The same smoothed figure as the "In view" column, so the two
         # never contradict each other.
         in_view = last.get("bars")
