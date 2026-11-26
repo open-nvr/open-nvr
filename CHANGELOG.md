@@ -8,6 +8,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **App category `fashion`.** `opennvr-app validate` knows `fashion` as a
+  catalog category (virtual trial rooms, styling and similar apparel
+  apps), so a manifest that uses it no longer gets the "not one the
+  catalog groups by" warning.
+
 - **ROS 2 bridge, phase 1** (`examples/ros2-bridge/`, discussion #985).
   Publishes the contracted events (detections, plates, visits, occupancy)
   and the alerts on ROS 2 topics, `/opennvr/<site>/<camera>/<schema>` and

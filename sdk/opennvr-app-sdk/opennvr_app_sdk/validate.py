@@ -54,6 +54,7 @@ _SCHEMA_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+\.v\d+$")
 KNOWN_CATEGORIES = frozenset({
     "perimeter", "analytics", "vehicle", "doorstep", "forensics", "integration",
     "automation", "notifications", "assistant", "observability", "people", "retail", "safety",
+    "fashion",
 })
 #: The canonical task registry (server/config/tasks.yml) — an unknown
 #: task greys the app out in every catalog, so it is worth a warning.
