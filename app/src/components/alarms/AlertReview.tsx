@@ -10,7 +10,8 @@
 // that id. The inbox re-checks the viewer's camera scope, as it does
 // everywhere.
 
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import { AuthedImage } from '../AuthedImage'
 import { alertsInboxService, type InboxAlert, type InboxPage } from '../../services/alertsInboxService'
@@ -51,7 +52,7 @@ export function AlertReview({ sourceName, alertId, camera, at, onClose }: {
 
   const alert: InboxAlert | null | undefined = found.data
   if (alert) return <AlarmReviewer alert={alert} onClose={onClose} />
-  return (
+  return onTop(
     <Modal open title="Review alarm" onClose={onClose} widthClassName="w-[720px]">
       {found.isPending ? (
         <Skeleton className="h-64" />
@@ -62,20 +63,29 @@ export function AlertReview({ sourceName, alertId, camera, at, onClose }: {
             : 'This alarm is not in the alarm list: it may have been removed, it may be on a camera you cannot see, or it was raised before the app started naming its alarms.'}
         </p>
       )}
-    </Modal>
+    </Modal>,
   )
+}
+
+/** The review renders at the top of the page, not where it was opened.
+ *  It is a fixed, full-screen overlay, and "fixed" is relative to the
+ *  nearest ancestor with a CSS transform: the dashboard's widgets are
+ *  laid out with one, so a review opened from the Open alarms widget was
+ *  trapped inside the widget instead of covering the screen. */
+function onTop(node: ReactNode) {
+  return createPortal(node, document.body)
 }
 
 /** One alarm, reviewed: its photos when it has some (with the footage
  *  under them), else its description and the footage on their own. The
  *  alarm bell, the Alarms page and app pages all open this. */
 export function AlarmReviewer({ alert, onClose }: { alert: InboxAlert; onClose: () => void }) {
-  if (alert.images?.length) return <AlarmEvidenceViewer alert={alert} onClose={onClose} />
-  return (
+  if (alert.images?.length) return onTop(<AlarmEvidenceViewer alert={alert} onClose={onClose} />)
+  return onTop(
     <Modal open title={alert.title} onClose={onClose} widthClassName="w-[720px]">
       {alert.description && <p className="text-sm text-[var(--text-dim)]">{alert.description}</p>}
       <AlertClip alert={alert} />
-    </Modal>
+    </Modal>,
   )
 }
 
