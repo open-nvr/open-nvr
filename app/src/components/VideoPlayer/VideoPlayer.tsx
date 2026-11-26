@@ -607,7 +607,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // change (consent checks still pass on the old path, or never fail over
     // TCP) while no media arrives; counting decoded frames is the truth.
     // Eight seconds without a new frame rebuilds the connection through the
-    // ordinary retry path. A hidden tab or a paused element decodes nothing
+    // ordinary retry path. Before the first frame, packets still arriving
+    // mean a long keyframe interval, so that wait is longer (see
+    // FIRST_FRAME_WAIT_MS). A hidden tab or a paused element decodes nothing
     // by design, so those checks are skipped.
     const startStallWatch = useCallback((pc: RTCPeerConnection) => {
       if (stallTimerRef.current) clearInterval(stallTimerRef.current)
@@ -620,18 +622,20 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         }
         if (document.visibilityState === 'hidden' || videoRef.current?.paused) return
         let frames = 0
+        let bytes = 0
         try {
           const stats = await pc.getStats()
           stats.forEach((r: any) => {
             if (r.type === 'inbound-rtp' && (r.kind === 'video' || r.mediaType === 'video')) {
               frames += Number(r.framesDecoded ?? r.framesReceived ?? 0)
+              bytes += Number(r.bytesReceived ?? 0)
             }
           })
         } catch {
           return
         }
         if (pcRef.current !== pc) return
-        if (stalled(frames, Date.now())) {
+        if (stalled(frames, Date.now(), bytes)) {
           if (stallTimerRef.current) clearInterval(stallTimerRef.current)
           stallTimerRef.current = null
           scheduleAutoRetry('No video frames')

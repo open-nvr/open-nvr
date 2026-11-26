@@ -59,6 +59,15 @@ export const SLOW_RETRY_MS = 30000
 export const STALL_CHECK_MS = 3000
 export const STALL_AFTER_MS = 8000
 
+/** Before the first frame, a viewer that is receiving packets is waiting for
+ *  a keyframe, not stalled: the browser can decode nothing until one comes,
+ *  and MediaMTX cannot ask an RTSP camera for one. Cameras with a long
+ *  I-frame interval or a "smart" codec (H.264+/H.265+) send one every 10 s
+ *  or more, so with the 8 s rule above such a tile reconnected forever and
+ *  only showed video when a reconnect happened to land just before a
+ *  keyframe. This is how long it may wait for the first one. */
+export const FIRST_FRAME_WAIT_MS = 30000
+
 /** A tile that fell back to HLS probes WebRTC again this soon after the
  *  network changed (browser `online`, the tab shown again). */
 export const RETURN_PROBE_DELAY_MS = 3000
@@ -241,19 +250,39 @@ export function insertCandidates(sdp: string, lines: string[]): string {
 // ---- decisions -----------------------------------------------------------
 
 /**
- * Stall detection over a frame counter. Feed it the decoded-frame count and
- * the time at each check; it answers true once the count has stood still for
- * `afterMs`. The first call only records; a count that never moves from its
- * first value (connected, nothing ever arrives) is a stall too.
+ * Stall detection over a frame counter. Feed it the decoded-frame count, the
+ * time and the received-byte count at each check; it answers true once the
+ * frame count has stood still for `afterMs`. The first call only records; a
+ * count that never moves from its first value (connected, nothing ever
+ * arrives) is a stall too.
+ *
+ * Until the first frame is decoded, bytes that keep arriving mean the
+ * stream is up and the browser is waiting for a keyframe; that is allowed
+ * up to `firstFrameMs` from the first check. Without a byte count (or with
+ * one that stands still) the plain `afterMs` rule applies.
  */
-export function makeStallTracker(afterMs: number = STALL_AFTER_MS): (frames: number, now: number) => boolean {
+export function makeStallTracker(
+  afterMs: number = STALL_AFTER_MS,
+  firstFrameMs: number = FIRST_FRAME_WAIT_MS,
+): (frames: number, now: number, bytes?: number) => boolean {
   let last = -1
   let lastMoveAt = 0
-  return (frames: number, now: number) => {
+  let startedAt = -1
+  let lastBytes = -1
+  let lastBytesAt = 0
+  return (frames: number, now: number, bytes?: number) => {
+    if (startedAt < 0) startedAt = now
+    if (bytes !== undefined && bytes !== lastBytes) {
+      lastBytes = bytes
+      lastBytesAt = now
+    }
     if (frames !== last) {
       last = frames
       lastMoveAt = now
       return false
+    }
+    if (frames === 0 && bytes !== undefined && now - lastBytesAt < afterMs) {
+      return now - startedAt >= firstFrameMs
     }
     return now - lastMoveAt >= afterMs
   }
