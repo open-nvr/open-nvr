@@ -24,7 +24,7 @@
 // card uses — this page just gives them room to breathe.
 
 import { HardwareBadge, type HardwareBar } from '../components/HardwareBadge'
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useTranslation } from '../i18n'
 import { useConfirm } from '../components/ui/ConfirmDialog'
 import { useParams, useNavigate } from 'react-router-dom'
@@ -55,6 +55,9 @@ import { skillLabel } from '../lib/skillNames'
 import { Switch } from '../components/ui/Switch'
 import { AppCamerasCard } from './apps/AppCamerasCard'
 import { AppHeader } from './apps/AppHeader'
+import { useAppCameras } from './apps/CameraPicker'
+import { LiveCameraPanel } from '../components/live/LiveCameraPanel'
+import { Modal } from '../components/Modal'
 
 function useApp(appId: string) {
   return useQuery({
@@ -79,7 +82,10 @@ function useLiveStatus(appId: string, enabled: boolean) {
     },
     enabled,
     retry: 0,
-    refetchInterval: enabled ? 5000 : false,
+    // Every 2 s: the counts sit beside live video, and an app such as
+    // Gold Bar Desk updates them about once a second. At 5 s the table
+    // visibly trailed the picture it describes.
+    refetchInterval: enabled ? 2000 : false,
   })
 }
 
@@ -123,6 +129,23 @@ function useTier0() {
   })
 }
 
+// The live row is split like the guard compliance page's (counts on
+// the left, the camera on the right, a handle between them), and
+// remembered the same way: per browser, not something the server keeps.
+const SPLIT_KEY = 'opennvr.appPage.split'
+const POPPED_KEY = 'opennvr.appPage.livePopped'
+//: Neither pane may be squeezed to uselessness.
+const SPLIT_MIN = 35
+const SPLIT_MAX = 80
+
+/** localStorage, which THROWS in private mode rather than returning null. */
+function recall(key: string): string | null {
+  try { return window.localStorage.getItem(key) } catch { return null }
+}
+function remember(key: string, value: string): void {
+  try { window.localStorage.setItem(key, value) } catch { /* not an error */ }
+}
+
 export function AppView() {
   const { appId = '' } = useParams()
   const navigate = useNavigate()
@@ -139,6 +162,7 @@ export function AppView() {
 
   const [configOpen, setConfigOpen] = useState(false)
   const [activeAction, setActiveAction] = useState<ManifestAction | null>(null)
+  const [detailsOpen, setDetailsOpen] = useState(false)
 
   const availableTasks = useMemo(
     () => computeAvailableTasks(caps.data, tier0.data),
@@ -156,6 +180,44 @@ export function AppView() {
   const missing = requires.filter((t) => !availableTasks.has(t))
   const stateSchema = Array.isArray(app?.manifest?.state_schema) ? app!.manifest!.state_schema! : []
   const actions = (app?.manifest?.actions ?? []).filter((a) => a && a.name && a.label)
+
+  // The app's cameras, live. Same query key as the cameras row above it
+  // (AppCamerasCard), so this is one fetch, not two. With several picked
+  // cameras the panel's title becomes a switcher; the first is the default.
+  const picks = useAppCameras(appId, !!app && app.camera_picker !== false)
+  const liveCameras = (picks.data?.cameras ?? []).filter((c) => c.picked)
+  const [liveChoice, setLiveChoice] = useState<number | null>(null)
+  const liveCamera = liveCameras.find((c) => c.id === liveChoice) ?? liveCameras[0] ?? null
+
+  const [split, setSplit] = useState(() => {
+    const n = Number(recall(SPLIT_KEY))
+    return Number.isFinite(n) && n >= SPLIT_MIN && n <= SPLIT_MAX ? n : 60
+  })
+  const [popped, setPopped] = useState(() => recall(POPPED_KEY) === 'yes')
+  const rowRef = useRef<HTMLDivElement>(null)
+  const startDrag = useCallback((down: React.PointerEvent) => {
+    const row = rowRef.current
+    if (!row) return
+    down.preventDefault()
+    // Captured on the handle, so a fast drag that outruns the pointer
+    // keeps resizing instead of dropping the gesture over the video.
+    const handle = down.currentTarget as HTMLElement
+    handle.setPointerCapture(down.pointerId)
+    const move = (e: PointerEvent) => {
+      const box = row.getBoundingClientRect()
+      if (box.width <= 0) return
+      const pct = ((e.clientX - box.left) / box.width) * 100
+      setSplit(Math.round(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, pct))))
+    }
+    const up = () => {
+      handle.releasePointerCapture(down.pointerId)
+      handle.removeEventListener('pointermove', move)
+      handle.removeEventListener('pointerup', up)
+      setSplit((pct) => { remember(SPLIT_KEY, String(pct)); return pct })
+    }
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', up)
+  }, [])
 
   const toggle = useMutation({
     mutationFn: () => (app?.enabled ? apiService.disableApp(appId) : apiService.enableApp(appId)),
@@ -213,7 +275,11 @@ export function AppView() {
   const uptimeS = status.data?.health?.uptime_s as number | undefined
 
   return (
-    <div className="space-y-3">
+    // Bounded to the window on a desktop, like the guard compliance page:
+    // the shell's <main> is min-height, so without this the live row
+    // would grow to fit and the page would scroll. 5rem = top bar plus
+    // the shell's padding.
+    <div className="flex flex-col gap-3 lg:h-[calc(100vh-5rem)]">
       <AppHeader
         name={app.name}
         category={app.category}
@@ -310,36 +376,56 @@ export function AppView() {
           like every other application page. */}
       <AppCamerasCard app={app} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* ── Details + live dashboard ───────────────────────────── */}
-        <div className="lg:col-span-2 space-y-4">
-          {(app.manifest?.description || (app.manifest?.use_cases ?? []).length > 0) && (
-            <Card>
-              <CardHeader>
-                <BookOpen size={16} className="text-[var(--text-dim)]" />
-                <CardTitle>Details</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                {(app.manifest?.description ?? '')
-                  .split(/\n{2,}/)
-                  .map((p) => p.trim())
-                  .filter(Boolean)
-                  .map((p, i) => (
-                    <p key={i} className="leading-relaxed">{p}</p>
+      {/* ── Live: the counts and the camera, side by side ───────────
+          As on the guard compliance page: this row takes the height the
+          rest leaves, so on a desktop the page itself never scrolls —
+          long counts scroll inside their own column. On a narrow screen
+          the two stack and the page scrolls as usual. The camera panel
+          never moves in the tree when it floats out: re-parenting it
+          would unmount the player and drop the stream. */}
+      <div ref={rowRef} className="flex flex-col gap-3 lg:min-h-0 lg:flex-1 lg:flex-row lg:gap-0"
+           style={{ '--split': `${split}%` } as CSSProperties}>
+        <div className={`flex min-w-0 flex-col gap-3 lg:min-h-0 lg:overflow-y-auto ${liveCamera && !popped ? 'lg:w-[var(--split)]' : 'w-full'}`}>
+          <Card className={hasUi && app.enabled ? 'shrink-0' : 'shrink-0 lg:flex-1'}>
+            <CardHeader className="flex-wrap gap-y-2">
+              <Activity size={16} className="text-[var(--text-dim)]" />
+              <CardTitle>Live</CardTitle>
+              {app.enabled && status.isFetching && (
+                <span className="text-xs text-[var(--text-dim)]">updating…</span>
+              )}
+              {/* The app's actions, small, beside the counts they act on;
+                  what each one does is in its tooltip. */}
+              {actions.length > 0 && (
+                <span className="ml-auto flex flex-wrap justify-end gap-1.5">
+                  {actions.map((a) => (
+                    <button
+                      key={a.name}
+                      type="button"
+                      className="border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-xs hover:border-[var(--accent,var(--border))] disabled:opacity-50"
+                      onClick={() => setActiveAction(a)}
+                      disabled={!app.enabled}
+                      title={!app.enabled ? 'Enable the app first' : a.description || a.label}
+                    >
+                      {a.label}
+                    </button>
                   ))}
-                {(app.manifest?.use_cases ?? []).length > 0 && (
-                  <div>
-                    <div className="text-xs text-[var(--text-dim)] mb-1">What you can do with it</div>
-                    <ul className="list-disc pl-5 space-y-0.5">
-                      {(app.manifest?.use_cases ?? []).map((u) => (
-                        <li key={u}>{u}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
+                </span>
+              )}
+            </CardHeader>
+            <CardContent>
+              {!app.enabled ? (
+                <div className="text-sm text-[var(--text-dim)] py-6 text-center">
+                  Enable this app to see live activity.
+                </div>
+              ) : stateSchema.length === 0 ? (
+                <div className="text-sm text-[var(--text-dim)] py-6 text-center">
+                  {status.data ? 'Running — this app exposes no live metrics.' : 'Connecting…'}
+                </div>
+              ) : (
+                <LiveStateViews appId={app.id} views={stateSchema} />
+              )}
+            </CardContent>
+          </Card>
           {hasUi && app.enabled && (
             <Card>
               <CardHeader>
@@ -367,128 +453,111 @@ export function AppView() {
               </CardContent>
             </Card>
           )}
-          <Card>
-            <CardHeader>
-              <Activity size={16} className="text-[var(--text-dim)]" />
-              <CardTitle>Live</CardTitle>
-              {app.enabled && status.isFetching && (
-                <span className="ml-auto text-xs text-[var(--text-dim)]">updating…</span>
-              )}
-            </CardHeader>
-            <CardContent>
-              {!app.enabled ? (
-                <div className="text-sm text-[var(--text-dim)] py-6 text-center">
-                  Enable this app to see live activity.
-                </div>
-              ) : stateSchema.length === 0 ? (
-                <div className="text-sm text-[var(--text-dim)] py-6 text-center">
-                  {status.data ? 'Running — this app exposes no live metrics.' : 'Connecting…'}
-                </div>
-              ) : (
-                <LiveStateViews appId={app.id} views={stateSchema} />
-              )}
-            </CardContent>
-          </Card>
         </div>
-
-        {/* ── Actions + About ────────────────────────────────────── */}
-        <div className="space-y-4">
-          {actions.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Quick actions</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {actions.map((a) => (
-                  <button
-                    key={a.name}
-                    className="w-full text-left border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 hover:border-[var(--accent,var(--border))] disabled:opacity-50"
-                    onClick={() => setActiveAction(a)}
-                    disabled={!app.enabled}
-                    title={!app.enabled ? 'Enable the app first' : a.description || a.name}
-                  >
-                    <div className="text-sm font-medium">{a.label}</div>
-                    {a.description && <div className="text-xs text-[var(--text-dim)]">{a.description}</div>}
-                  </button>
-                ))}
-              </CardContent>
-            </Card>
-          )}
-
-          <Card>
-            <CardHeader>
-              <CardTitle>About</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2 text-sm">
-              {asStringList(app.manifest?.emits?.map((e) => e.name)).length > 0 && (
-                <div>
-                  <div className="text-xs text-[var(--text-dim)] mb-1">Emits</div>
-                  <div className="flex flex-wrap gap-1">
-                    {(app.manifest?.emits ?? []).map((e) => (
-                      <Badge key={e.name} variant={e.severity === 'high' ? 'destructive' : 'neutral'}>{e.name}</Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {(app.manifest?.requires_scopes ?? []).length > 0 && (
-                <div>
-                  <div className="text-xs text-[var(--text-dim)] mb-1">
-                    Event scopes (granted at registration, audited)
-                  </div>
-                  <div className="flex flex-wrap gap-1">
-                    {(app.manifest?.requires_scopes ?? []).map((sc) => (
-                      <Badge key={sc} variant="info">{sc}</Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {(app.manifest?.author || app.manifest?.website || app.manifest?.license) && (
-                <div className="space-y-1">
-                  {app.manifest?.author && (
-                    <div className="text-xs text-[var(--text-dim)]">
-                      By <span className="text-[var(--text)]">{app.manifest.author}</span>
-                    </div>
-                  )}
-                  {app.manifest?.website && (
-                    <div className="text-xs">
-                      <a
-                        href={app.manifest.website}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        className="text-[var(--accent,var(--text))] hover:underline inline-flex items-center gap-1"
-                      >
-                        <ExternalLink size={11} /> {app.manifest.website}
-                      </a>
-                    </div>
-                  )}
-                  {app.manifest?.license && (
-                    <div className="text-xs text-[var(--text-dim)]">
-                      License: {app.manifest.license}
-                    </div>
-                  )}
-                  {app.manifest?.contact && (
-                    <div className="text-xs pt-1">
-                      <a
-                        href={app.manifest.contact}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        className="text-[var(--accent,var(--text))] hover:underline"
-                      >
-                        Need SMS/phone alerts, automation, or a custom feature? Contact us →
-                      </a>
-                    </div>
-                  )}
-                </div>
-              )}
-              {app.url && (
-                <div className="text-xs text-[var(--text-dim)]">
-                  Contract: <span className="font-mono">{app.url}</span>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+        {liveCamera && !popped && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize the counts and the camera"
+            onPointerDown={startDrag}
+            className="group hidden w-3 shrink-0 cursor-col-resize items-center justify-center lg:flex"
+          >
+            <div className="h-10 w-[3px] rounded bg-[var(--border)] group-hover:bg-[var(--accent)]" />
+          </div>
+        )}
+        {/* No cameras picked: nothing here — the header's notice says so,
+            with the button that fixes it. */}
+        {liveCamera && (
+          <div className={popped ? 'h-0 w-0' : 'min-h-[300px] min-w-0 lg:w-[calc(100%-var(--split)-0.75rem)]'}>
+            <LiveCameraPanel
+              layerScope={`app:${app.id}`}
+              cameraId={liveCamera.id}
+              cameraName={liveCamera.name}
+              cameras={liveCameras.map((c) => ({ id: c.id, name: c.name }))}
+              onSelectCamera={setLiveChoice}
+              overlayEnabled={app.overlay_enabled}
+              popped={popped}
+              onTogglePop={() => setPopped((v) => {
+                remember(POPPED_KEY, v ? 'no' : 'yes')
+                return !v
+              })}
+            />
+          </div>
+        )}
       </div>
+
+      {/* ── About, in one line: reference facts nobody reads twice
+          should not cost a screen. The long description opens on
+          request. */}
+      <Card className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1.5 text-xs text-[var(--text-dim)]">
+        {(app.manifest?.description || (app.manifest?.use_cases ?? []).length > 0) && (
+          <button type="button" onClick={() => setDetailsOpen(true)}
+                  className="inline-flex items-center gap-1 text-[var(--accent,var(--text))] hover:underline">
+            <BookOpen size={12} /> Details
+          </button>
+        )}
+        {(app.manifest?.emits ?? []).length > 0 && (
+          <span className="inline-flex flex-wrap items-center gap-1.5">
+            Emits
+            {(app.manifest?.emits ?? []).map((e) => (
+              <span key={e.name}
+                    className={`font-mono text-[11px] ${e.severity === 'high' ? 'text-[var(--danger)]' : 'text-[var(--text)]'}`}
+                    title={e.severity ? `${e.severity} severity` : undefined}>
+                {e.name}
+              </span>
+            ))}
+          </span>
+        )}
+        {(app.manifest?.requires_scopes ?? []).length > 0 && (
+          <span title={`Granted at registration, audited: ${(app.manifest?.requires_scopes ?? []).join(', ')}`}>
+            {(app.manifest?.requires_scopes ?? []).length} event
+            {(app.manifest?.requires_scopes ?? []).length === 1 ? ' scope' : ' scopes'}
+          </span>
+        )}
+        {app.manifest?.author && (
+          <span>By <span className="text-[var(--text)]">{app.manifest.author}</span></span>
+        )}
+        {app.manifest?.license && <span>License: {app.manifest.license}</span>}
+        {app.manifest?.website && (
+          <a href={app.manifest.website} target="_blank" rel="noreferrer noopener"
+             className="inline-flex items-center gap-1 text-[var(--accent,var(--text))] hover:underline">
+            <ExternalLink size={11} /> Website
+          </a>
+        )}
+        {app.url && (
+          <span>Contract: <span className="font-mono">{app.url}</span></span>
+        )}
+        {app.manifest?.contact && (
+          <a href={app.manifest.contact} target="_blank" rel="noreferrer noopener"
+             className="ml-auto text-[var(--accent,var(--text))] hover:underline">
+            Need SMS/phone alerts, automation, or a custom feature? Contact us →
+          </a>
+        )}
+      </Card>
+
+      {detailsOpen && (
+        <Modal open title={`${app.name} — details`} onClose={() => setDetailsOpen(false)} widthClassName="w-[640px]">
+          <div className="space-y-3 text-sm">
+            {(app.manifest?.description ?? '')
+              .split(/\n{2,}/)
+              .map((p) => p.trim())
+              .filter(Boolean)
+              .map((p, i) => (
+                <p key={i} className="leading-relaxed">{p}</p>
+              ))}
+            {(app.manifest?.use_cases ?? []).length > 0 && (
+              <div>
+                <div className="text-xs text-[var(--text-dim)] mb-1">What you can do with it</div>
+                <ul className="list-disc pl-5 space-y-0.5">
+                  {(app.manifest?.use_cases ?? []).map((u) => (
+                    <li key={u}>{u}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
 
       {configOpen && <AppConfigModal app={app} onClose={() => setConfigOpen(false)} />}
       {activeAction && (

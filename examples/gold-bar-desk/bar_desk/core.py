@@ -30,6 +30,15 @@ import cv2
 import numpy as np
 
 
+def _span(seconds: float) -> str:
+    """12 s, 3 min, 3 min 20 s: a duration as a person reads it."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return "%d s" % seconds
+    m, sec = divmod(seconds, 60)
+    return "%d min" % m if sec == 0 else "%d min %d s" % (m, sec)
+
+
 @dataclass
 class DeskSettings:
     missing_after_s: float = 25.0     # full count unseen this long -> alarm
@@ -39,6 +48,14 @@ class DeskSettings:
     # of 2) the time rule alone raised a false alarm on footage where
     # nothing went missing. 50 is 25 s at the intended 2 fps.
     missing_min_frames: float = 50
+    # Trimming means one bar in the worker's hands, and often below his arm
+    # or in his lap, out of the overhead camera's view for longer than
+    # missing_after_s. Up to this many bars out of view are treated as "with
+    # the worker": an amber status, no alarm, until with_worker_s. More bars
+    # out of view than this alarm at missing_after_s as before. 0 turns the
+    # stage off (every bar out of view alarms at missing_after_s).
+    bars_with_worker: float = 1
+    with_worker_s: float = 180.0
     # Below this many analysed frames a second, the missing-bar alarm is
     # PAUSED, not guessed. The full count shows only in brief moments, and
     # at 0.3 fps (a loaded test box) the app missed so many of them that
@@ -87,6 +104,19 @@ class Zones:
     shape: tuple[int, int] = (0, 0)      # frame (h, w) these were built for
     _masks: dict = field(default_factory=dict, repr=False)
 
+    def roi(self, pad: int = 8):
+        """The area every gold rule looks at: all zones' bounding box, with
+        a margin so a morphology opening behaves at its edges as it would
+        on the whole frame. Cached per zone drawing."""
+        if "_roi" not in self._masks:
+            rects = [self.rect(n) for n in ("tray", "balance", "handling", "body")]
+            rects = [r for r in rects if r is not None]
+            H, W = self.shape
+            self._masks["_roi"] = (
+                max(0, min(r[0] for r in rects) - pad), max(0, min(r[1] for r in rects) - pad),
+                min(W, max(r[2] for r in rects) + pad), min(H, max(r[3] for r in rects) + pad))
+        return self._masks["_roi"]
+
     def mask(self, name: str):
         """Boolean mask of a zone at this frame size (cached), or None."""
         poly = getattr(self, name)
@@ -111,7 +141,50 @@ class Zones:
 def gold_mask(bgr, s_min=70, v_min=110):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     h, s, v = cv2.split(hsv)
+    return gold_from(h, s, v, s_min, v_min)
+
+
+def gold_from(h, s, v, s_min=70, v_min=110):
+    """gold_mask() on channels already converted: one conversion a frame
+    serves every threshold the rules use."""
     return (h >= 12) & (h <= 38) & (s >= s_min) & (v >= v_min)
+
+
+class FrameColour:
+    """A frame's HSV channels, converted ONCE and only over the zones.
+
+    The rules look at gold in the trays, on the balance, in the handling
+    zone and near the body, with three different thresholds. Converting
+    the whole 1080p frame for each was most of the app's CPU time (six
+    colour conversions a frame, measured), on a desk that fills a part of
+    the picture. Masks come back full-frame-sized, zero outside the zones'
+    area, so every rule keeps its frame coordinates.
+    """
+
+    def __init__(self, frame, roi) -> None:
+        self.shape = frame.shape[:2]
+        self.roi = roi
+        x0, y0, x1, y1 = roi
+        hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+        self.h, self.s, self.v = cv2.split(hsv)
+
+    def gold(self, s_min=70, v_min=110, open_px: int = 0):
+        """Gold pixels, full-frame-sized; opened by open_px x open_px."""
+        x0, y0, x1, y1 = self.roi
+        g = gold_from(self.h, self.s, self.v, s_min, v_min)
+        if open_px:
+            g = cv2.morphologyEx(g.astype(np.uint8), cv2.MORPH_OPEN,
+                                 np.ones((open_px, open_px), np.uint8)) > 0
+        out = np.zeros(self.shape, bool)
+        out[y0:y1, x0:x1] = g
+        return out
+
+    def gold_in(self, rect, s_min=70, v_min=110):
+        """Gold pixels inside ``rect`` (frame coordinates, within the zones)."""
+        x0, y0, x1, y1 = rect
+        rx, ry = self.roi[0], self.roi[1]
+        sl = (slice(y0 - ry, y1 - ry), slice(x0 - rx, x1 - rx))
+        return gold_from(self.h[sl], self.s[sl], self.v[sl], s_min, v_min)
 
 
 def iou(a, b) -> float:
@@ -156,7 +229,6 @@ class BarTracker:
             self.tracks[self.next_id] = dict(c=cents[i], box=boxes[i], seen=t, hits=1)
             self.next_id += 1
 
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         for tid in list(self.tracks):
             tr = self.tracks[tid]
             if tr["seen"] == t:
@@ -168,8 +240,10 @@ class BarTracker:
             if t - tr["seen"] < self.hold_s:
                 continue
             x, y, w, h = tr["box"]
-            patch = hsv[y + h // 4:y + 3 * h // 4, x + w // 4:x + 3 * w // 4]
-            if patch.size and (patch[..., 2] < 75).mean() > 0.6:
+            # HSV's V is max(B, G, R): read it from the patch itself rather
+            # than converting the whole frame to HSV for a few patches.
+            patch = frame[y + h // 4:y + 3 * h // 4, x + w // 4:x + 3 * w // 4]
+            if patch.size and (patch.max(axis=2) < 75).mean() > 0.6:
                 del self.tracks[tid]                # bare tray: really gone
                 continue
             for oid, o in self.tracks.items():
@@ -220,6 +294,12 @@ class DeskMonitor:
         self.frame_gap = 0.0                     # seconds since the previous look
         self._gaps: deque = deque(maxlen=10)
         self.too_slow = False                    # missing-bar alarm paused
+        # A bar (or bars_with_worker of them) out of view past
+        # missing_after_s, not yet alarming: (bars, since t), else None.
+        self.with_worker: tuple[int, float] | None = None
+        self._pending_shift: int | None = None   # see request_new_shift()
+        self._pending_ack = False
+        self.slow_fps: float | None = None       # the rate that paused it
         self.last: dict = {}
 
     # ── helpers ──
@@ -241,6 +321,32 @@ class DeskMonitor:
         self.full_seen_at = None
         self.count_alarm = None
         self.high_since = None
+        self.with_worker = None
+
+    # The app's actions arrive on the web server's thread while analyse()
+    # runs on the camera's. Resetting the count under a frame in flight
+    # crashed it ('float' - 'NoneType': started_at wiped mid-frame), so
+    # an action only leaves a request, and the next frame applies it
+    # before it reads anything. A single attribute store is atomic.
+
+    def request_new_shift(self, bars: int) -> None:
+        """Start the shift again at the next frame, against ``bars``
+        (0: learn the count)."""
+        self._pending_shift = max(0, int(bars or 0))
+
+    def request_acknowledge(self) -> None:
+        """Clear the count alarm at the next frame."""
+        self._pending_ack = True
+
+    def _apply_requests(self) -> None:
+        bars, self._pending_shift = self._pending_shift, None
+        if bars is not None:
+            self.recount()
+            self.set_baseline(bars)
+        if self._pending_ack:
+            self._pending_ack = False
+            self.count_alarm = None
+            self.full_seen_at = None
 
     def set_baseline(self, bars: int) -> None:
         if bars and bars > 0:
@@ -249,6 +355,10 @@ class DeskMonitor:
                 self.full_seen_at = None
             self.baseline = int(bars)
             self.given_baseline = True
+
+    def _note(self, text: str, t: float) -> None:
+        """A line for the app's Recent feed: no alert, just the record."""
+        self.on_event({"type": "note", "text": text, "t": t})
 
     def _alert(self, kind: str, severity: str, title: str, detail: str, t: float,
                frame, box=None) -> None:
@@ -259,6 +369,7 @@ class DeskMonitor:
     # ── one analysed frame ──
 
     def analyse(self, frame, t: float) -> dict:
+        self._apply_requests()
         z = self.zones
         if self.started_at is None:
             self.started_at = t
@@ -284,17 +395,16 @@ class DeskMonitor:
         self.tracker.update(boxes, frame, t)
         tracks = self.tracker.confirmed()
 
-        gold = gold_mask(frame)
-        gold_open = cv2.morphologyEx(gold.astype(np.uint8), cv2.MORPH_OPEN,
-                                     np.ones((5, 5), np.uint8)) > 0
+        colour = FrameColour(frame, z.roi())
+        gold_open = colour.gold(open_px=5)
         unit = self.unit()
 
-        hidden, hidden_boxes = self._hidden_bars(frame, tracks, unit)
+        hidden, hidden_boxes = self._hidden_bars(colour, tracks, unit)
 
         # A bar on the precision balance: 2 of the last 3 frames agree.
         pan_mask = z.mask("balance")
         if pan_mask is not None:
-            pan = gold_mask(frame, 60, 100) & pan_mask
+            pan = colour.gold(60, 100) & pan_mask
             self._pan_votes.append(bool(pan.sum() > self.s.pan_fraction * pan_mask.sum()))
         # Plain Python values from here on: these end up in alert evidence,
         # and a numpy bool there made the alert unserialisable (it was lost).
@@ -324,13 +434,13 @@ class DeskMonitor:
                          in_hand=in_hand, total=total, bars=smooth)
         return self.last
 
-    def _hidden_bars(self, frame, tracks, unit):
+    def _hidden_bars(self, colour: "FrameColour", tracks, unit):
         """Bars too covered by an arm for the segmenter to outline: bright
         gold inside the trays that no tracked bar accounts for, counted in
         whole-bar units. Arms are far darker than polished gold, so they
         do not count."""
         x0, y0, x1, y1 = self.zones.rect("tray")
-        g = gold_mask(frame[y0:y1, x0:x1], 50, 120).astype(np.uint8)
+        g = colour.gold_in((x0, y0, x1, y1), 50, 120).astype(np.uint8)
         g &= self.zones.mask("tray")[y0:y1, x0:x1].astype(np.uint8)
         for tr in tracks.values():
             x, y, w, h = tr["box"]
@@ -367,6 +477,10 @@ class DeskMonitor:
             return
         fps = self.analysis_fps()
         self.too_slow = fps is not None and fps < self.s.min_analysis_fps
+        # Kept, because analysis_fps() asked a moment later has often
+        # recovered past the minimum, and "1.1 fps; needs 1" then reads
+        # as nonsense.
+        self.slow_fps = fps if self.too_slow else None
         if self.too_slow and self.count_alarm != "missing":
             # Too few looks to tell "hidden" from "gone". Start the window
             # again from now, so that when speed recovers it needs a full
@@ -382,14 +496,39 @@ class DeskMonitor:
         while self._recent and t - self._recent[0][0] > self.s.missing_after_s:
             self._recent.popleft()
         unseen = t - self.full_seen_at
-        if unseen >= self.s.missing_after_s and \
+        # How many bars have been out of view ever since the full count was
+        # last seen: the best count since then, against the start.
+        best_since = max([n for ts, n in self._recent if ts > self.full_seen_at] or [total])
+        out = max(0, self.baseline - best_since)
+        limit = self.s.missing_after_s
+        holding = (0 < out <= self.s.bars_with_worker
+                   and unseen >= self.s.missing_after_s
+                   and self.count_alarm != "missing")
+        if holding:
+            limit = max(limit, self.s.with_worker_s)
+            if self.with_worker is None:
+                self.with_worker = (out, self.full_seen_at)
+                self._note("%d bar%s with the worker (out of view %d s)" % (
+                    out, "" if out == 1 else "s", unseen), t)
+            else:
+                self.with_worker = (out, self.with_worker[1])
+        elif self.with_worker is not None and unseen == 0:
+            self._note("all %d bars back in view after %s" % (
+                self.baseline, _span(t - self.with_worker[1])), t)
+            self.with_worker = None
+        if unseen >= limit and \
                 self.frames_since_full >= self.s.missing_min_frames and \
                 self.count_alarm != "missing":
             self.count_alarm = "missing"
             since = [n for ts, n in self._recent if ts > self.full_seen_at] or [total]
             best = max(since)
             gone = self.baseline - best
+            held = self.with_worker is not None
+            self.with_worker = None
             self._alert("bar_missing", "high", "Possible missing bar",
+                        ("A bar has been with the worker, out of view, for %s: longer "
+                         "than the %s allowed. " % (_span(unseen), _span(self.s.with_worker_s))
+                         if held else "") +
                         "Not all %d bars have been seen at once for %d s; the most "
                         "seen since was %d (in the trays, on the balance and in "
                         "hand), so up to %d bar%s unaccounted for." % (
@@ -474,8 +613,10 @@ class DeskMonitor:
             self.body_since = None
 
     def _check_tamper(self, frame, t: float) -> None:
-        thumb = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (64, 36),
-                           interpolation=cv2.INTER_AREA).astype(np.float32)
+        # Shrink first, then grey: the same thumbnail for a 64x36 conversion
+        # instead of a 1920x1080 one.
+        thumb = cv2.cvtColor(cv2.resize(frame, (64, 36), interpolation=cv2.INTER_AREA),
+                             cv2.COLOR_BGR2GRAY).astype(np.float32)
         if self.ref_thumb is None:
             self.ref_thumb = thumb
         dark = thumb.mean() < 25

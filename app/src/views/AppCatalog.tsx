@@ -32,7 +32,7 @@ import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
-import { useTranslation } from '../i18n'
+import { useDateFormat, useTranslation, type DateFormatters } from '../i18n'
 import { useConfirm } from '../components/ui/ConfirmDialog'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { GeometryEditor } from './apps/GeometryEditor'
@@ -56,6 +56,7 @@ import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic
 import { listOf, skillLabel } from '../lib/skillNames'
 import { InfoTip } from '../components/ui/InfoTip'
 import { AppHeader } from './apps/AppHeader'
+import { AlarmThumb, AlertReview } from '../components/alarms/AlertReview'
 import { verticalFor } from '../lib/appVerticals'
 import { matchesCatalogFilter, sortCatalog, type CatalogSort } from '../lib/catalogFilter'
 import type { AppOffer } from '../services/updateService'
@@ -595,7 +596,11 @@ function useInstallStatusPoll(id: string, active: boolean) {
     queryClient.invalidateQueries({ queryKey: ['apps'] })
     queryClient.invalidateQueries({ queryKey: ['apps-index'] })
   }, [settledStatus, queryClient])
-  return { ...query, timedOut }
+  // Another observer of the same query key (InstallWatcher) can still land
+  // applied/failed after this budget ran out — a slow image pull on a small
+  // board. Only report a timeout while the status really is still pending,
+  // or the dialog shows "applied" and "still pending" side by side.
+  return { ...query, timedOut: timedOut && query.data?.status === 'pending' }
 }
 
 /** Headless: keeps an accepted install intent polling at PAGE level, so
@@ -1110,8 +1115,24 @@ function ImageParamInput({ hasValue, onPick }: { hasValue: boolean; onPick: (b64
 // Generic form for one manifest-declared action — the same
 // params-to-form mechanics as the config modal, POSTed through the
 // server's user-JWT-only proxy to the app's /actions/{name}. Results
-// with a list under "results" reuse the TableView renderer; anything
-// else pretty-prints.
+// with a list under "results" reuse the TableView renderer; a plain
+// {"ok": true, ...} reply reads as a sentence, the raw reply one click
+// away under "Details".
+//
+// Apps name a camera argument "camera" by convention (SDK camera_key()
+// takes "cam3", "3" or 3 alike). An operator knows the camera as
+// "Lab Cam", not "cam2", so that field is a list of the app's cameras.
+function isCameraParam(p: ManifestParam): boolean {
+  return p.name === 'camera' && ['str', 'string', ''].includes((p.type || '').toLowerCase())
+}
+
+/** "bars_at_start" → "Bars at start", when the app gives no label. */
+function humanParamLabel(p: ManifestParam): string {
+  if (p.label) return p.label
+  const words = p.name.replace(/[_-]+/g, ' ').trim()
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
 export function AppActionModal({
   app,
   action,
@@ -1122,6 +1143,7 @@ export function AppActionModal({
   onClose: () => void
 }) {
   const confirm = useConfirm()
+  const { showSuccess } = useSnackbar()
   const params = action.params ?? []
   const [values, setValues] = useState<Record<string, string | boolean>>(() =>
     Object.fromEntries(
@@ -1140,11 +1162,47 @@ export function AppActionModal({
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<any>(null)
 
+  const wantsCamera = params.some(isCameraParam)
+  const picksQuery = useAppCameras(app.id, wantsCamera && app.camera_picker !== false)
+  const actionCameras = useMemo(() => {
+    const all = picksQuery.data?.cameras ?? []
+    const picked = all.filter((c) => c.picked)
+    // "All cameras" apps may list nothing as picked: offer every camera.
+    return (picked.length ? picked : all).map((c) => ({ key: `cam${c.id}`, id: c.id, name: c.name }))
+  }, [picksQuery.data])
+  const cameraName = (handle: unknown): string => {
+    const m = /^cam-?(\d+)$/i.exec(String(handle ?? '').trim())
+    const id = m ? Number(m[1]) : Number(handle)
+    return actionCameras.find((c) => c.id === id)?.name ?? String(handle)
+  }
+
+  // {"ok": true, "message": "..."} → the app's message;
+  // {"ok": true, "cameras": ["cam2"]} → "Start a new shift: done on Lab Cam."
+  const doneMessage = (reply: unknown): string | null => {
+    if (!reply || typeof reply !== 'object') return null
+    const data = reply as { ok?: unknown; results?: unknown; message?: unknown; cameras?: unknown }
+    if (data.ok !== true || Array.isArray(data.results)) return null
+    if (typeof data.message === 'string' && data.message.trim()) return data.message.trim()
+    return Array.isArray(data.cameras) && data.cameras.length
+      ? `${action.label}: done on ${data.cameras.map(cameraName).join(', ')}.`
+      : `${action.label}: done.`
+  }
+
   const runMutation = useMutation({
     mutationFn: (payload: Record<string, any>) =>
       apiService.invokeAppAction(app.id, action.name, payload),
     onSuccess: ({ data }) => {
       setError(null)
+      // A plain acknowledgement ({"ok": true, ...}) has nothing left to
+      // show: close the dialog and say what happened, in the app's own
+      // words when it gives some ("message"). Replies with results stay
+      // open so they can be read.
+      const done = doneMessage(data)
+      if (done) {
+        showSuccess(done)
+        onClose()
+        return
+      }
       setResult(data)
     },
     onError: (e) => setError(extractApiError(e, `${action.label} failed.`)),
@@ -1161,26 +1219,26 @@ export function AppActionModal({
         payload[p.name] = Boolean(raw)
       } else if (t === 'int' || t === 'float') {
         if (!text) {
-          if (p.required) return setError(`"${paramLabel(p)}" is required.`)
+          if (p.required) return setError(`"${humanParamLabel(p)}" is required.`)
           continue
         }
         const num = Number(text)
         if (!Number.isFinite(num) || (t === 'int' && !Number.isInteger(num))) {
-          return setError(`"${paramLabel(p)}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
+          return setError(`"${humanParamLabel(p)}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
         }
         payload[p.name] = num
       } else if (t === 'list' || t === 'dict') {
         if (!text) {
-          if (p.required) return setError(`"${paramLabel(p)}" is required.`)
+          if (p.required) return setError(`"${humanParamLabel(p)}" is required.`)
           continue
         }
         try {
           payload[p.name] = JSON.parse(text)
         } catch {
-          return setError(`"${paramLabel(p)}" is not valid JSON.`)
+          return setError(`"${humanParamLabel(p)}" is not valid JSON.`)
         }
       } else {
-        if (!text && p.required) return setError(`"${paramLabel(p)}" is required.`)
+        if (!text && p.required) return setError(`"${humanParamLabel(p)}" is required.`)
         if (text || !p.required) payload[p.name] = text
       }
     }
@@ -1202,16 +1260,26 @@ export function AppActionModal({
           return (
             <div key={p.name}>
               <label className="block text-sm mb-1">
-                <span className="font-medium">{p.name}</span>
-                <span className="ml-2 text-xs text-[var(--text-dim)]">
-                  {p.type}
-                  {p.required ? ' · required' : ''}
-                </span>
+                <span className="font-medium">{humanParamLabel(p)}</span>
+                {p.required && (
+                  <span className="ml-2 text-xs text-[var(--text-dim)]">required</span>
+                )}
               </label>
               {p.description && (
                 <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>
               )}
-              {t === 'bool' ? (
+              {isCameraParam(p) && actionCameras.length > 0 ? (
+                <select
+                  className="w-full px-2 py-1.5 text-sm border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                  value={String(value ?? '')}
+                  onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                >
+                  <option value="">{p.required ? 'Choose a camera…' : 'Every camera'}</option>
+                  {actionCameras.map((c) => (
+                    <option key={c.key} value={c.key}>{c.name}</option>
+                  ))}
+                </select>
+              ) : t === 'bool' ? (
                 <label className="inline-flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
@@ -1474,7 +1542,10 @@ function GaugeView({ view, value }: { view: StateViewSpec; value: any }) {
   )
 }
 
-function fmtWhen(v: unknown): string {
+/** A feed's time as the operator reads it. The formatters come from the
+ *  caller's useDateFormat(): the operator's language and format, not the
+ *  browser's (tests/test_ui_date_localisation.py). */
+function fmtWhen(v: unknown, fmt: DateFormatters): string {
   if (v == null) return ''
   if (typeof v === 'number') {
     // epoch seconds or ms → relative age
@@ -1486,11 +1557,50 @@ function fmtWhen(v: unknown): string {
     if (age < 86400) return `${Math.floor(age / 3600)}h ago`
     return `${Math.floor(age / 86400)}d ago`
   }
-  return String(v)
+  // An ISO time WITH a zone ("…T01:20:29+00:00", "…Z") is shown in the
+  // viewer's local time; a bare string is the app's own wording, as is.
+  const text = String(v)
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/.test(text)) {
+    const d = new Date(text)
+    if (!Number.isNaN(d.getTime())) {
+      const today = new Date().toDateString() === d.toDateString()
+      return today
+        ? fmt.time(d, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : fmt.dateTime(d, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    }
+  }
+  return text
 }
 
-function LogView({ view, value }: { view: StateViewSpec; value: any }) {
+/** "Review" on a feed line that names an alarm: its photo and footage. */
+function ReviewAlertButton({ appId, row }: {
+  appId: string
+  row: { alert_id: string; camera?: string; time?: string }
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="shrink-0 border border-[var(--border)] px-1.5 py-0.5 text-[11px] text-[var(--accent,var(--text))] hover:bg-[var(--panel)]"
+        title="See this alarm's photo and the footage around it"
+      >
+        Review
+      </button>
+      {open && (
+        <AlertReview sourceName={appId} alertId={row.alert_id} camera={row.camera}
+                     at={row.time} onClose={() => setOpen(false)} />
+      )}
+    </>
+  )
+}
+
+function LogView({ view, value, appId }: { view: StateViewSpec; value: any; appId: string }) {
   // A recent-events feed: array of strings or {message/text, time/ts, level}.
+  // A line with an "alert_id" (and its "camera") is an alarm the app
+  // raised: it gets a Review button that opens the alarm itself.
+  const fmt = useDateFormat()
   if (!Array.isArray(value) || value.length === 0) return null
   const limit = view.limit ?? 12
   const rows = value.slice(-limit).reverse()
@@ -1501,7 +1611,7 @@ function LogView({ view, value }: { view: StateViewSpec; value: any }) {
         {rows.map((row, i) => {
           const isObj = row != null && typeof row === 'object'
           const msg = isObj ? row.message ?? row.text ?? row.msg ?? JSON.stringify(row) : String(row)
-          const when = isObj ? fmtWhen(row.time ?? row.ts ?? row.timestamp ?? row.at) : ''
+          const when = isObj ? fmtWhen(row.time ?? row.ts ?? row.timestamp ?? row.at, fmt) : ''
           const level = isObj ? String(row.level ?? row.severity ?? '') : ''
           const dot = level === 'high' || level === 'error' ? 'var(--danger,#ef4444)'
             : level === 'warn' || level === 'warning' ? 'var(--warning,#f59e0b)'
@@ -1509,8 +1619,14 @@ function LogView({ view, value }: { view: StateViewSpec; value: any }) {
           return (
             <div key={i} className="flex items-start gap-2 px-2 py-1.5 text-xs">
               <span className="mt-1 h-1.5 w-1.5 rounded-full shrink-0" style={{ background: dot }} />
+              {isObj && typeof row.alert_id === 'string' && row.alert_id && (
+                <AlarmThumb sourceName={appId} alertId={row.alert_id} />
+              )}
               <span className="flex-1 break-words">{msg}</span>
               {when && <span className="text-[var(--text-dim)] shrink-0 tabular-nums">{when}</span>}
+              {isObj && typeof row.alert_id === 'string' && row.alert_id && (
+                <ReviewAlertButton appId={appId} row={row} />
+              )}
             </div>
           )
         })}
@@ -1522,6 +1638,7 @@ function LogView({ view, value }: { view: StateViewSpec; value: any }) {
 function GalleryView({ view, value }: { view: StateViewSpec; value: any }) {
   // A thumbnail wall: array of {image|url|src (data-uri or path), label, time}.
   // For LPR plate crops, package-on-porch snapshots, doorbell faces.
+  const fmt = useDateFormat()
   if (!Array.isArray(value) || value.length === 0) return null
   const limit = view.limit ?? 12
   const items = value.slice(-limit).reverse()
@@ -1533,7 +1650,7 @@ function GalleryView({ view, value }: { view: StateViewSpec; value: any }) {
           const isObj = it != null && typeof it === 'object'
           const src = isObj ? it.image ?? it.url ?? it.src ?? it.thumbnail : typeof it === 'string' ? it : undefined
           const caption = isObj ? it.label ?? it.plate ?? it.name ?? it.caption : undefined
-          const when = isObj ? fmtWhen(it.time ?? it.ts ?? it.timestamp ?? it.at) : ''
+          const when = isObj ? fmtWhen(it.time ?? it.ts ?? it.timestamp ?? it.at, fmt) : ''
           return (
             <div key={i} className="border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
               {src ? (
@@ -1594,7 +1711,7 @@ export function LiveStateViews({ appId, views }: { appId: string; views: StateVi
         v.kind === 'table' ? (
           <TableView key={v.name} view={v} value={getStatePath(state, v.path)} />
         ) : v.kind === 'log' ? (
-          <LogView key={v.name} view={v} value={getStatePath(state, v.path)} />
+          <LogView key={v.name} view={v} value={getStatePath(state, v.path)} appId={appId} />
         ) : (
           <GalleryView key={v.name} view={v} value={getStatePath(state, v.path)} />
         )
@@ -1761,6 +1878,7 @@ function OverlayPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
 
 function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }) {
   const queryClient = useQueryClient()
+  const fmt = useDateFormat()
   const { showSuccess, showError } = useSnackbar()
   const [draft, setDraft] = useState('')
   const eg = app.egress
@@ -1838,7 +1956,7 @@ function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
               <div key={dest} className="flex items-center gap-2 flex-wrap">
                 <Badge variant="destructive">{dest}</Badge>
                 <span className="text-[var(--text-dim)]">
-                  {d.count}× · last {fmtWhen(d.last_seen)}
+                  {d.count}× · last {fmtWhen(d.last_seen, fmt)}
                 </span>
                 {isAdmin && (
                   <Button variant="outline" onClick={() => addHost(dest)} disabled={save.isPending}>

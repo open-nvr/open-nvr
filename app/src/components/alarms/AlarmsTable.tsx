@@ -7,6 +7,7 @@ import { DataTable, type Column } from '../ui/DataTable'
 import { SegmentedControl, type SegmentOption } from '../ui/SegmentedControl'
 import { AuthedImage } from '../AuthedImage'
 import { EvidenceViewer } from '../EvidenceViewer'
+import { AlertClip } from './AlertClip'
 import {
   alarmSeenAt, alarmSeenTitle, alertsInboxService, type InboxAlert,
 } from '../../services/alertsInboxService'
@@ -377,6 +378,12 @@ export function AlarmEvidenceViewer({
       queryKeyPrefix={['alert-image', alert.id]}
       fetchBlob={(name, signal) =>
         alertsInboxService.getAlertImage(alert.id, name, signal)}
+      extra={<>
+        {alert.description && (
+          <p className="mt-3 text-sm text-[var(--text-dim)]">{alert.description}</p>
+        )}
+        <AlertClip alert={alert} />
+      </>}
       onClose={onClose}
     />
   )

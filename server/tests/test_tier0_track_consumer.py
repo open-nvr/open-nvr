@@ -97,6 +97,23 @@ def test_nothing_drawable_returns_none():
     assert tc.to_overlay_payload(_raw([{"id": 1, "label": "x", "score": 0.01, "box": [0, 0, 9, 9]}])) is None
 
 
+def test_an_app_box_layer_reaches_the_browser_cleaned():
+    """overlay.boxes.v1 ``layer``: forwarded so the viewer can switch a
+    whole layer off; whitespace collapsed, capped, and dropped when it is
+    not a non-empty string."""
+    out = tc.to_overlay_payload(_raw([
+        {"id": 1, "label": "Trays: 24", "score": 1.0, "box": [0, 0, 10, 10], "layer": "  Zone\n counts "},
+        {"id": 2, "label": "Bar", "score": 1.0, "box": [0, 0, 10, 10], "layer": "x" * 100},
+        {"id": 3, "label": "Bar", "score": 1.0, "box": [0, 0, 10, 10], "layer": 7},
+        {"id": 4, "label": "Bar", "score": 1.0, "box": [0, 0, 10, 10], "layer": "   "},
+        {"id": 5, "label": "Bar", "score": 1.0, "box": [0, 0, 10, 10]},
+    ]), min_score=0.0)
+    rows = {t["id"]: t for t in out["tracks"]}
+    assert rows[1]["layer"] == "Zone counts"
+    assert rows[2]["layer"] == "x" * tc.LAYER_MAX_CHARS
+    assert all("layer" not in rows[i] for i in (3, 4, 5))
+
+
 def test_coasting_tracks_are_not_drawn():
     """Reported: phantom boxes pile up on a moving scene while the real
     vehicle goes unboxed. The tracker coasts an unmatched track for up
