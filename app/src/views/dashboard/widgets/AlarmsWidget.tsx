@@ -6,7 +6,8 @@ import { Link } from 'react-router-dom'
 import { Bell, ShieldCheck } from 'lucide-react'
 import { useTranslation, useDateFormat } from '../../../i18n'
 import { useCameras, useUnackedAlerts } from '../../../lib/queries'
-import { alarmSeenIso, alarmSeenTitle } from '../../../services/alertsInboxService'
+import { alarmSeenIso, alarmSeenTitle, type InboxAlert } from '../../../services/alertsInboxService'
+import { AlarmReviewer } from '../../../components/alarms/AlertReview'
 import { SeverityBadge, Skeleton } from '../../../components/ui'
 import { WidgetFrame, shortAge } from '../WidgetFrame'
 
@@ -21,7 +22,9 @@ const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2,
 /**
  * Open (unacknowledged) alarms, worst first and newest within a severity.
  * Read-only on purpose: acknowledging belongs to the bell and the Alarms
- * page, where the operator sees the evidence before dismissing it.
+ * page, where the operator sees the evidence before dismissing it. A row
+ * opens that evidence here (photo, description, footage), as the bell
+ * does; "View all" goes to the Alarms page.
  */
 export function AlarmsWidget({ editing, onRemove }: { editing?: boolean; onRemove?: () => void }) {
   const { t } = useTranslation()
@@ -29,6 +32,7 @@ export function AlarmsWidget({ editing, onRemove }: { editing?: boolean; onRemov
   const q = useUnackedAlerts()
   const cams = useCameras()
   const [now, setNow] = useState(() => Date.now())
+  const [reviewing, setReviewing] = useState<InboxAlert | null>(null)
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 30_000)
     return () => window.clearInterval(id)
@@ -73,9 +77,10 @@ export function AlarmsWidget({ editing, onRemove }: { editing?: boolean; onRemov
             const where = [cam, a.source_name].filter(Boolean).join(' · ')
             return (
               <li key={a.id}>
-                <Link
-                  to="/alerts-incidents"
-                  className="flex items-start gap-2 pl-0 pr-2.5 py-1.5 hover:bg-[var(--panel)]"
+                <button
+                  type="button"
+                  onClick={() => setReviewing(a)}
+                  className="flex w-full items-start gap-2 pl-0 pr-2.5 py-1.5 text-left hover:bg-[var(--panel)]"
                   title={alarmSeenTitle(a, fmt)}
                 >
                   <span className="w-[3px] self-stretch shrink-0" style={{ background: SEVERITY_INK[a.severity] ?? 'var(--text-dim)' }} aria-hidden="true" />
@@ -89,7 +94,7 @@ export function AlarmsWidget({ editing, onRemove }: { editing?: boolean; onRemov
                   <span className="font-mono tabular-nums text-[10.5px] text-[var(--text-dim)] shrink-0 pt-0.5">
                     {shortAge(alarmSeenIso(a), now)}
                   </span>
-                </Link>
+                </button>
               </li>
             )
           })}
@@ -100,6 +105,7 @@ export function AlarmsWidget({ editing, onRemove }: { editing?: boolean; onRemov
           )}
         </ul>
       )}
+      {reviewing && <AlarmReviewer alert={reviewing} onClose={() => setReviewing(null)} />}
     </WidgetFrame>
   )
 }

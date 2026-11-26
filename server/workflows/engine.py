@@ -35,8 +35,11 @@ What runs today:
   by name) and **webhook** (to an enabled webhook, Slack or Teams
   integration by name: the admin-approved destinations).
 
-``home_assistant`` is recorded as "not available yet" and the path
-carries on.
+* **home_assistant** calls a Home Assistant service (``lock.unlock``)
+  through an enabled Home Assistant integration (Settings >
+  Integrations: its URL and long-lived token), named by ``to`` or the
+  site's only one. It moves things, so the validator lets it follow only
+  a person's reply or a plain rule.
 
 In **Test** every action is recorded as "would have" and nothing is done;
 AI steps run for real, so the trace is genuine, and Ask a person asks
@@ -870,6 +873,9 @@ class _Walker:
         elif kind == "webhook":
             outcome, why = await self._webhook(spec)
             self.record(sp, kind, outcome=outcome, inputs=spec, reason=why)
+        elif kind == "home_assistant":
+            outcome, why = await self._home_assistant(spec)
+            self.record(sp, kind, outcome=outcome, inputs=spec, reason=why)
         else:
             self.record(sp, kind, outcome="skipped", inputs=spec, reason=NOT_YET)
 
@@ -950,6 +956,29 @@ class _Walker:
                    "reason": self.ctx.values.get("reason"), **(spec.get("body") or {})}
         self.db.commit()
         result = await IntegrationService._send_webhook(integ, payload)
+        return ("done" if result.get("success") else "failed"), str(result.get("message"))[:300]
+
+    async def _home_assistant(self, spec: dict[str, Any]) -> tuple[str, str]:
+        """Call a Home Assistant service through an enabled Home Assistant
+        integration: the one named ``to``, or the site's only one."""
+        from models import Integration
+        from services.integration_service import IntegrationService
+
+        found = [i for i in self.db.query(Integration).filter(Integration.enabled.is_(True)).all()
+                 if str(getattr(i.type, "value", i.type)) == "home_assistant"]
+        to = spec.get("to")
+        if to:
+            found = [i for i in found if i.name == to]
+            if not found:
+                return "failed", f"no enabled Home Assistant integration named {to!r}"
+        elif not found:
+            return "failed", "no enabled Home Assistant integration (Settings > Integrations)"
+        elif len(found) > 1:
+            return "failed", ("more than one Home Assistant integration: name one with to: "
+                              + ", ".join(sorted(i.name for i in found)))
+        self.db.commit()
+        result = await IntegrationService.call_home_assistant(
+            found[0], str(spec["service"]), dict(spec.get("data") or {}))
         return ("done" if result.get("success") else "failed"), str(result.get("message"))[:300]
 
     async def _app_action(self, spec: dict[str, Any]) -> tuple[str, str | None]:
