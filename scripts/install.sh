@@ -1883,6 +1883,15 @@ main() {
         env_set UPDATE_RUNNER on
         ok "Update runner: installed when OpenNVR starts; releases install by themselves at night (change this in Configuration → OpenNVR Updates)"
     fi
+    # No working RTC (many boards): `up` makes Docker wait for NTP at boot,
+    # so cameras never start recording on the time saved at shutdown (#1023).
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        # shellcheck source=scripts/time-sync.sh
+        . "$PROJECT_ROOT/scripts/time-sync.sh"
+        if ts_applicable && ! ts_rtc_usable && [[ "$(env_get TIME_SYNC_WAIT)" != "off" ]]; then
+            ok "No working hardware clock: Docker will wait for NTP at boot, at most ${TS_WAIT_SECONDS} s (set up when OpenNVR starts; opt out: ./start.sh time-sync-wait disable)"
+        fi
+    fi
     printf '\n  Configuration and images are ready. Starting OpenNVR...\n\n'
     # Last word before exec — after this, compose owns the terminal and a
     # notice printed 200 lines ago is gone.

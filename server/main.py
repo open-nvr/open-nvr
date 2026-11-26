@@ -932,6 +932,14 @@ async def lifespan(app: FastAPI):
         camera_status_task = None
         main_logger.error(f"Failed to start camera status reconciler: {e}")
 
+    # A step of the system clock (late NTP on a board with no RTC, or an
+    # admin setting the time) leaves running streams recording with the
+    # old time; reconnect them and audit the step (issue #1023).
+    if settings.mediamtx_admin_api:
+        from services.clock_jump import watch_clock_jumps
+
+        spawn_background(watch_clock_jumps(), name="clock-jump-watch")
+
     # FFmpeg-based RTSP proxy/recorder startup removed
 
     yield
