@@ -152,7 +152,7 @@ boxes for a camera the viewer may not watch.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `boxes` | array | Required. `{label, box: [x, y, w, h], score?, id?, track?}`; `box` normalized to 0..1 of the frame. `track` (optional, since 0.1.13) names the `opennvr.tier0.v1` track id the box labels: while that track is on screen the live view draws the app's `label` on the track's own box (no second box, no detector id or score), and falls back to drawing `box` when it is not. Use it to name what the detector found ("Asha · 1008" on a person) rather than to draw something new. |
+| `boxes` | array | Required. `{label, box: [x, y, w, h], score?, id?, track?, layer?}`; `box` normalized to 0..1 of the frame. `track` (optional, since 0.1.13) names the `opennvr.tier0.v1` track id the box labels: while that track is on screen the live view draws the app's `label` on the track's own box (no second box, no detector id or score), and falls back to drawing `box` when it is not. Use it to name what the detector found ("Asha · 1008" on a person) rather than to draw something new. `layer` (optional string, up to 40 characters) names the layer the box belongs to ("Bars", "Zone counts"): the live view's layer list lets a viewer switch each layer off, per camera. Without it, the live view groups an app's boxes by label, ignoring the numbers in it. |
 | `frame` | `{w, h}` \| absent | Optional. If `box` is in pixels, ship the frame size and core normalizes. Pixel boxes without it are dropped. |
 | `seq` | int \| absent | Optional producer sequence. |
 

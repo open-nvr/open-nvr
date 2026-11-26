@@ -25,7 +25,7 @@ import { Plus, Trash, Settings, Activity, CheckCircle, AlertCircle, Play, Plug }
 import { useTranslation } from '../i18n'
 import { useConfirm } from '../components/ui/ConfirmDialog'
 
-type IntegrationType = 'webhook' | 'slack' | 'teams' | 'email' | 'mqtt' | 's3' | 'syslog' | 'prometheus'
+type IntegrationType = 'webhook' | 'slack' | 'teams' | 'email' | 'mqtt' | 's3' | 'syslog' | 'prometheus' | 'home_assistant'
 
 const INTEGRATION_TYPES: { value: IntegrationType; label: string }[] = [
   { value: 'webhook', label: 'Webhook' },
@@ -36,6 +36,7 @@ const INTEGRATION_TYPES: { value: IntegrationType; label: string }[] = [
   { value: 's3', label: 'S3 Storage' },
   { value: 'syslog', label: 'Syslog / SIEM' },
   { value: 'prometheus', label: 'Prometheus' },
+  { value: 'home_assistant', label: 'Home Assistant' },
 ]
 
 export function Integrations() {
@@ -170,6 +171,21 @@ export function Integrations() {
             <Field label="Events">
               <EventsMatrix value={config.events || {}} onChange={v => setConfig({...config, events: v})} />
             </Field>
+          </>
+        )
+      case 'home_assistant':
+        return (
+          <>
+            <Field label="Home Assistant URL">
+              <input className="input" value={config.url || ''} onChange={e => setConfig({...config, url: e.target.value})} placeholder="http://homeassistant.local:8123" required />
+            </Field>
+            <Field label="Long-lived access token">
+              <input type="password" className="input" value={config.token || ''} onChange={e => setConfig({...config, token: e.target.value})} placeholder="From your Home Assistant profile, Security tab" required />
+            </Field>
+            <p className="text-xs text-[var(--text-dim)]">
+              Workflows call Home Assistant services through this (the home_assistant action).
+              The token acts as its Home Assistant user, so give it a user that may do only that.
+            </p>
           </>
         )
       case 'slack':
@@ -435,6 +451,7 @@ function getSummary(item: any) {
     case 'email': return c.smtp_host ? `${c.username}@${c.smtp_host}` : ''
     case 'mqtt': return `${c.broker_url} (${c.topic_prefix})`
     case 's3': return `s3://${c.bucket}`
+    case 'home_assistant': return c.url
     default: return item.type
   }
 }

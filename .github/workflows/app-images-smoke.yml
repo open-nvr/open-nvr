@@ -210,6 +210,7 @@ jobs:
           - { app: loitering-detection,        module: loitering_detection }
           - { app: occupancy-counting,         module: occupancy_counting }
           - { app: package-delivery,           module: package_delivery }
+          - { app: ros2-bridge,                module: ros2_bridge }
           - { app: smart-doorbell,             module: smart_doorbell }
           - { app: xray-screening,             module: xray_screening }
     steps:

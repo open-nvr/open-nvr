@@ -161,6 +161,10 @@ def track_is_drawable(t: dict[str, Any], window_s: float | None = None) -> bool:
         return False
 
 
+#: A layer name is shown in the viewer's layer list; a sentence is not a name.
+LAYER_MAX_CHARS = 40
+
+
 def to_overlay_payload(
     raw: dict[str, Any], *, min_score: float = DEFAULT_MIN_SCORE
 ) -> dict[str, Any] | None:
@@ -196,6 +200,13 @@ def to_overlay_payload(
         ref = t.get("track")
         if isinstance(ref, (int, str)) and not isinstance(ref, bool) and str(ref).strip():
             row["track"] = ref
+        # An app box may name the layer it belongs to (overlay.boxes.v1
+        # ``layer``): the viewer's layer list switches whole layers on
+        # and off. Whitespace collapsed and length capped, since it is
+        # shown as text in that list.
+        layer = t.get("layer")
+        if isinstance(layer, str) and layer.strip():
+            row["layer"] = " ".join(layer.split())[:LAYER_MAX_CHARS]
         tracks_out.append(row)
     if not tracks_out:
         return None

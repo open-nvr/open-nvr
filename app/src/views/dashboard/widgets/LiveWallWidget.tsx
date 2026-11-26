@@ -16,6 +16,7 @@ import { VideoPlayer } from '../../../components/VideoPlayer'
 import { detectionsPreferred } from '../../../lib/detectionFeed'
 import { WidgetFrame, MiniSegment, cameraState, shortAge, STATE_INK, type CamState } from '../WidgetFrame'
 import { webcamOfflineLabel } from '../../../lib/hostAgent'
+import { OverlayLayersButton } from '../../../components/live/OverlayLayersButton'
 
 const TOUR_MS = 15_000
 const SLOT_OPTIONS = [1, 4, 6, 9] as const
@@ -119,6 +120,7 @@ function LiveTile({ cam, spotlit, onSpotlight, playing }: {
           cameraId={cam.id}
           className="w-full h-full !bg-black"
           showDetections={detectionsPreferred()}
+          overlayScope="dashboard"
         />
         </div>
       ) : (
@@ -164,6 +166,7 @@ function LiveTile({ cam, spotlit, onSpotlight, playing }: {
 
       {/* Hover actions */}
       <div className="absolute right-1.5 bottom-1.5 flex gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+        {detectionsPreferred() && <OverlayLayersButton cameraId={cam.id} scope="dashboard" variant="video" />}
         <button
           type="button"
           onClick={onSpotlight}
