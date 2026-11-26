@@ -44,6 +44,7 @@
 import { useEffect, useRef } from 'react'
 import { subscribeDetections, type OverlayFrame, type OverlayTrack } from '../../lib/detectionFeed'
 import { planMerge, TIER0_SOURCE, wearLabel } from '../../lib/overlayMerge'
+import { BADGE_LAYER, layerOf, type OverlayLayer } from '../../lib/overlayLayers'
 
 export interface DetectionOverlayProps {
   cameraId: number
@@ -57,6 +58,11 @@ export interface DetectionOverlayProps {
    *  of this overlay's box). Boxes are mapped through it rather than the
    *  canvas being scaled, so lines and labels stay crisp and sized. */
   zoom?: { s: number; x: number; y: number }
+  /** Layer keys (lib/overlayLayers) the viewer switched off. */
+  hiddenLayers?: ReadonlySet<string>
+  /** Told which layers are on screen whenever that set changes, so a
+   *  layer picker lists only what this camera actually shows. */
+  onLayers?: (layers: OverlayLayer[]) => void
 }
 
 /** ``s`` as it appears on a picture zoomed by ``z``, in normalized units
@@ -80,8 +86,12 @@ const LABEL_HUES: Record<string, number> = {
 }
 function hueFor(label: string): number {
   if (label in LABEL_HUES) return LABEL_HUES[label]
+  // Digits are left out of the hash: an app's label that carries a live
+  // count ("Trays: 24", "25 of 27 in view") keeps its colour as the
+  // number changes instead of flashing a new one every second.
+  const stable = label.replace(/\d+/g, '')
   let h = 0
-  for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) % 360
+  for (let i = 0; i < stable.length; i++) h = (h * 31 + stable.charCodeAt(i)) % 360
   return h
 }
 
@@ -109,8 +119,15 @@ interface Shown {
   trail: { x: number, y: number, at: number }[]
 }
 
-export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom }: DetectionOverlayProps) {
+export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom, hiddenLayers, onLayers }: DetectionOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // Read by the draw loop through refs: switching a layer, or a new
+  // callback identity from a re-rendering parent, must not restart it.
+  const hiddenRef = useRef(hiddenLayers)
+  hiddenRef.current = hiddenLayers
+  const onLayersRef = useRef(onLayers)
+  onLayersRef.current = onLayers
+  const layersSigRef = useRef('')
   // Read by the draw loop, so zooming redraws without restarting it.
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
@@ -204,9 +221,18 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
         if (s.lostAt != null && now - s.lostAt > FADE_OUT_MS) shown.delete(key)
       }
       const plan = planMerge(shown)
+      const hiddenSet = hiddenRef.current
+      const present = new Map<string, OverlayLayer>()
 
       for (const [key, s] of shown) {
         if (plan.hidden.has(key)) continue
+        // A detector box wearing an app's label belongs to the app's layer.
+        const wearing = plan.labelled.get(key)
+        const layer = wearing
+          ? layerOf(wearing.source, wearing.track.label, wearing.track.layer)
+          : layerOf(s.source, s.track.label, s.track.layer)
+        if (s.lostAt == null) present.set(layer.key, layer)
+        if (hiddenSet?.has(layer.key)) continue
         // Glide toward the latest box.
         for (let i = 0; i < 4; i++) s.box[i] += (s.target[i] - s.box[i]) * k
         // Foot point trail, trimmed to the window.
@@ -225,7 +251,16 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom 
         drawTrack(ctx, z && z.s > 1 ? zoomed(s, z, canvas.clientWidth || 1, canvas.clientHeight || 1) : s, W, H, alpha,
           wearer ? wearLabel(s.track, wearer.track) : undefined)
       }
-      if (badge && anyFresh) drawBadge(ctx, W, alive, fpsRef.current.fps)
+      if (badge && anyFresh && frames.has(TIER0_SOURCE)) {
+        present.set(BADGE_LAYER, { key: BADGE_LAYER, name: 'Object count (corner)', group: 'Detector' })
+      }
+      if (badge && anyFresh && !hiddenSet?.has(BADGE_LAYER)) drawBadge(ctx, W, alive, fpsRef.current.fps)
+      // Report the set only when it changes: this runs every frame.
+      const sig = [...present.keys()].sort().join(' | ')
+      if (sig !== layersSigRef.current) {
+        layersSigRef.current = sig
+        onLayersRef.current?.([...present.values()])
+      }
       if (shown.size) requestTick()
     }
     const requestTick = () => { if (rafRef.current == null) rafRef.current = requestAnimationFrame(tick) }

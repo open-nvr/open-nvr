@@ -42,7 +42,7 @@ import { AppPageHeader } from './apps/AppSetup'
 import { AppCamerasCard } from './apps/AppCamerasCard'
 import { useDateFormat } from '../i18n'
 import { useAppCameras } from './apps/CameraPicker'
-import { LiveCameraPanel } from './guardscan/LiveCameraPanel'
+import { LiveCameraPanel } from '../components/live/LiveCameraPanel'
 import { ScreeningClip } from './guardscan/ScreeningClip'
 import { ScreeningReport } from './guardscan/ScreeningReport'
 import {
