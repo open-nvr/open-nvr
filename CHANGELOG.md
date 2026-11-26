@@ -92,6 +92,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Browser webcam that can't reach the server now says why, on the right side** (#1025).
+  The publish page used to blame the viewer's network for a missing port 8189.
+  It now names the router or firewall in front of the server, and explains why
+  it can work from home broadband but not from mobile data. The hint also
+  appears when a session that was live loses its path (laptop moved to a
+  hotspot). The Cameras list shows *Not publishing* or *Can't reach server*
+  for a browser webcam instead of a bare *Disconnected*. New
+  `docs/REMOTE_ACCESS.md` covers the 443 + 8189 forwards, two servers behind
+  one public IP, and how to check from the MediaMTX log.
+
 - **A step of the system clock no longer takes the media server "down" or
   leaves recordings on the old time** (#1023). On a board with no
   battery-backed clock, NTP can step the time long after the stack started

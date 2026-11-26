@@ -19,6 +19,7 @@
  */
 
 import { resolveWhepSessionUrl, rebaseToCurrentOrigin } from './streamUrl'
+import { mediaPortHint } from './publishHints'
 
 export type WhipSession = { whip_url: string; token: string }
 
@@ -78,7 +79,7 @@ export type PublisherExtras = {
   mediaPort?: () => number
 }
 
-/** ICE failed this many times without ever connecting: most likely the
+/** ICE failed this many times without connecting in between: most likely the
  *  media port is not reachable from this network, and the retry message
  *  says so. Retrying goes on regardless (at the longest backoff), because
  *  the same signal also comes from a MediaMTX restart or a network that is
@@ -92,7 +93,6 @@ export class WhipPublisher {
   private token: string | null = null
   private attempt = 0
   private iceFailures = 0
-  private everLive = false
   private retryTimer: number | null = null
   private stopped = true
   private stream: MediaStream | null = null
@@ -109,7 +109,6 @@ export class WhipPublisher {
     this.stopped = false
     this.attempt = 0
     this.iceFailures = 0
-    this.everLive = false
     void this.connect()
   }
 
@@ -203,21 +202,18 @@ export class WhipPublisher {
       if (pc.connectionState === 'connected') {
         this.attempt = 0
         this.iceFailures = 0
-        this.everLive = true
         this.onState({ kind: 'live' })
       } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        // Publishing has no HLS to fall back to. ICE failing before it ever
-        // connected usually means the media port cannot be reached from
-        // here: say so, slow the retries down to the longest backoff, and
-        // keep trying (a MediaMTX restart looks the same and heals).
-        if (!this.everLive && ++this.iceFailures >= ICE_FAILURES_BEFORE_NAMING_THE_PORT) {
-          const port = this.extras.mediaPort?.()
+        // Publishing has no HLS to fall back to. ICE failing again and again
+        // with no connection in between usually means the media port cannot
+        // be reached from here: say so, slow the retries down to the longest
+        // backoff, and keep trying (a MediaMTX restart looks the same and
+        // heals). Counted since the last connection, not since start: a
+        // laptop that was live at home and moves to a phone hotspot hits
+        // exactly this, and "Connection lost" for ever explains nothing.
+        if (++this.iceFailures >= ICE_FAILURES_BEFORE_NAMING_THE_PORT) {
           this.attempt = Math.max(this.attempt, BACKOFF_SECONDS.length - 1)
-          this.scheduleRetry(
-            'Real-time video cannot reach OpenNVR from this network' +
-              (port ? ` (UDP/TCP port ${port} may be blocked)` : '') +
-              '. Publishing a browser webcam needs that port; ask your administrator. Still trying.',
-          )
+          this.scheduleRetry(mediaPortHint(this.extras.mediaPort?.()))
           return
         }
         this.scheduleRetry('Connection lost')
