@@ -64,6 +64,13 @@ log = logging.getLogger("guard-scan-compliance")
 
 APP_ID = "guard-scan-compliance"
 POSE_ADAPTER = "yolo-pose"
+
+#: Layers of the live overlay (overlay.boxes.v1 ``layer``). Flagged is its
+#: own layer, so hiding the screening boxes never hides a scanner flag.
+LAYER_GUARD = "Guard"
+LAYER_SCREENING = "Being screened"
+LAYER_FLAGGED = "Flagged by the scanner"
+LAYER_PEOPLE = "Other people"
 POSE_TASK = "pose_estimation"
 
 #: How many consecutive failed frames before the app stops calling it a
@@ -965,7 +972,7 @@ class GuardScanApp(FrameApp):
             is_guard = body.track_id == engine.guard_id
             session = engine.sessions.get(body.track_id)
             if is_guard:
-                label = "Guard"
+                label, layer = "Guard", LAYER_GUARD
             elif session is not None:
                 # The checklist, on the person it is about: which
                 # surfaces are done and what the scan is worth so far.
@@ -973,17 +980,25 @@ class GuardScanApp(FrameApp):
                 result = session.result()
                 label = (f"Scanning {''.join(done) or '—'} "
                          f"{round(result['score'])}%")
+                layer = LAYER_SCREENING
                 # The wand going off is the one thing on this camera an
                 # operator must not miss, and until now it appeared only
                 # in the inbox — never on the picture they are watching.
                 if session.flagged:
                     label = f"FLAGGED · {label}"
+                    layer = LAYER_FLAGGED
 
             else:
-                label = f"Person {body.track_id}"
+                label, layer = f"Person {body.track_id}", LAYER_PEOPLE
             x1, y1, x2, y2 = body.box
             boxes.append({
                 "label": label,
+                # The layer a viewer switches on and off as a whole in the
+                # live view (overlay.boxes.v1 ``layer``). Without it the
+                # live view grouped by label, and "Scanning — 0%" and
+                # "Scanning LRFB 100%" listed as two layers that carried
+                # the live numbers.
+                "layer": layer,
                 # The contract's shape: x, y, w, h as fractions of the
                 # frame, because an app never knows what resolution the
                 # operator is watching at.
