@@ -83,6 +83,8 @@ ACTIONS = ("alert", "notify", "log", "save_clip", "ptz_preset", "webhook",
 #: Core actions that move things. An app action moves things when its
 #: app says so (or when the app is unknown: the safe side).
 MOVING_ACTIONS = frozenset({"site_mode", "home_assistant"})
+#: A Home Assistant service: ``domain.service``, as HA writes it (``lock.unlock``).
+_HA_SERVICE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 SEVERITIES = ("low", "medium", "high", "critical")
 ONE_AT_A_TIME = ("camera", "track", "plate", "none")
 LIMIT_DEFAULTS = {"cooldown": "1m", "one_at_a_time": "camera", "per_hour": 30, "ai_per_hour": 60}
@@ -505,8 +507,18 @@ class _Checker:
                 if self.webhooks is not None and to not in self.webhooks:
                     self.err(f"{ap}.to", f"{to!r} is not an approved destination on this site")
         elif kind == "home_assistant":
-            if not (isinstance(spec, Mapping) and _text(spec.get("service"))):
+            if not (isinstance(spec, Mapping) and isinstance(spec.get("service"), str)
+                    and _HA_SERVICE.match(spec["service"])):
                 self.err(f"{ap}.service", "the Home Assistant service, such as lock.unlock")
+            if isinstance(spec, Mapping):
+                for k in spec:
+                    if k not in ("service", "to", "data"):
+                        self.err(f"{ap}.{k}", "home_assistant has service, to and data")
+                if "data" in spec and not isinstance(spec["data"], Mapping):
+                    self.err(f"{ap}.data", "a mapping of the service's data, such as "
+                                           "{ entity_id: lock.front_door }")
+                if "to" in spec and not _text(spec["to"]):
+                    self.err(f"{ap}.to", "the Home Assistant integration's name")
         elif kind == "site_mode":
             if not _text(spec):
                 self.err(ap, "the mode to set")

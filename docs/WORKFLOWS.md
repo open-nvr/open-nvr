@@ -189,6 +189,7 @@ Event values reach the model as data only, never as instructions, so
 | `ptz_preset: {camera, preset}` | points a PTZ camera at a preset, by name |
 | `webhook: {to, body?}` | posts to an enabled webhook, Slack or Teams integration named `to` (Settings > Integrations: the admin-approved destinations) |
 | `app: {id, action, args?}` | an installed app's action, e.g. the gate controller's `open_now` |
+| `home_assistant: {service, data?, to?}` | calls a Home Assistant service, e.g. `service: lock.unlock`, `data: { entity_id: lock.gate }`, through an enabled **Home Assistant** integration (Settings > Integrations: its URL and a long-lived token), the one named `to` or the site's only one |
 | `site_mode: mode` | sets the site mode |
 | `wait: 30s` | pauses the run |
 
@@ -280,7 +281,6 @@ an action may already have happened.
   ([MODELS_AND_LATENCY.md](../examples/camera-agent/MODELS_AND_LATENCY.md)).
 - **Site rules** and site lists (`list:` conditions), **marks** on runs and
   the severity cap tied to them, **Call** (Phase 3).
-- **`home_assistant`** is accepted and recorded as "not available yet".
 - **Ask a person inside For each** is recorded as not supported.
 - **Camera roles** are camera names until cameras have roles of their own.
 

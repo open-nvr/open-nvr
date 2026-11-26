@@ -224,6 +224,9 @@ class IntegrationType(str, enum.Enum):
     S3 = "s3"
     SYSLOG = "syslog"
     PROMETHEUS = "prometheus"
+    #: Home Assistant's REST API (url + long-lived token): what a workflow's
+    #: ``home_assistant`` action calls.
+    HOME_ASSISTANT = "home_assistant"
 
 
 class Integration(Base):
