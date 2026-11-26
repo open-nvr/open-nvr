@@ -596,7 +596,11 @@ function useInstallStatusPoll(id: string, active: boolean) {
     queryClient.invalidateQueries({ queryKey: ['apps'] })
     queryClient.invalidateQueries({ queryKey: ['apps-index'] })
   }, [settledStatus, queryClient])
-  return { ...query, timedOut }
+  // Another observer of the same query key (InstallWatcher) can still land
+  // applied/failed after this budget ran out — a slow image pull on a small
+  // board. Only report a timeout while the status really is still pending,
+  // or the dialog shows "applied" and "still pending" side by side.
+  return { ...query, timedOut: timedOut && query.data?.status === 'pending' }
 }
 
 /** Headless: keeps an accepted install intent polling at PAGE level, so
