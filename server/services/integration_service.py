@@ -97,6 +97,8 @@ class IntegrationService:
                 return await IntegrationService._test_email(integration.config)
             elif integration.type in ["webhook", "slack", "teams"]:
                 return await IntegrationService._test_webhook(integration)
+            elif integration.type == "home_assistant":
+                return await IntegrationService._test_home_assistant(integration)
             elif integration.type == "mqtt":
                 from services.mqtt_settings import test_connection
 
@@ -220,6 +222,69 @@ class IntegrationService:
                     "success": False,
                     "message": "Webhook connection failed — see the server log.",
                 }
+
+    @staticmethod
+    async def call_home_assistant(integration: Integration, service: str, data: dict,
+                                  *, transport: httpx.AsyncBaseTransport | None = None) -> dict:
+        """Call a Home Assistant service, ``domain.service`` (``lock.unlock``),
+        with ``data`` (``{"entity_id": "lock.front_door"}``), through HA's
+        REST API as the integration's long-lived token. The target is held
+        to the webhooks' policy (no cloud metadata; the operator's allowlist
+        when set), and errors are as coarse as a webhook's."""
+        config = integration.config or {}
+        url, token = (config.get("url") or "").rstrip("/"), config.get("token")
+        if not url or not token:
+            return {"success": False, "message": "the integration has no URL or token"}
+        refusal = _webhook_target_refusal(url)
+        if refusal:
+            return {"success": False, "message": refusal}
+        domain, _, name = service.partition(".")
+        if not domain or not name:
+            return {"success": False, "message": f"{service!r} is not a domain.service"}
+        async with httpx.AsyncClient(transport=transport) as client:
+            try:
+                resp = await client.post(
+                    f"{url}/api/services/{domain}/{name}", json=data or {}, timeout=10.0,
+                    headers={"Authorization": f"Bearer {token}"})
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                why = {401: " (the token was refused)",
+                       400: " (the service or its data was refused)",
+                       404: " (no such service)"}.get(code, "")
+                return {"success": False, "message": f"Home Assistant returned {code}{why}"}
+            except httpx.RequestError as e:
+                logger.warning("home assistant call failed for integration %s: %s",
+                               getattr(integration, "id", "?"), e)
+                return {"success": False,
+                        "message": "Home Assistant connection failed — see the server log."}
+        return {"success": True, "message": f"{service} called (HTTP {resp.status_code})"}
+
+    @staticmethod
+    async def _test_home_assistant(integration: Integration,
+                                   *, transport: httpx.AsyncBaseTransport | None = None) -> dict:
+        """``GET /api/``: answers when the URL is HA and the token is good."""
+        config = integration.config or {}
+        url, token = (config.get("url") or "").rstrip("/"), config.get("token")
+        if not url or not token:
+            return {"success": False, "message": "Missing URL or token"}
+        refusal = _webhook_target_refusal(url)
+        if refusal:
+            return {"success": False, "message": refusal}
+        async with httpx.AsyncClient(transport=transport) as client:
+            try:
+                resp = await client.get(f"{url}/api/", timeout=10.0,
+                                        headers={"Authorization": f"Bearer {token}"})
+            except httpx.RequestError as e:
+                logger.warning("home assistant test failed for integration %s: %s",
+                               getattr(integration, "id", "?"), e)
+                return {"success": False,
+                        "message": "Home Assistant connection failed — see the server log."}
+        if resp.status_code == 401:
+            return {"success": False, "message": "Home Assistant refused the token"}
+        if resp.status_code != 200:
+            return {"success": False, "message": f"Home Assistant returned {resp.status_code}"}
+        return {"success": True, "message": "Connected to Home Assistant"}
 
     @staticmethod
     async def _test_webhook(integration: Integration) -> dict:

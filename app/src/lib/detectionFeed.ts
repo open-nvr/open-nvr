@@ -36,6 +36,9 @@ export interface OverlayTrack {
   /** The Tier-0 track this app box labels (overlay.boxes.v1 `track`):
    *  the overlay draws the label on that track's box instead. */
   track?: number | string | null
+  /** The layer an app put this box in (overlay.boxes.v1 `layer`), which
+   *  the viewer can switch off as a whole. */
+  layer?: string | null
 }
 
 export interface OverlayFrame {
@@ -84,6 +87,7 @@ function toFrame(evt: any): OverlayFrame | null {
         box: [Number(b[0]), Number(b[1]), Number(b[2]), Number(b[3])],
         stationary: Boolean(t.stationary),
         track: t.track ?? null,
+        layer: typeof t.layer === 'string' && t.layer.trim() ? t.layer.trim() : null,
       })
     }
   } else if (evt.event_type === 'inference_result' && Array.isArray(p.detections)) {

@@ -275,12 +275,29 @@ def test_the_report_says_whether_the_file_moves_things():
     ({"webhook": {"to": "ticketing", "url": "http://x"}}, "then[1].webhook.url",
      "webhook has to and body"),
     ({"webhook": {"to": "ticketing", "body": "text"}}, "then[1].webhook.body", "a mapping"),
+    ({"home_assistant": {"service": "unlock"}}, "then[1].home_assistant.service",
+     "such as lock.unlock"),
+    ({"home_assistant": {"service": "Lock Unlock"}}, "then[1].home_assistant.service",
+     "such as lock.unlock"),
+    ({"home_assistant": {"service": "lock.unlock", "entity": "lock.door"}},
+     "then[1].home_assistant.entity", "home_assistant has service, to and data"),
+    ({"home_assistant": {"service": "lock.unlock", "data": "lock.door"}},
+     "then[1].home_assistant.data", "a mapping"),
 ])
 def test_the_last_actions_are_checked_key_by_key(action, path, says):
     d = doc()
     d["then"].append(action)
     found = [p for p in validate(d).errors if p.path == path]
     assert found and says in found[0].message, validate(d).errors
+
+
+def test_home_assistant_after_a_reply_passes_and_moves_things():
+    g = doc(GATE)
+    g["then"][0]["ai"]["delivery"][0]["Let in"] = [{"home_assistant": {
+        "service": "lock.unlock", "to": "house", "data": {"entity_id": "lock.gate"}}}]
+    report = validate(g, registry=SITE)
+    assert report.ok, report.errors
+    assert report.moves_things is True
 
 
 def test_a_camera_can_be_the_triggering_one():

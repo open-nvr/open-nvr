@@ -45,7 +45,12 @@ EXAMPLES = REPO_ROOT / "examples"
 # nothing left to subscribe to, and keeping a NATS connection whose
 # only purpose was to satisfy a base class would have been the wrong
 # way to pass this test.
-BASES = frozenset({"Detector", "FrameApp", "AlertSubscriber", "ContractApp"})
+#
+# DomainEventSubscriber is the consuming half of the contracted domain
+# events (opennvr.events.*), with the same contract server as the
+# others; ros2-bridge was the first example to ride it.
+BASES = frozenset({"Detector", "FrameApp", "AlertSubscriber", "ContractApp",
+                   "DomainEventSubscriber"})
 
 # Not apps at all: build-support directories with no Python entrypoint.
 # Each is one Dockerfile that puts an ONNX graph into an image and ships
