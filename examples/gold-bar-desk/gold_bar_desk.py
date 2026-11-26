@@ -40,6 +40,7 @@ import signal
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 
@@ -58,6 +59,32 @@ log = logging.getLogger("gold-bar-desk")
 APP_ID = "gold-bar-desk"
 LEDGER_KEY = "weighings"
 LEDGER_MAX = 200
+
+#: Layers of the live overlay (overlay.boxes.v1 ``layer``): what a viewer
+#: can switch off as a whole in the live view.
+LAYER_BARS = "Bars"
+LAYER_HIDDEN = "Hidden bars"
+LAYER_BALANCE = "Balance"
+LAYER_COUNTS = "Zone counts"
+LAYER_STATUS = "Desk status"
+
+#: The Desks table. The page shows these keys as its headers, so they
+#: are written for the operator, not the code.
+DESK_COLUMNS = ["Desk", "Expected", "In view", "In trays", "On balance",
+                "In hand", "Weighings", "Status"]
+
+
+def _when(ts: float) -> str:
+    """An ISO time with its zone, which the page shows in the viewer's own
+    local time. A bare local string was read as-is, and this box's clock is
+    UTC, so an alarm at 06:50 IST showed as 01:20."""
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+
+
+def _ago(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    return "%d s ago" % seconds if seconds < 120 else "%d min ago" % (seconds // 60)
+
 
 MANIFEST = AppManifest(
     id=APP_ID,
@@ -140,15 +167,17 @@ MANIFEST = AppManifest(
     ],
     actions=[
         Action("start_shift", "Start a new shift",
-               params=[Param("camera", str, default="",
+               params=[Param("camera", str, default="", label="Camera",
                              description="Leave blank for every desk."),
-                       Param("bars", int, default=0,
-                             description="Bars issued to this desk. 0 uses the "
-                                         "'Bars at the start' setting.")],
-               description="Clear the alarms and count from now against the bars "
-                           "issued (or learn the count, when none is given)."),
+                       Param("bars", int, default=0, label="Bars issued",
+                             description="How many bars this desk was given. Leave "
+                                         "at 0 only to fall back on the 'Bars at the "
+                                         "start' setting, or to learn the count from "
+                                         "the next 30 s (weaker).")],
+               description="Clear the alarms and the Recent list, and count from now "
+                           "against the bars issued."),
         Action("acknowledge_count", "Acknowledge the count alarm",
-               params=[Param("camera", str, default="")],
+               params=[Param("camera", str, default="", label="Camera")],
                description="Clear a missing/extra alarm once the bars are checked."),
     ],
     emits=[
@@ -163,8 +192,7 @@ MANIFEST = AppManifest(
     ],
     state_schema=[
         StateView("cameras", "Desks", path="cameras", kind="table",
-                  columns=["camera", "bars", "at_start", "in_trays", "on_balance",
-                           "in_hand", "weighings", "status", "fps", "error"]),
+                  columns=DESK_COLUMNS),
         StateView("weighings", "Weighings — balance display", path="weighings",
                   kind="gallery", limit=12),
         StateView("recent", "Recent", path="recent", kind="log", limit=15),
@@ -443,7 +471,7 @@ class DeskApp(FrameApp):
     # ── results ──
 
     def on_event(self, worker: CameraWorker, event: dict) -> None:
-        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(event["t"]))
+        when = _when(event["t"])
         if event["type"] == "weighing":
             self._on_weighing(worker, event, when)
             return
@@ -455,7 +483,7 @@ class DeskApp(FrameApp):
         except Exception as exc:  # noqa: BLE001
             log.warning("could not store the evidence photo: %s", exc)
         mon = worker.monitor
-        self.dispatcher.fire(Alert(
+        alert = Alert(
             # Named explicitly: the bus only lets an app publish under its
             # own id, and these fire on worker threads (see guard-scan).
             source=AlertSource(kind="app", name=APP_ID, version=MANIFEST.version),
@@ -474,9 +502,13 @@ class DeskApp(FrameApp):
                       "on_balance": bool(mon.last.get("on_pan")),
                       "in_hand": _int(mon.last.get("in_hand"))},
             tags=["gold-bar-desk", event["kind"]],
-        ))
+        )
+        self.dispatcher.fire(alert)
+        # The alarm's own id on its Recent line: the page turns that line
+        # into a Review button opening this alarm's photo and footage.
         self._note(worker, when, event["title"], "warning"
-                   if event["severity"] in ("high", "critical") else "info")
+                   if event["severity"] in ("high", "critical") else "info",
+                   alert_id=alert.alert_id)
         log.info("%s: %s", worker.handle, event["detail"])
 
     def _on_weighing(self, worker: CameraWorker, event: dict, when: str) -> None:
@@ -516,26 +548,49 @@ class DeskApp(FrameApp):
         except Exception as exc:  # noqa: BLE001
             log.debug("could not save the weighing ledger: %s", exc)
 
-    def _note(self, worker: CameraWorker, when: str, message: str, level: str) -> None:
+    def _note(self, worker: CameraWorker, when: str, message: str, level: str,
+              alert_id: str | None = None) -> None:
+        line = {"time": when, "level": level, "camera": worker.handle,
+                "message": f"{worker.name}: {message}"}
+        if alert_id:
+            line["alert_id"] = alert_id
         with self._results_lock:
-            self.recent.append({"time": when, "level": level,
-                                "message": f"{worker.name}: {message}"})
+            self.recent.append(line)
             del self.recent[:-50]
 
     def publish_overlay(self, worker: CameraWorker, result: dict, w: int, h: int, seq) -> None:
         boxes = []
         for tid, tr in (result.get("tracks") or {}).items():
             x, y, bw, bh = tr["box"]
-            boxes.append({"label": "Bar" if tr["seen"] == result.get("t") else "Bar (hidden)",
+            seen = tr["seen"] == result.get("t")
+            boxes.append({"label": "Bar" if seen else "Bar (hidden)",
+                          "layer": LAYER_BARS if seen else LAYER_HIDDEN,
                           "box": [x / w, y / h, bw / w, bh / h], "id": int(tid)})
         for x, y, bw, bh in result.get("hidden_boxes") or []:
-            boxes.append({"label": "Bar (partly hidden)",
+            boxes.append({"label": "Bar (partly hidden)", "layer": LAYER_HIDDEN,
                           "box": [x / w, y / h, bw / w, bh / h]})
         mon = worker.monitor
         if result.get("on_pan") and mon.zones.balance is not None:
             x0, y0, x1, y1 = mon.zones.rect("balance")
-            boxes.append({"label": "On the balance",
+            boxes.append({"label": "On the balance", "layer": LAYER_BALANCE,
                           "box": [x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h]})
+        # The counts, on the picture they come from, so an operator can
+        # check what is being counted at any moment: each zone wears its
+        # own count, and the frame wears the desk's verdict.
+        tray = mon.zones.rect("tray")
+        if tray is not None:
+            x0, y0, x1, y1 = tray
+            boxes.append({"label": "Trays: %s" % result.get("in_trays", 0),
+                          "layer": LAYER_COUNTS,
+                          "box": [x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h]})
+        hand = mon.zones.rect("handling")
+        if hand is not None and result.get("in_hand"):
+            x0, y0, x1, y1 = hand
+            boxes.append({"label": "In hand: %s" % result.get("in_hand"),
+                          "layer": LAYER_COUNTS,
+                          "box": [x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h]})
+        boxes.append({"label": self._overlay_summary(worker, result), "layer": LAYER_STATUS,
+                      "box": [0.0, 0.0, 1.0, 1.0]})
         try:
             self.events.publish_overlay(camera_id=worker.handle, boxes=boxes, seq=seq)
         except Exception:  # noqa: BLE001
@@ -549,6 +604,7 @@ class DeskApp(FrameApp):
                    if not wanted or camera_key(h) == camera_key(wanted)]
         if wanted and not targets:
             raise ValueError(f"no desk camera {wanted!r} is selected for this app")
+        names = ", ".join(w.name for _, w in targets) or "no desk"
         if name == "start_shift":
             try:
                 bars = int((params or {}).get("bars") or 0)
@@ -556,19 +612,43 @@ class DeskApp(FrameApp):
                 raise ValueError("bars must be a whole number") from None
             if bars < 0:
                 raise ValueError("bars cannot be negative")
+            counts = []
             for handle, w in targets:
                 w.shift_bars = bars
+                n = bars or int(self.camera_config(handle).get("bars_at_start") or 0)
                 if w.monitor is not None:
-                    w.monitor.recount()
-                    w.monitor.set_baseline(
-                        bars or int(self.camera_config(handle).get("bars_at_start") or 0))
-            return {"ok": True, "cameras": [h for h, _ in targets], "bars": bars or None}
+                    # Applied by the desk's own next frame (core.py).
+                    w.monitor.request_new_shift(n)
+                counts.append(n)
+            # The old shift's alerts stay in OpenNVR's alert history; this
+            # list is the shift's own.
+            handles = {h for h, _ in targets}
+            now = _when(time.time())
+            with self._results_lock:
+                self.recent[:] = [r for r in self.recent if r.get("camera") not in handles]
+            for (handle, w), n in zip(targets, counts):
+                self._note(w, now, "new shift, %d bars issued" % n if n
+                           else "new shift, learning the count", "info")
+            known = [n for n in counts if n]
+            if known and len(known) == len(counts) and len(set(known)) == 1:
+                message = "New shift started on %s — counting against %d bars." % (names, known[0])
+            elif known:
+                message = "New shift started on %s." % names
+            else:
+                message = ("New shift started on %s — no bar count given, so it is "
+                           "learning the count from the next 30 s." % names)
+            return {"ok": True, "message": message,
+                    "cameras": [h for h, _ in targets], "bars": bars or None}
         if name == "acknowledge_count":
+            cleared = []
             for _, w in targets:
                 if w.monitor is not None:
-                    w.monitor.count_alarm = None
-                    w.monitor.full_seen_at = None
-            return {"ok": True, "cameras": [h for h, _ in targets]}
+                    if w.monitor.count_alarm:
+                        cleared.append(w.name)
+                    w.monitor.request_acknowledge()
+            message = ("Count alarm cleared on %s." % ", ".join(cleared) if cleared
+                       else "No count alarm was active on %s." % names)
+            return {"ok": True, "message": message, "cameras": [h for h, _ in targets]}
         raise KeyError(name)
 
     # ── state the app page shows ──
@@ -578,28 +658,75 @@ class DeskApp(FrameApp):
         for handle, w in self._workers():
             mon = w.monitor
             last = (mon.last if mon else {}) or {}
-            status = "—"
-            if mon is not None:
-                status = {"missing": "POSSIBLE MISSING BAR", "extra": "EXTRA BAR"}.get(
-                    mon.count_alarm, "learning the start count" if mon.baseline is None
-                    else "all accounted for")
-            if mon is not None and mon.too_slow:
-                # Say so rather than look healthy: at this rate the app
-                # cannot tell a hidden bar from a missing one.
-                status = ("TOO SLOW TO VERIFY THE COUNT (%.1f fps; needs %.0f) — "
-                          "missing-bar alarm paused" % (mon.analysis_fps() or 0,
-                                                       mon.s.min_analysis_fps))
-            rows.append({"camera": w.name, "bars": last.get("bars", ""),
-                         "at_start": (mon.baseline if mon else "") or "",
-                         "in_trays": last.get("in_trays", ""),
-                         "on_balance": "yes" if last.get("on_pan") else "",
-                         "in_hand": last.get("in_hand", ""),
-                         "weighings": mon.weighings if mon else 0,
-                         "status": status, "fps": round(w.fps, 1),
-                         "error": w.last_error or ""})
+            rows.append({"Desk": w.name,
+                         "Expected": (mon.baseline if mon else None) or "",
+                         "In view": last.get("bars", ""),
+                         "In trays": last.get("in_trays", ""),
+                         "On balance": "yes" if last.get("on_pan") else "",
+                         "In hand": last.get("in_hand", ""),
+                         "Weighings": mon.weighings if mon else 0,
+                         "Status": self._desk_status(w)})
         with self._results_lock:
             return {"cameras": rows, "weighings": list(reversed(self.gallery)),
                     "recent": list(self.recent)}
+
+    @staticmethod
+    def _overlay_summary(w: CameraWorker, result: dict) -> str:
+        """The desk's verdict in one short line, for the live picture."""
+        mon = w.monitor
+        if mon is None or mon.baseline is None:
+            return "Learning the count…"
+        head = "%s of %d in view" % (result.get("bars", "?"), mon.baseline)
+        if mon.too_slow:
+            return "%s · too slow to check (%.1f frames/s)" % (head, mon.slow_fps or 0)
+        if mon.count_alarm == "missing":
+            return "%s · POSSIBLE MISSING BAR" % head
+        if mon.count_alarm == "extra":
+            return "%s · EXTRA BAR" % head
+        if (result.get("bars") or 0) >= mon.baseline or mon.full_seen_at is None:
+            return "%s · all accounted for" % head
+        return "%s · all accounted for, all seen together %s" % (
+            head, _ago(result.get("t", mon.full_seen_at) - mon.full_seen_at))
+
+    def _desk_status(self, w: CameraWorker) -> str:
+        """One line that says what the count means, and why: the alarm
+        rests on "all of them seen together lately", which the counts
+        alone never showed."""
+        if w.last_error:
+            return "Camera problem: %s" % w.last_error
+        mon = w.monitor
+        if mon is None:
+            return "Starting…"
+        last = mon.last or {}
+        if mon.baseline is None:
+            return "Learning the count (first %d s of the shift)" % int(mon.s.learn_s)
+        if mon.too_slow:
+            return ("Too slow to check the count: %.1f frames/s, needs %.1f — "
+                    "missing-bar alarm paused" % (mon.slow_fps or 0, mon.s.min_analysis_fps))
+        if mon.count_alarm == "missing":
+            if mon.full_seen_at is not None and last.get("t") is not None:
+                ago = last["t"] - mon.full_seen_at
+                # The alarm holds until the full count shows in several
+                # frames running, so a glimpse of all of them does not
+                # clear it: say that, or "seen 3 s ago" reads as a
+                # contradiction beside the alarm.
+                if ago < mon.s.missing_after_s:
+                    return ("POSSIBLE MISSING BAR — all %d seen again %s; it clears "
+                            "once the full count holds" % (mon.baseline, _ago(ago)))
+                return "POSSIBLE MISSING BAR — all %d last seen together %s" % (
+                    mon.baseline, _ago(ago))
+            return "POSSIBLE MISSING BAR — all %d not seen together" % mon.baseline
+        if mon.count_alarm == "extra":
+            return "EXTRA BAR — %s on the desk, %d expected" % (last.get("bars", "?"), mon.baseline)
+        # The same smoothed figure as the "In view" column, so the two
+        # never contradict each other.
+        in_view = last.get("bars")
+        if in_view is not None and in_view >= mon.baseline:
+            return "All accounted for — all %d in view" % mon.baseline
+        if mon.full_seen_at is not None and last.get("t") is not None:
+            return "All accounted for — all %d seen together %s" % (
+                mon.baseline, _ago(last["t"] - mon.full_seen_at))
+        return "All accounted for"
 
     def not_ready_reason(self) -> str | None:
         workers = self._workers()
@@ -615,7 +742,8 @@ class DeskApp(FrameApp):
                     "missing-bar alarm is paused there. Give this box more CPU, "
                     "or watch fewer cameras on it." % (
                         ", ".join(w.name for w in slow),
-                        ", ".join("%.1f fps" % (w.monitor.analysis_fps() or 0)
+                        ", ".join("%.1f frames/s, needs %.1f" % (
+                            w.monitor.slow_fps or 0, w.monitor.s.min_analysis_fps)
                                   for w in slow)))
         return None
 

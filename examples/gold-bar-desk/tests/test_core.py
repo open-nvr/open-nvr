@@ -175,8 +175,13 @@ def test_a_starved_camera_pauses_the_missing_alarm_and_says_so():
     t = run(mon, scene, t, 120, step=2.5)
     assert alerts(events, "bar_missing") == []
     assert mon.too_slow is True
+    # The rate that paused it is kept, not re-measured later: asked a
+    # moment afterwards it has often recovered, and "1.1 fps; needs 1"
+    # read as nonsense on the page.
+    assert mon.slow_fps == pytest.approx(0.4)
     run(mon, scene, t, 40, step=0.5)
     assert mon.too_slow is False
+    assert mon.slow_fps is None
     assert len(alerts(events, "bar_missing")) == 1
 
 
@@ -325,6 +330,36 @@ def test_recount_starts_the_shift_again():
     run(mon, scene, t, 5)
     assert mon.count_alarm is None
     assert mon.baseline == 11
+
+
+def test_a_new_shift_asked_mid_frame_is_applied_by_the_next_frame():
+    """Actions run on the web server's thread. A shift reset that landed
+    while a frame was being analysed crashed it; now it is a request the
+    next frame applies, so nothing is reset under a frame in flight."""
+    scene = Scene(12)
+    mon, events = monitor(scene, bars_at_start=12)
+    t = run(mon, scene, 0, 5)
+    mon.request_new_shift(0)
+    assert mon.baseline == 12               # not yet: no frame since
+    t = run(mon, scene, t, 1)
+    assert mon.baseline is None             # learning again
+    t = run(mon, scene, t, 40)
+    assert mon.baseline == 12
+    mon.request_new_shift(11)
+    run(mon, scene, t, 1)
+    assert mon.baseline == 11
+
+
+def test_acknowledge_is_applied_by_the_next_frame():
+    scene = Scene(12)
+    mon, events = monitor(scene, bars_at_start=12)
+    t = run(mon, scene, 0, 5)
+    scene.bars.pop()
+    t = run(mon, scene, t, 30)
+    assert mon.count_alarm == "missing"
+    mon.request_acknowledge()
+    run(mon, scene, t, 0.5)
+    assert mon.count_alarm is None
 
 
 @pytest.mark.parametrize("value", [0.0012, "0.0012"])

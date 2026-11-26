@@ -220,6 +220,9 @@ class DeskMonitor:
         self.frame_gap = 0.0                     # seconds since the previous look
         self._gaps: deque = deque(maxlen=10)
         self.too_slow = False                    # missing-bar alarm paused
+        self._pending_shift: int | None = None   # see request_new_shift()
+        self._pending_ack = False
+        self.slow_fps: float | None = None       # the rate that paused it
         self.last: dict = {}
 
     # ── helpers ──
@@ -242,6 +245,31 @@ class DeskMonitor:
         self.count_alarm = None
         self.high_since = None
 
+    # The app's actions arrive on the web server's thread while analyse()
+    # runs on the camera's. Resetting the count under a frame in flight
+    # crashed it ('float' - 'NoneType': started_at wiped mid-frame), so
+    # an action only leaves a request, and the next frame applies it
+    # before it reads anything. A single attribute store is atomic.
+
+    def request_new_shift(self, bars: int) -> None:
+        """Start the shift again at the next frame, against ``bars``
+        (0: learn the count)."""
+        self._pending_shift = max(0, int(bars or 0))
+
+    def request_acknowledge(self) -> None:
+        """Clear the count alarm at the next frame."""
+        self._pending_ack = True
+
+    def _apply_requests(self) -> None:
+        bars, self._pending_shift = self._pending_shift, None
+        if bars is not None:
+            self.recount()
+            self.set_baseline(bars)
+        if self._pending_ack:
+            self._pending_ack = False
+            self.count_alarm = None
+            self.full_seen_at = None
+
     def set_baseline(self, bars: int) -> None:
         if bars and bars > 0:
             if bars != self.baseline:
@@ -259,6 +287,7 @@ class DeskMonitor:
     # ── one analysed frame ──
 
     def analyse(self, frame, t: float) -> dict:
+        self._apply_requests()
         z = self.zones
         if self.started_at is None:
             self.started_at = t
@@ -367,6 +396,10 @@ class DeskMonitor:
             return
         fps = self.analysis_fps()
         self.too_slow = fps is not None and fps < self.s.min_analysis_fps
+        # Kept, because analysis_fps() asked a moment later has often
+        # recovered past the minimum, and "1.1 fps; needs 1" then reads
+        # as nonsense.
+        self.slow_fps = fps if self.too_slow else None
         if self.too_slow and self.count_alarm != "missing":
             # Too few looks to tell "hidden" from "gone". Start the window
             # again from now, so that when speed recovers it needs a full
