@@ -58,7 +58,6 @@ import type { AspectOverride } from '../../lib/aspect'
 import { useVideoSize } from '../../hooks/useVideoAspect'
 import { VideoControls } from './VideoControls'
 import { DetectionOverlay } from './DetectionOverlay'
-import type { OverlayLayer } from '../../lib/overlayLayers'
 import { useDigitalZoom } from '../../hooks/useDigitalZoom'
 import { ZoomBadge } from '../ZoomBadge'
 import { AlertCircle } from 'lucide-react'
@@ -156,10 +155,10 @@ export interface VideoPlayerProps {
   /** Draw Tier-0 bounding boxes with label + score over the video.
       Live mode only; costs nothing when false (no canvas, no socket). */
   showDetections?: boolean
-  /** Overlay layers the viewer switched off (lib/overlayLayers). */
-  overlayHidden?: ReadonlySet<string>
-  /** Which overlay layers are on screen, when that changes. */
-  onOverlayLayers?: (layers: OverlayLayer[]) => void
+  /** Which view this player is in ('live', 'dashboard', 'tour', 'peek',
+   *  'app:<id>'): each keeps its own choice of overlay layers per camera
+   *  (lib/overlayLayerStore). Default 'live'. */
+  overlayScope?: string
   /** 'full' (default) draws the title, LIVE badge and control bar and binds
       keyboard shortcuts. 'none' is a bare feed for glance surfaces such as
       the dashboard wall: the caller draws its own labels, and with several
@@ -213,8 +212,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       displayAspectOverride,
       cameraId = null,
       showDetections = false,
-      overlayHidden,
-      onOverlayLayers,
+      overlayScope,
       chrome = 'full',
       cover = false,
       offlineLabel,
@@ -1531,8 +1529,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             Below the loading/error overlays in the tree, so those still
             cover it. Live only: recordings carry no live tracks. */}
         {mode === 'live' && showDetections && cameraId != null && (
-          <DetectionOverlay cameraId={cameraId} zoom={zoom.view}
-                            hiddenLayers={overlayHidden} onLayers={onOverlayLayers} />
+          <DetectionOverlay cameraId={cameraId} zoom={zoom.view} scope={overlayScope} />
         )}
 
         {/* Top-left, under the tile's name: the top-right corner holds the

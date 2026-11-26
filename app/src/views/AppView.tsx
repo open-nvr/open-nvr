@@ -470,6 +470,7 @@ export function AppView() {
         {liveCamera && (
           <div className={popped ? 'h-0 w-0' : 'min-h-[300px] min-w-0 lg:w-[calc(100%-var(--split)-0.75rem)]'}>
             <LiveCameraPanel
+              layerScope={`app:${app.id}`}
               cameraId={liveCamera.id}
               cameraName={liveCamera.name}
               cameras={liveCameras.map((c) => ({ id: c.id, name: c.name }))}

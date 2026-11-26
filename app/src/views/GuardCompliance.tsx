@@ -678,6 +678,7 @@ export default function GuardCompliance() {
           report data, and fading it whenever someone changes the range
           reads as the camera dropping out. */}
       <LiveCameraPanel
+        layerScope={`app:${guardApp?.id ?? 'guard-scan-compliance'}`}
         cameraId={liveCameraId}
         cameraName={liveCameraId == null ? '' : cameraName(liveCameraId)}
         cameras={pickedCameras.map((c) => ({ id: c.id, name: c.name }))}

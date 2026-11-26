@@ -45,6 +45,7 @@ import { useEffect, useRef } from 'react'
 import { subscribeDetections, type OverlayFrame, type OverlayTrack } from '../../lib/detectionFeed'
 import { planMerge, TIER0_SOURCE, wearLabel } from '../../lib/overlayMerge'
 import { BADGE_LAYER, layerOf, type OverlayLayer } from '../../lib/overlayLayers'
+import { hiddenLayers, onLayersChange, reportLayers } from '../../lib/overlayLayerStore'
 
 export interface DetectionOverlayProps {
   cameraId: number
@@ -58,11 +59,9 @@ export interface DetectionOverlayProps {
    *  of this overlay's box). Boxes are mapped through it rather than the
    *  canvas being scaled, so lines and labels stay crisp and sized. */
   zoom?: { s: number; x: number; y: number }
-  /** Layer keys (lib/overlayLayers) the viewer switched off. */
-  hiddenLayers?: ReadonlySet<string>
-  /** Told which layers are on screen whenever that set changes, so a
-   *  layer picker lists only what this camera actually shows. */
-  onLayers?: (layers: OverlayLayer[]) => void
+  /** Which view this is, for what the viewer switched off here
+   *  (lib/overlayLayerStore): 'live', 'dashboard', 'tour', 'peek', 'app:<id>'. */
+  scope?: string
 }
 
 /** ``s`` as it appears on a picture zoomed by ``z``, in normalized units
@@ -119,15 +118,16 @@ interface Shown {
   trail: { x: number, y: number, at: number }[]
 }
 
-export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom, hiddenLayers, onLayers }: DetectionOverlayProps) {
+export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom, scope }: DetectionOverlayProps) {
+  // Read by the draw loop: switching views' scope must not restart it.
+  const scopeRef = useRef(scope)
+  scopeRef.current = scope
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  // Read by the draw loop through refs: switching a layer, or a new
-  // callback identity from a re-rendering parent, must not restart it.
-  const hiddenRef = useRef(hiddenLayers)
-  hiddenRef.current = hiddenLayers
-  const onLayersRef = useRef(onLayers)
-  onLayersRef.current = onLayers
+  // Layers: what this camera draws is reported to, and what the viewer
+  // switched off is read from, the camera's store (lib/overlayLayerStore),
+  // so every view of the camera shares one choice.
   const layersSigRef = useRef('')
+  const reportedAtRef = useRef(0)
   // Read by the draw loop, so zooming redraws without restarting it.
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
@@ -221,7 +221,7 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom,
         if (s.lostAt != null && now - s.lostAt > FADE_OUT_MS) shown.delete(key)
       }
       const plan = planMerge(shown)
-      const hiddenSet = hiddenRef.current
+      const hiddenSet = hiddenLayers(cameraId, scopeRef.current)
       const present = new Map<string, OverlayLayer>()
 
       for (const [key, s] of shown) {
@@ -255,17 +255,21 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom,
         present.set(BADGE_LAYER, { key: BADGE_LAYER, name: 'Object count (corner)', group: 'Detector' })
       }
       if (badge && anyFresh && !hiddenSet?.has(BADGE_LAYER)) drawBadge(ctx, W, alive, fpsRef.current.fps)
-      // Report the set only when it changes: this runs every frame.
+      // Report when the set changes, and every few seconds besides so the
+      // store knows these layers are still drawn: this runs every frame.
       const sig = [...present.keys()].sort().join(' | ')
-      if (sig !== layersSigRef.current) {
+      if (sig !== layersSigRef.current || now - reportedAtRef.current > 5000) {
         layersSigRef.current = sig
-        onLayersRef.current?.([...present.values()])
+        reportedAtRef.current = now
+        reportLayers(cameraId, [...present.values()])
       }
       if (shown.size) requestTick()
     }
     const requestTick = () => { if (rafRef.current == null) rafRef.current = requestAnimationFrame(tick) }
     redrawRef.current = requestTick
 
+    // A layer switched on or off (here or in another view): redraw now.
+    const unlayers = onLayersChange(cameraId, requestTick)
     const unsubscribe = subscribeDetections(cameraId, (frame) => {
       frames.set(frame.source, frame)
       ingest(frame)
@@ -279,6 +283,7 @@ export function DetectionOverlay({ cameraId, staleMs = 2000, badge = true, zoom,
 
     return () => {
       unsubscribe()
+      unlayers()
       window.clearInterval(sweep)
       ro.disconnect()
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
