@@ -612,6 +612,22 @@ class OpenNVR:
             f"/api/v1/internal/app/cameras/{_camera_id(camera)}/description",
             max_age_s=float(max_age_s), prefer_store="true" if prefer_store else "false")
 
+    def stay_active(self, camera, until: datetime | None) -> dict:
+        """Keep this camera's detector at full decode until ``until``.
+
+        The detect-pipeline idles a quiet camera and wakes it on motion,
+        which misses people who sit still (a classroom). Take a lease
+        while the camera matters, renew it while it still does (core
+        caps one at 12 hours), and pass ``None`` to release it early.
+        Returns core's answer: ``camera_id`` and the ``until`` it kept.
+
+        Raises :class:`PlatformError` when the lease was not taken —
+        409 when this app holds no claim (pick or skill) on the camera.
+        """
+        return self._http.put_json(
+            f"/api/v1/internal/app/cameras/{_camera_id(camera)}/stay-active",
+            {"until": until.isoformat() if until is not None else None})
+
     def save_evidence(self, jpeg: bytes) -> str | None:
         """Store a JPEG for an alert to cite; returns its path.
 
