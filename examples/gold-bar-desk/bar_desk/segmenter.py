@@ -70,8 +70,89 @@ def decode(out0, out1, *, conf=0.25, iou=0.7, max_det=300):
     return xyxy, scores, masks.reshape(-1, 160, 160).astype(np.float32)
 
 
+# ── where the model runs ──
+#
+# On a Qualcomm board the Hexagon NPU runs FastSAM-s in ~14 ms where the
+# CPU takes ~850 ms (measured on a QCS8275 / Ventuno Q, 640x640): the
+# difference between counting at the intended 2 frames a second with room
+# to spare and the ~1 frame a second that left the missing-bar rule short
+# of looks and raised false alarms. Counts matched the CPU's on 26 of 27
+# real desk frames (the other found one bar more). The NPU is reached
+# through onnxruntime-qnn, a PLUGIN provider: its library is registered
+# with onnxruntime and attached by device, not named in providers=. Same
+# mechanics, options and device check as detect-pipeline's onnx_detector.
+
+QNN_EP = "QNNExecutionProvider"
+QNN_HTP_DEVICE = "/dev/fastrpc-cdsp"
+QNN_HTP_OPTIONS = {
+    # Steady clocks: burst throttles after a few seconds of steady load.
+    "htp_performance_mode": "sustained_high_performance",
+    # The HTP has no fp32 path; without this every node falls to the CPU.
+    "enable_htp_fp16_precision": "1",
+    "htp_graph_finalization_optimization_mode": "3",
+}
+_qnn_registered = False
+
+
+def wants_npu(spec: str | None) -> bool:
+    """``GOLD_BAR_DESK_ONNX_PROVIDERS``: ``QNNExecutionProvider:htp`` (or
+    ``qnn``/``npu``) asks for the NPU; anything else, or nothing, is CPU."""
+    first = str(spec or "").split(",")[0].strip().lower()
+    return first.startswith("qnnexecutionprovider") or first in ("qnn", "npu", "htp")
+
+
+def npu_unavailable(device: str = QNN_HTP_DEVICE, have_qnn: bool | None = None) -> str | None:
+    """Why the NPU cannot be used from this container, or None if it can be
+    tried. Checked before onnxruntime is asked, because the runtime does
+    not say when it quietly runs everything on the CPU instead."""
+    if have_qnn is None:
+        try:
+            import onnxruntime_qnn  # noqa: F401
+            have_qnn = True
+        except ImportError:
+            have_qnn = False
+    if not have_qnn:
+        return ("the NPU was asked for but this image has no onnxruntime-qnn "
+                "(build it with ACCEL=qualcomm); running on the CPU")
+    if not os.path.exists(device):
+        return (f"the NPU was asked for but {device} is not in this container "
+                "(docker-compose.accel-qualcomm-apps.yml lends it); running on the CPU")
+    if not os.access(device, os.R_OK | os.W_OK):
+        return (f"the NPU was asked for but {device} is not accessible (check "
+                "FASTRPC_GID / DMAHEAP_GID in .env); running on the CPU")
+    return None
+
+
+def _npu_session(ort, model_path: str, so):
+    """(session on the NPU, None), or (None, why not)."""
+    global _qnn_registered
+    reason = npu_unavailable()
+    if reason:
+        return None, reason
+    try:
+        import onnxruntime_qnn as q
+
+        if not _qnn_registered:
+            ort.register_execution_provider_library(QNN_EP, q.get_library_path())
+            _qnn_registered = True
+        devices = [d for d in ort.get_ep_devices() if d.ep_name == QNN_EP]
+        if not devices:
+            return None, "onnxruntime-qnn reports no NPU on this board; running on the CPU"
+        opts = dict(QNN_HTP_OPTIONS)
+        # The library path, not backend_type=htp: the plugin failed device
+        # creation with the documented knob where the path worked.
+        opts["backend_path"] = q.get_qnn_htp_path()
+        so.add_provider_for_devices(devices, opts)
+        sess = ort.InferenceSession(model_path, sess_options=so)
+    except Exception as exc:  # noqa: BLE001 — any NPU failure falls back
+        return None, f"the NPU could not start ({type(exc).__name__}: {exc}"[:300] + "); running on the CPU"
+    if QNN_EP not in sess.get_providers():
+        return None, "onnxruntime did not put the model on the NPU; running on the CPU"
+    return sess, None
+
+
 class Segmenter:
-    def __init__(self, model_path, threads=2):
+    def __init__(self, model_path, threads=2, providers: str | None = None):
         # onnxruntime (1.31's Linux build carries Microsoft's 1DS client)
         # reports usage to mobile.events.data.microsoft.com from the moment
         # it is IMPORTED. This app declares no egress, so the platform's
@@ -87,8 +168,21 @@ class Segmenter:
         so = ort.SessionOptions()
         so.intra_op_num_threads = max(1, int(threads))
         so.inter_op_num_threads = 1
-        self.sess = ort.InferenceSession(str(model_path), so,
-                                         providers=["CPUExecutionProvider"])
+        #: Where the model runs, for the status line and the log.
+        self.backend = "CPU"
+        #: Why it is on the CPU when the NPU was asked for, else None.
+        self.fallback_reason: str | None = None
+        self.sess = None
+        if wants_npu(providers):
+            self.sess, self.fallback_reason = _npu_session(ort, str(model_path), so)
+            if self.sess is not None:
+                self.backend = "NPU (Qualcomm HTP)"
+        if self.sess is None:
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = max(1, int(threads))
+            so.inter_op_num_threads = 1
+            self.sess = ort.InferenceSession(str(model_path), so,
+                                             providers=["CPUExecutionProvider"])
         self.input = self.sess.get_inputs()[0].name
 
     def raw(self, crop):

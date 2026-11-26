@@ -52,3 +52,26 @@ def test_letterbox_keeps_aspect_and_centres():
     assert img.shape == (640, 640, 3)
     assert r == 640 / 600
     assert top == 0 and left == (640 - 320) // 2
+
+
+# ── where the model runs ──
+
+def test_only_a_qnn_spec_asks_for_the_npu():
+    from bar_desk.segmenter import wants_npu
+    assert wants_npu("QNNExecutionProvider:htp")
+    assert wants_npu("QNNExecutionProvider:htp,CPUExecutionProvider")
+    assert wants_npu("npu")
+    assert not wants_npu(None)
+    assert not wants_npu("")
+    assert not wants_npu("CPUExecutionProvider")
+
+
+def test_the_npu_is_not_tried_without_the_package_or_the_device(tmp_path):
+    """onnxruntime does not say when it quietly runs everything on the CPU,
+    so the app checks first and says why it is on the CPU."""
+    from bar_desk.segmenter import npu_unavailable
+    assert "onnxruntime-qnn" in npu_unavailable(have_qnn=False)
+    assert "not in this container" in npu_unavailable(str(tmp_path / "fastrpc-cdsp"), have_qnn=True)
+    dev = tmp_path / "fastrpc-cdsp"
+    dev.write_bytes(b"")
+    assert npu_unavailable(str(dev), have_qnn=True) is None

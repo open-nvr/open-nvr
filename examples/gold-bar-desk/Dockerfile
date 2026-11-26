@@ -11,6 +11,11 @@
 # volume mounted read-only at /weights.
 
 FROM python:3.11-slim AS runtime
+# cpu (default) or qualcomm: the Qualcomm flavour adds onnxruntime-qnn so
+# the segmentation model can run on the Hexagon NPU (~14 ms a frame where
+# the CPU takes ~850 ms). Built that way by
+# docker-compose.accel-qualcomm-apps.yml.
+ARG ACCEL=cpu
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -25,6 +30,16 @@ RUN pip install --no-cache-dir \
         "numpy>=1.26,<3.0" \
         "opencv-python-headless>=4.9,<5.0" \
         "onnxruntime>=1.18,<2.0"
+
+# onnxruntime-qnn >= 2.0 is a PLUGIN provider that sits next to plain
+# onnxruntime (it needs >= 1.24.2) and bundles the QAIRT user-space; the
+# host lends the fastrpc device and two libraries. Pinned like
+# detect-pipeline's: the plugin tracks a QAIRT release.
+RUN case "${ACCEL}" in \
+      cpu) ;; \
+      qualcomm) pip install --no-cache-dir "onnxruntime>=1.24.2,<2" onnxruntime-qnn==2.7.0 ;; \
+      *) echo "unknown ACCEL=${ACCEL} (cpu|qualcomm)" >&2; exit 1 ;; \
+    esac
 
 COPY sdk/opennvr-app-sdk /opt/opennvr-app-sdk
 RUN pip install --no-cache-dir /opt/opennvr-app-sdk
