@@ -25,6 +25,7 @@ def test_manifest_checks():
     assert any("kebab" in e for e in _report(id="Gate_Watch").errors)
     assert any("semantic" in e for e in _report(version="1.0").errors)
     assert any("category" in w for w in _report(category="misc").warnings)
+    assert not any("category" in w for w in _report(category="fashion").warnings)
     assert any("canonical task" in w for w in _report(requires_tasks=["mind_reading"]).warnings)
     assert any("requires_scopes" in e for e in _report(requires_scopes=["plates"]).errors)
     assert any("declared twice" in e for e in _report(emits=[AlertType("a"), AlertType("a")]).errors)
