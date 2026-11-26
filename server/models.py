@@ -227,6 +227,8 @@ class IntegrationType(str, enum.Enum):
     #: Home Assistant's REST API (url + long-lived token): what a workflow's
     #: ``home_assistant`` action calls.
     HOME_ASSISTANT = "home_assistant"
+    #: A Telegram bot (token + chat): alerts and workflow messages to a chat.
+    TELEGRAM = "telegram"
 
 
 class Integration(Base):

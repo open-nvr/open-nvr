@@ -1,6 +1,6 @@
 # Copyright (c) 2026 OpenNVR
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
-"""The last Phase 1 actions: save_clip, ptz_preset, webhook and home_assistant."""
+"""The last Phase 1 actions: save_clip, ptz_preset, webhook (Telegram too) and home_assistant."""
 
 from __future__ import annotations
 
@@ -211,7 +211,7 @@ def test_webhook_to_an_approved_destination_with_the_run_and_the_body(env, hooks
 @pytest.mark.parametrize("to", ["old", "mail", "nobody"])
 def test_webhook_only_to_an_enabled_webhook_slack_or_teams(env, hooks, to):
     (step,) = run(env, flow(f"webhook: {{ to: {to} }}"))
-    assert step.outcome == "failed" and "no enabled webhook, Slack or Teams" in step.reason
+    assert step.outcome == "failed" and "no enabled webhook, Slack, Teams or Telegram" in step.reason
     assert hooks == []
 
 
@@ -221,6 +221,87 @@ def test_the_destinations_are_checked_when_the_file_is_saved(env, hooks):
     bad = catalog.check(flow("webhook: { to: old }"), env.db)
     assert [str(e) for e in bad.errors] == [
         "then[0].webhook.to: 'old' is not an approved destination on this site"]
+
+
+# ── Telegram ──────────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def telegram(env, monkeypatch):
+    from services.integration_service import IntegrationService
+    env.db.add(Integration(name="guards", type="telegram", enabled=True,
+                           config={"token": "123:abc", "chat_id": "-100"}))
+    env.db.commit()
+    sent = []
+
+    async def send(integration, text, **kw):
+        sent.append((integration.name, text))
+        return {"success": True, "message": "Telegram message sent"}
+    monkeypatch.setattr(IntegrationService, "send_telegram", staticmethod(send))
+    return sent
+
+
+def test_a_workflow_webhook_can_go_to_telegram_as_text(env, telegram):
+    (step,) = run(env, flow('webhook: { to: guards, body: { gate: "{camera}" } }'))
+    assert (step.outcome, step.reason) == ("done", "Telegram message sent")
+    ((name, text),) = telegram
+    assert name == "guards" and text.startswith("Yard:") and text.endswith("gate: yard")
+    assert catalog.check(flow("webhook: { to: guards }"), env.db).ok
+
+
+def tg(handler):
+    import httpx
+    return httpx.MockTransport(handler)
+
+
+def test_telegram_send_and_test_call_the_bot_api():
+    import json as _json
+
+    from services.integration_service import IntegrationService
+    calls = []
+
+    def ok(request):
+        calls.append((str(request.url), _json.loads(request.content or b"{}")))
+        method = str(request.url).rsplit("/", 1)[-1]
+        result = {"getMe": {"username": "gate_bot"}, "getChat": {"id": -100}}.get(method, {})
+        return __import__("httpx").Response(200, json={"ok": True, "result": result})
+    integ = Integration(name="guards", type="telegram", enabled=True,
+                        config={"token": "123:abc", "chat_id": "-100"})
+    out = asyncio.run(IntegrationService.send_telegram(integ, "x" * 5000, silent=True,
+                                                       transport=tg(ok)))
+    assert out["success"] is True
+    url, body = calls[-1]
+    assert url == "https://api.telegram.org/bot123:abc/sendMessage"
+    assert body == {"chat_id": "-100", "text": "x" * 4096, "disable_notification": True}
+
+    test = asyncio.run(IntegrationService._test_telegram(integ, transport=tg(ok)))
+    assert test == {"success": True, "message": "@gate_bot can post to that chat"}
+    assert [u.rsplit("/", 1)[-1] for u, _ in calls[-2:]] == ["getMe", "getChat"]
+
+
+def test_telegram_errors_say_why_and_never_show_the_token():
+    import httpx
+
+    from services.integration_service import IntegrationService
+    integ = Integration(name="guards", type="telegram", enabled=True,
+                        config={"token": "123:secret", "chat_id": "-100"})
+    refused = asyncio.run(IntegrationService.send_telegram(
+        integ, "hi", transport=tg(lambda r: httpx.Response(
+            401, json={"ok": False, "description": "Unauthorized"}))))
+    assert refused == {"success": False, "message": "Telegram refused the bot token"}
+
+    def kicked(request):
+        method = str(request.url).rsplit("/", 1)[-1]
+        if method == "getMe":
+            return httpx.Response(200, json={"ok": True, "result": {"username": "b"}})
+        return httpx.Response(400, json={"ok": False, "description": "Bad Request: chat not found"})
+    test = asyncio.run(IntegrationService._test_telegram(integ, transport=tg(kicked)))
+    assert test["success"] is False and "chat not found" in test["message"]
+
+    def down(request):
+        raise httpx.ConnectError("boom")
+    gone = asyncio.run(IntegrationService.send_telegram(integ, "hi", transport=tg(down)))
+    assert gone["success"] is False and "secret" not in gone["message"]
 
 
 # ── home_assistant ────────────────────────────────────────────────────

@@ -32,8 +32,8 @@ What runs today:
 
 * **save_clip** (protects the camera's recordings around the moment the
   run began from retention), **ptz_preset** (points a camera at a preset
-  by name) and **webhook** (to an enabled webhook, Slack or Teams
-  integration by name: the admin-approved destinations).
+  by name) and **webhook** (to an enabled webhook, Slack, Teams or Telegram
+  integration by name: the admin-approved destinations; Telegram gets the text).
 
 * **home_assistant** calls a Home Assistant service (``lock.unlock``)
   through an enabled Home Assistant integration (Settings >
@@ -85,7 +85,7 @@ LIMIT_DEFAULTS = {"cooldown": "1m", "one_at_a_time": "camera", "per_hour": 30,
                   "ai_per_hour": 60}
 NOT_YET = "not available yet in this engine"
 #: Integration types a workflow's webhook may send to.
-WEBHOOK_TYPES = ("webhook", "slack", "teams")
+WEBHOOK_TYPES = ("webhook", "slack", "teams", "telegram")
 #: How long after a clip's end its last segment is surely indexed (60 s
 #: segments, indexed when they close, plus lag).
 CLIP_INDEX_SLACK_S = 90.0
@@ -934,9 +934,10 @@ class _Walker:
         return "done", f"{cam.name} to {name}"
 
     async def _webhook(self, spec: dict[str, Any]) -> tuple[str, str]:
-        """POST to an admin-approved destination: an enabled webhook, Slack
-        or Teams integration with this name, through the integrations'
-        own target policy."""
+        """Send to an admin-approved destination: an enabled webhook, Slack,
+        Teams or Telegram integration with this name, through the
+        integrations' own target policy. Telegram gets the text (and the
+        body's values as lines); the others get the JSON."""
         from models import Integration
         from services.integration_service import IntegrationService
 
@@ -944,7 +945,8 @@ class _Walker:
                       .filter(Integration.name == spec["to"], Integration.enabled.is_(True)).all()
                       if str(getattr(i.type, "value", i.type)) in WEBHOOK_TYPES), None)
         if integ is None:
-            return "failed", f"no enabled webhook, Slack or Teams integration named {spec['to']!r}"
+            return "failed", ("no enabled webhook, Slack, Teams or Telegram integration "
+                              f"named {spec['to']!r}")
         wf = self.db.get(Workflow, self.run.workflow_id) if self.run.workflow_id else None
         summary = " ".join(str(x) for x in (self.ctx.values.get("outcome"),
                                             self.ctx.values.get("reason")) if x)
@@ -955,7 +957,12 @@ class _Walker:
                    "outcome": self.ctx.values.get("outcome"),
                    "reason": self.ctx.values.get("reason"), **(spec.get("body") or {})}
         self.db.commit()
-        result = await IntegrationService._send_webhook(integ, payload)
+        if str(getattr(integ.type, "value", integ.type)) == "telegram":
+            extra = "\n".join(f"{k}: {v}" for k, v in (spec.get("body") or {}).items())
+            result = await IntegrationService.send_telegram(
+                integ, payload["text"] + (f"\n{extra}" if extra else ""))
+        else:
+            result = await IntegrationService._send_webhook(integ, payload)
         return ("done" if result.get("success") else "failed"), str(result.get("message"))[:300]
 
     async def _home_assistant(self, spec: dict[str, Any]) -> tuple[str, str]:
