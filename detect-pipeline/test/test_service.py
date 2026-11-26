@@ -1174,3 +1174,16 @@ def test_idle_keyframe_duplicates_are_not_drops_and_raise_no_warning(monkeypatch
     assert metrics.value("tier0_frames_dropped_total", {"camera": cam}) - dropped_before == 0
     assert metrics.value("tier0_frames_idle_duplicates_total", {"camera": cam}) - dups_before == 3
     assert "exceeds this box's capacity" not in caplog.text
+
+
+def test_a_camera_held_awake_never_idles_and_a_lease_change_restarts_it():
+    """stay_active: no adaptive decode (no idle), and the lease starting or
+    ending is a baked spec change (the worker restarts, starting active)."""
+    awake = CameraWorker(_spec("cam9", stay_active=True), _FakeSink(),
+                         detector=_MotionAllDetector(), decode_idle="nokey")
+    assert awake._make_adaptive() is None
+    normal = CameraWorker(_spec("cam9"), _FakeSink(), detector=_MotionAllDetector(),
+                          decode_idle="nokey")
+    assert normal._make_adaptive() is not None
+    assert (WorkerManager._baked(_spec("cam9", stay_active=True))
+            != WorkerManager._baked(_spec("cam9")))

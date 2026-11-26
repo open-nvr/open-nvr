@@ -80,6 +80,14 @@ FACE_ROUTE_LABELS: tuple[str, ...] = ("person",)
 # read once; a face is not).
 FACE_MAX_ATTEMPTS = 5
 FACE_MIN_INTERVAL_S = 0.5
+# Once those attempts are spent and the person is still unnamed, a camera
+# that stays active (a class running, see CameraSpec.stay_active) keeps
+# looking: a crop of the CURRENT frame every this many seconds. The best
+# crop is no help there — it only improves on score and size, and a
+# student who sat down facing away and later looks up produces no better
+# one. Same budget as a fresh round of attempts every 30 s, spread out so
+# a glance of a second or two is more likely to land on a try.
+FACE_RETRY_EVERY_S = 6.0
 
 
 def face_adapters_of(skill_adapters) -> tuple[str, ...]:
@@ -125,14 +133,18 @@ class FaceFollowUp:
     A track is sent when the gate escalates it, then again whenever its
     best crop has improved since the last attempt (at most every
     ``min_interval_s``), until a result recognises it or ``max_attempts``
-    is reached. Results arrive on the dispatcher's thread, hence the
+    is reached. After that, ``retry_due`` says when a fresh crop of the
+    current frame may be tried (cameras that stay active only; the
+    caller decides). Results arrive on the dispatcher's thread, hence the
     lock. Bounded FIFO like OncePerTrack."""
 
     def __init__(self, max_attempts: int = FACE_MAX_ATTEMPTS,
-                 min_interval_s: float = FACE_MIN_INTERVAL_S, maxlen: int = 1024) -> None:
+                 min_interval_s: float = FACE_MIN_INTERVAL_S, maxlen: int = 1024,
+                 retry_every_s: float = FACE_RETRY_EVERY_S) -> None:
         from collections import OrderedDict
         self.max_attempts = max(1, int(max_attempts))
         self.min_interval_s = max(0.0, float(min_interval_s))
+        self.retry_every_s = max(self.min_interval_s, float(retry_every_s))
         self._maxlen = max(1, int(maxlen))
         self._lock = threading.Lock()
         # (track_id, adapter) -> [attempts, crop_ts sent, sent at, recognised]
@@ -158,6 +170,18 @@ class FaceFollowUp:
         # A better crop since the last attempt (a tracker that does not
         # stamp crops counts every frame as new; the cap bounds it).
         return ts is None or crop_ts is None or ts > crop_ts
+
+    def retry_due(self, track_id, adapter: str, now: float) -> bool:
+        """Attempts spent, still unnamed, and ``retry_every_s`` since the
+        last try: time for a crop of the current frame."""
+        with self._lock:
+            st = self._state.get((track_id, adapter))
+            st = list(st) if st is not None else None
+        if st is None:
+            return False
+        attempts, _crop_ts, sent_at, done = st
+        return (not done and attempts >= self.max_attempts
+                and now - sent_at >= self.retry_every_s)
 
     def sent(self, track, adapter: str, now: float) -> None:
         key = (track.id, adapter)
@@ -412,11 +436,16 @@ def _send_face(camera_id, adapter, track, dispatcher, follow: "FaceFollowUp | No
 
 def follow_up_faces(camera_id: str, tracks, router: "DispatchRouter | None",
                     dispatcher: "Dispatcher | None", follow: "FaceFollowUp | None",
-                    now: float | None = None) -> int:
+                    now: float | None = None, fresh_crop=None) -> int:
     """Every frame, on a face-route camera: re-send people the face route
     already started on whose best crop has improved (see FaceFollowUp).
     Only tracks the gate escalated once are followed: the gate still
-    decides who is worth a first look."""
+    decides who is worth a first look.
+
+    ``fresh_crop(track)`` (a camera that stays active) cuts the track
+    from the current frame; with it, a person still unnamed after the
+    attempts is tried again every ``retry_every_s`` while they are in
+    view."""
     if dispatcher is None or router is None or follow is None or not router.face_adapters:
         return 0
     now = time.monotonic() if now is None else now
@@ -424,8 +453,30 @@ def follow_up_faces(camera_id: str, tracks, router: "DispatchRouter | None",
     for t in tracks:
         for adapter in router.route(getattr(t, "label", "")):
             if adapter in router.face_adapters and follow.started(t.id, adapter):
-                issued += int(_send_face(camera_id, adapter, t, dispatcher, follow, now))
+                if _send_face(camera_id, adapter, t, dispatcher, follow, now):
+                    issued += 1
+                elif (fresh_crop is not None and not getattr(t, "misses", 0)
+                      and follow.retry_due(t.id, adapter, now)):
+                    issued += int(_retry_face(camera_id, adapter, t, dispatcher,
+                                              follow, now, fresh_crop))
     return issued
+
+
+def _retry_face(camera_id, adapter, track, dispatcher, follow: "FaceFollowUp",
+                now: float, fresh_crop) -> bool:
+    """One try on a crop of the current frame (see follow_up_faces)."""
+    try:
+        crop = fresh_crop(track)
+    except Exception:  # noqa: BLE001 — a bad crop costs this try, not the frame
+        log.debug("fresh face crop failed for track %s", getattr(track, "id", "?"), exc_info=True)
+        return False
+    if crop is None:
+        return False
+    accepted = dispatcher.dispatch(camera_id, adapter, crop, track, task=FACE_TASK,
+                                   on_result=follow.result)
+    if accepted is not False:
+        follow.sent(track, adapter, now)
+    return accepted is not False
 
 
 def dispatch_escalations(camera_id: str, tracks, gate_result, router: DispatchRouter,
