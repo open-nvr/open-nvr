@@ -4,7 +4,7 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { clsx } from 'clsx'
-import { useTranslation } from '../../i18n'
+import { useDateFormat, useTranslation } from '../../i18n'
 import { useCameraStatusConnected } from '../../hooks/useCameraStatus'
 import {
   useCameras,
@@ -98,6 +98,7 @@ function formatUptime(s: number): string {
  */
 export function HealthBar({ actions }: { actions?: ReactNode }) {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const core = useCoreHealth()
   const mtx = useMediaMtxHealth()
   const kaic = useKaiCHealth()
@@ -194,7 +195,7 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
     jump
       ? t('dashboard.health.clockChangedHint', {
           delta: formatClockStep(jump.delta_seconds),
-          time: new Date(jump.at).toLocaleString(),
+          time: fmt.dateTime(jump.at),
           n: jump.streams_restarted,
         })
       : null,
