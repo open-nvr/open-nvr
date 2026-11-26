@@ -282,6 +282,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const onAuthExpiredRef = useRef(onAuthExpired)
     onAuthExpiredRef.current = onAuthExpired
     const [isReconnecting, setIsReconnecting] = useState(false)
+    // A frame of the current source has reached the screen. WebRTC's
+    // ontrack fires before the first keyframe, so a live tile can be
+    // "connected" for seconds with nothing to show; until this is true the
+    // tile says "Connecting…" and the detection boxes stay hidden, so they
+    // never float over a black picture and the two appear together.
+    const [hasPicture, setHasPicture] = useState(false)
+    const waitingForPicture = mode === 'live' && !hasPicture
     // The current WHEP attempt: when it was answered, whether ICE ever
     // reached `connected`, and the deadline after which the tile gives up on
     // WebRTC. A viewer's explicit stream choice (the player menu) switches
@@ -441,6 +448,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
       whepConnectedRef.current = false
       whepCreatedAtRef.current = 0
+      setHasPicture(false)
       // Clear video source completely and reset the element
       if (videoRef.current) {
         const el = videoRef.current
@@ -1081,11 +1089,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         offlinePollingRef.current = false
         setIsReconnecting(false)
         setIsLoading(false)
+        setHasPicture(true)
         setError(null)
       }
       const onTimeUpdate = () => setCurrentTime(el.currentTime)
       const onDurationChange = () => setDuration(el.duration || 0)
-      const onLoadedData = () => setIsLoading(false)
+      const onLoadedData = () => {
+        setIsLoading(false)
+        setHasPicture(true)
+      }
       const onWaiting = () => setIsLoading(true)
       const onCanPlay = () => setIsLoading(false)
       const onVolumeChange = () => {
@@ -1533,7 +1545,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             Below the loading/error overlays in the tree, so those still
             cover it. Live only: recordings carry no live tracks. */}
         {mode === 'live' && showDetections && cameraId != null && (
-          <DetectionOverlay cameraId={cameraId} zoom={zoom.view} scope={overlayScope} />
+          // Mounted from the start (its feed subscription is warm when the
+          // picture arrives) but not shown until there is a picture.
+          // visibility, not display:none: the canvas sizes itself from its
+          // layout box, and a display:none canvas measures 0×0 and stays
+          // blank after it is shown again.
+          <div className="contents" style={{ visibility: hasPicture ? 'visible' : 'hidden' }}>
+            <DetectionOverlay cameraId={cameraId} zoom={zoom.view} scope={overlayScope} />
+          </div>
         )}
 
         {/* Top-left, under the tile's name: the top-right corner holds the
@@ -1541,12 +1560,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         {!bare && <ZoomBadge zoom={zoom} className="top-8 left-2" />}
 
         {/* Loading / reconnecting overlay */}
-        {compact && (isLoading || isReconnecting) && !error && (
+        {compact && (isLoading || isReconnecting || waitingForPicture) && !error && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-black/30">
             <div className="w-5 h-5 border-2 border-white/25 border-t-white/80 rounded-full animate-spin" />
-            {isReconnecting && (
-              <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-white/55">{t('video.reconnecting')}</div>
-            )}
+            <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-white/55">
+              {isReconnecting ? t('video.reconnecting') : t('video.connecting')}
+            </div>
           </div>
         )}
         {compact && error && (
@@ -1566,12 +1585,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             )}
           </div>
         )}
-        {!compact && (isLoading || isReconnecting) && (
+        {!compact && (isLoading || isReconnecting || waitingForPicture) && !error && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/40">
             <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            {isReconnecting && (
-              <div className="text-xs text-white/80">{t('video.reconnecting')}</div>
-            )}
+            <div className="text-xs text-white/80">
+              {isReconnecting ? t('video.reconnecting') : t('video.connecting')}
+            </div>
           </div>
         )}
 
