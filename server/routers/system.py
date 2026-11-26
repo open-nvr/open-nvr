@@ -78,6 +78,9 @@ async def get_system_info(
         # Clients compare it with their own clock: signed media and token
         # expiry are judged by the server's.
         "server_time": datetime.now(UTC).isoformat(),
+        # Whether that clock is NTP-synchronised, and its last step (#1023):
+        # recording times, MFA codes and certificates all depend on it.
+        "clock": _clock_status(),
         "network": _network_facts(db),
         # Read-only paths an integration may relay for a dashboard card.
         "passthrough_allowlist": list(PASSTHROUGH_ALLOWLIST),
@@ -89,6 +92,15 @@ async def get_system_info(
         # (running both shows every alert twice).
         "relay_installed": _relay_installed(db),
     }
+
+
+def _clock_status() -> dict:
+    try:
+        from services.clock_jump import clock_status
+
+        return clock_status()
+    except Exception:  # never fail /system/info over it
+        return {"synchronized": None, "last_jump": None}
 
 
 def _relay_installed(db) -> bool:

@@ -346,7 +346,17 @@ export function useCoreHealth() {
     queryKey: ['core-health'],
     queryFn: async () => {
       const { data } = await apiService.getSiteInfo()
-      return data as { version?: string; uptime_s?: number; name?: string | null }
+      return data as {
+        version?: string
+        uptime_s?: number
+        name?: string | null
+        server_time?: string
+        clock?: {
+          /** NTP-disciplined; null when it cannot be known (Docker Desktop, WSL2). */
+          synchronized: boolean | null
+          last_jump: { delta_seconds: number; at: string; streams_restarted: number; streams_failed: number } | null
+        }
+      }
     },
     refetchInterval: 30_000,
     staleTime: 10_000,

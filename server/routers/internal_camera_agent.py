@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 from core.camera_source import is_publisher
 from core.config import settings
 from core.database import get_db, release
+from core.short_lived_token import ShortLivedTokenCache
 from models import (
     Camera,
     CameraConfig,
@@ -1048,24 +1049,23 @@ async def get_detect_config(
 _PLAYBACK_TOKEN_TTL_MIN = 60
 
 
-def _playback_token_once(_cache: dict = {}) -> str | None:
+_listing_token_cache = ShortLivedTokenCache(reuse_s=60.0)
+
+
+def _playback_token_once() -> str | None:
     """A playback token for the listing, minted at most once a minute: the
     pipeline re-reads the listing every reconcile tick, so a fresh one is
-    always on its way before the previous expires."""
-    import time as _time
+    always on its way before the previous expires. Re-minted at once when
+    the wall clock jumps (issue #1023)."""
+    from services.mediamtx_jwt_service import MediaMtxJwtService
 
-    now = _time.monotonic()
-    if _cache.get("token") and now < _cache.get("until", 0.0):
-        return _cache["token"]
     try:
-        from services.mediamtx_jwt_service import MediaMtxJwtService
-
-        token = MediaMtxJwtService.create_admin_token(expiry_minutes=_PLAYBACK_TOKEN_TTL_MIN)
+        return _listing_token_cache.get(
+            lambda: MediaMtxJwtService.create_admin_token(
+                expiry_minutes=_PLAYBACK_TOKEN_TTL_MIN))
     except Exception as exc:
         logger.debug("could not mint a playback token for the listing: %s", exc)
         return None
-    _cache["token"], _cache["until"] = token, now + 60.0
-    return token
 
 
 def _mint_mediamtx_jwt(camera_path: str = "~.*",
@@ -1197,6 +1197,16 @@ def list_camera_agent_sources(
     from services.masks import masks_for_cameras
 
     masks = masks_for_cameras(db, (int(c.id) for c in cameras))
+    # Cameras an app holds a live stay-active lease on (a class running):
+    # the detect-pipeline keeps them at full decode instead of idling.
+    from services.skill_assignments import stay_active_cameras
+
+    try:
+        stay_active = stay_active_cameras(db)
+    except Exception:  # noqa: BLE001 — a lease never costs the fleet its listing
+        logger.debug("stay-active leases unreadable", exc_info=True)
+        db.rollback()   # a failed query poisons the transaction on Postgres
+        stay_active = set()
     out: list[dict[str, object]] = []
     for cam in cameras:
         evidence_url: str | None = None
@@ -1349,6 +1359,10 @@ def list_camera_agent_sources(
                 # This camera's overrides of the pipeline's global knobs
                 # (services/detection_settings.py). {} = inherit all.
                 "detection": normalize_detection(cam.detection_settings),
+                # An app needs this camera watched closely right now
+                # (services.skill_assignments, stay-active leases): no
+                # idle decode while it is true.
+                "stay_active": int(cam.id) in stay_active,
             }
         )
 

@@ -55,6 +55,7 @@ caps   = nvr.ai.capabilities()                    # adapters, tasks, health
 | `snapshot(cam)` | `GET /internal/app/cameras/{id}/snapshot` | roster |
 | `description(cam, max_age_s=, prefer_store=)` | `GET /internal/app/cameras/{id}/description` | roster |
 | `camera.stream(cam)`, `stream_grant(cam)` | `GET /internal/app/cameras/{id}/stream` | roster |
+| (no SDK helper yet) | `PUT /internal/app/cameras/{id}/stay-active` `{"until": iso\|null}` — keep the detector at full decode until then (a class running); a lease of at most 12 h that lapses on its own, held on the app's own claim on the camera (409 without one) | roster |
 | `recordings(cam).list/url/frame_at` | `GET /internal/app/recordings/{id}[/url]`, `/internal/camera-agent/recordings/frame` | roster |
 | `timeline.search/evidence` | `GET /internal/camera-agent/events[/{id}/evidence]` | roster |
 | `timeline.plate_frame/plate_crop` | `GET /internal/camera-agent/events/{id}/plate-frame`, `.../plate-evidence` — the frame a plate was read from, and the plate cut out of it | roster |

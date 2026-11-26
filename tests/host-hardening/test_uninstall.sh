@@ -398,6 +398,30 @@ if [ "$first_ok" = 1 ] && [ ! -f "$SYSTEMD_DIR_TEST/opennvr-update.service" ] &&
    && [ ! -f "$SYSTEMD_DIR_TEST/opennvr-host.service" ] && grep -q 'systemctl disable --now opennvr-host.service' "$STATE/calls.log"; then pass
 else fail "first_ok=$first_ok: $out"; fi
 
+start_test "run_sh: Docker's wait-for-NTP drop-ins go only if this folder installed them"
+fixture
+untyped
+saved_systemd_dir="${SYSTEMD_DIR_TEST:-}"
+SYSTEMD_DIR_TEST="$WORK/systemd-ts"; mkdir -p "$SYSTEMD_DIR_TEST/docker.service.d" "$SYSTEMD_DIR_TEST/systemd-time-wait-sync.service.d"
+printf '# Installed by OpenNVR (./start.sh time-sync-wait) from /srv/another-install\n# opennvr-enabled-unit=systemd-time-wait-sync.service\n' \
+    > "$SYSTEMD_DIR_TEST/docker.service.d/opennvr-time-sync.conf"
+touch "$SYSTEMD_DIR_TEST/systemd-time-wait-sync.service.d/opennvr-time-sync.conf"
+out=$(run_sh --yes)
+first_ok=1
+[ -f "$SYSTEMD_DIR_TEST/docker.service.d/opennvr-time-sync.conf" ] || first_ok=0
+grep -q 'systemctl disable systemd-time-wait-sync' "$STATE/calls.log" && first_ok=0
+fixture
+printf '# Installed by OpenNVR (./start.sh time-sync-wait) from %s\n# opennvr-enabled-unit=systemd-time-wait-sync.service\n' "$SITE" \
+    > "$SYSTEMD_DIR_TEST/docker.service.d/opennvr-time-sync.conf"
+plan=$(run_sh --dry-run)
+out=$(run_sh --yes)
+if [ "$first_ok" = 1 ] && printf '%s' "$plan" | grep -q 'waiting for NTP at boot' \
+   && [ ! -f "$SYSTEMD_DIR_TEST/docker.service.d/opennvr-time-sync.conf" ] \
+   && [ ! -f "$SYSTEMD_DIR_TEST/systemd-time-wait-sync.service.d/opennvr-time-sync.conf" ] \
+   && grep -q 'systemctl disable systemd-time-wait-sync.service' "$STATE/calls.log"; then pass
+else fail "first_ok=$first_ok: $plan $out"; fi
+SYSTEMD_DIR_TEST="$saved_systemd_dir"
+
 start_test "run_sh: containers are stopped before they are removed (a kill leaves NPU buffers behind)"
 fixture
 untyped

@@ -453,6 +453,13 @@ class AsyncOpenNVR:
             f"/api/v1/internal/app/cameras/{_camera_id(camera)}/description",
             max_age_s=float(max_age_s), prefer_store="true" if prefer_store else "false")
 
+    async def stay_active(self, camera, until: datetime | None) -> dict:
+        """Keep this camera's detector at full decode until ``until``;
+        ``None`` releases it (see :meth:`OpenNVR.stay_active`)."""
+        return await self._http.put_json(
+            f"/api/v1/internal/app/cameras/{_camera_id(camera)}/stay-active",
+            {"until": until.isoformat() if until is not None else None})
+
     async def save_evidence(self, jpeg: bytes) -> str | None:
         """Store a JPEG for an alert to cite; returns its path.
 

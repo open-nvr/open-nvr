@@ -15,6 +15,7 @@ Routes (prefix ``/api/v1/internal/app``):
 * ``GET  /cameras/{id}/snapshot``             — current JPEG
 * ``GET  /cameras/{id}/description``          — what is on it now, in words (the shared look)
 * ``GET  /cameras/{id}/stream``               — scoped RTSP URL for frames
+* ``PUT  /cameras/{id}/stay-active``          — keep the detector at full decode until a time
 * ``GET  /recordings/{id}``                   — recorded segments
 * ``GET  /recordings/{id}/url``               — playback URL for one segment
 * ``GET  /plates/stats|summary|sessions``     — the Vehicles-page aggregates
@@ -32,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote as urlquote
 from urllib.parse import urlencode
@@ -89,6 +90,58 @@ def _app_id_for(db: Session, principal, app_id: str | None) -> str:
 
 
 # ── Cameras ─────────────────────────────────────────────────────────
+
+
+class StayActiveIn(BaseModel):
+    # The lease's end, ISO 8601; null (or a time already past) clears it.
+    until: datetime | None = None
+
+
+@router.put("/cameras/{camera_id}/stay-active")
+async def app_camera_stay_active(
+    camera_id: int,
+    payload: StayActiveIn,
+    app_id: str | None = Query(None, description="Site key only: which app"),
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Keep this camera's detector at full decode until ``until``.
+
+    The detect-pipeline idles a quiet camera (keyframes only) and wakes
+    it on motion, which suits a doorway and fails a classroom: students
+    sit still, and a face is missed for minutes. An app that knows the
+    camera matters right now takes a lease here; the pipeline stops
+    idling the camera within one reconcile tick and resumes when the
+    lease ends or is cleared. Renew it while it is still needed — a
+    lease is at most 12 hours, and lapses on its own if the app goes
+    away.
+
+    The lease rides the app's own claim on the camera (its pick or a
+    skill it claimed there): 409 when the app holds none, so an app can
+    only keep awake a camera it was given.
+    """
+    from services.skill_assignments import (STAY_ACTIVE_MAX_S,
+                                            app_consumer, set_stay_active)
+
+    cam = _camera_in_roster(db, principal, camera_id)
+    app = _app_id_for(db, principal, app_id)
+    now = datetime.now(UTC)
+    until = payload.until
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
+    if until is not None and until <= now:
+        until = None
+    if until is not None:
+        until = min(until, now + timedelta(seconds=STAY_ACTIVE_MAX_S))
+    held = set_stay_active(db, camera_id=int(cam.id),
+                           consumer=app_consumer(app), until=until)
+    if not held:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"app {app!r} holds no claim on camera {cam.id}")
+    db.commit()
+    return {"camera_id": int(cam.id),
+            "until": until.isoformat() if until is not None else None}
 
 
 @router.get("/cameras/{camera_id}/description")
