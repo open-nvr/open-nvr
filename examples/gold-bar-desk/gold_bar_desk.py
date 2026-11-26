@@ -36,6 +36,7 @@ import argparse
 import asyncio
 import base64
 import logging
+import os
 import signal
 import sys
 import threading
@@ -431,8 +432,14 @@ class DeskApp(FrameApp):
                         f"segmentation model missing at {path} — is the "
                         f"fastsam-weights-init service run?")
                 self._segmenter = Segmenter(
-                    path, threads=int(getattr(self.config, "inference_threads", 2) or 2))
-                log.info("segmentation model loaded from %s", path)
+                    path, threads=int(getattr(self.config, "inference_threads", 2) or 2),
+                    # The Qualcomm overlay sets this to the NPU
+                    # (docker-compose.accel-qualcomm-apps.yml).
+                    providers=os.environ.get("GOLD_BAR_DESK_ONNX_PROVIDERS"))
+                log.info("segmentation model loaded from %s, running on %s",
+                         path, self._segmenter.backend)
+                if self._segmenter.fallback_reason:
+                    log.warning("%s", self._segmenter.fallback_reason)
         seg = self._segmenter
         return lambda crop: seg.bars(crop, frame_area=frame_area)
 
