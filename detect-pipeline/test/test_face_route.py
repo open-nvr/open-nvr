@@ -227,3 +227,62 @@ def test_a_face_only_camera_is_not_skipped(monkeypatch):
     monkeypatch.setenv("DETECT_SKIP_UNASSIGNED", "true")
     _labels, analyze, _skills, _extra = _assignment_view(_cam([{"skill": "face_recognition", "adapters": [FACE]}]))
     assert analyze
+
+
+# -- a camera that stays active (a class running) ---------------------------
+
+def _spent(follow, r, t, fd, attempts=2):
+    """Start a track and spend its attempts on unknown faces."""
+    _started(follow, r, t, fd)
+    for i in range(attempts * 2):
+        fd.last_on_result(t.id, FACE, {"result": {"recognized": False}})
+        t.best_crop_ts += 1
+        follow_up_faces("cam1", [t], r, fd, follow, now=11.0 + i)
+    return len(fd.calls)
+
+
+def test_an_unnamed_person_is_retried_on_fresh_crops_while_the_camera_stays_active():
+    r = router_for_skills(frozenset({"face_recognition"}), base=DispatchRouter(routes={}),
+                          skill_adapters=FACE_CLAIM)
+    follow = FaceFollowUp(max_attempts=2, min_interval_s=0.0, retry_every_s=6.0)
+    fd, t = _FakeDispatcher(), _Track(7)
+    assert _spent(follow, r, t, fd) == 2
+    crops = []
+
+    def fresh(track):
+        crops.append(track.id)
+        return "fresh-crop"
+
+    # No better best crop, but a fresh one of the current frame is tried
+    # every retry_every_s, and only where the caller offers one.
+    assert follow_up_faces("cam1", [t], r, fd, follow, now=15.0, fresh_crop=fresh) == 0
+    assert follow_up_faces("cam1", [t], r, fd, follow, now=30.0) == 0
+    assert follow_up_faces("cam1", [t], r, fd, follow, now=30.0, fresh_crop=fresh) == 1
+    assert follow_up_faces("cam1", [t], r, fd, follow, now=33.0, fresh_crop=fresh) == 0
+    assert follow_up_faces("cam1", [t], r, fd, follow, now=36.0, fresh_crop=fresh) == 1
+    assert crops == [7, 7] and len(fd.calls) == 4
+    # A name ends it.
+    fd.last_on_result(7, FACE, {"result": {"recognized": True, "person_id": "S1"}})
+    assert follow_up_faces("cam1", [t], r, fd, follow, now=99.0, fresh_crop=fresh) == 0
+
+
+def test_a_person_out_of_view_is_not_retried():
+    r = router_for_skills(frozenset({"face_recognition"}), base=DispatchRouter(routes={}),
+                          skill_adapters=FACE_CLAIM)
+    follow = FaceFollowUp(max_attempts=1, min_interval_s=0.0, retry_every_s=6.0)
+    fd, t = _FakeDispatcher(), _Track(7)
+    _spent(follow, r, t, fd, attempts=1)
+    t.misses = 3          # the tracker is coasting on a box nobody stands in
+    assert follow_up_faces("cam1", [t], r, fd, follow, now=60.0,
+                           fresh_crop=lambda tr: "crop") == 0
+    t.misses = 0
+    assert follow_up_faces("cam1", [t], r, fd, follow, now=60.0,
+                           fresh_crop=lambda tr: None) == 0      # nothing to cut
+    assert follow_up_faces("cam1", [t], r, fd, follow, now=60.0,
+                           fresh_crop=lambda tr: "crop") == 1
+
+
+def test_provider_reads_the_stay_active_lease():
+    assert _to_spec({**_cam([]), "stay_active": True}).stay_active is True
+    assert _to_spec({**_cam([]), "stay_active": "yes"}).stay_active is False
+    assert _to_spec(_cam([])).stay_active is False          # older core

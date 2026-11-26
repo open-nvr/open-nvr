@@ -1212,3 +1212,63 @@ def test_the_shared_description_follows_the_roster(platform, monkeypatch):
     assert asked[-1][1] == 3600.0
     # No key at all is refused.
     assert tc.get(f"/internal/app/cameras/{ids['gate']}/description").status_code == 401
+
+
+def test_stay_active_lease_reaches_the_pipeline_listing_and_lapses(platform):
+    """An app keeps a camera it was given at full decode for a while
+    (a class running); the detect-pipeline's listing says so until the
+    lease is cleared or runs out."""
+    from datetime import UTC, datetime, timedelta
+
+    tc, ids, SessionLocal, key = platform
+
+    def _flags():
+        cams = tc.get("/internal/camera-agent/cameras", headers=_site()).json()["cameras"]
+        return {int(c["open_nvr_camera_id"]): c["stay_active"] for c in cams}
+
+    assert _flags()[ids["gate"]] is False
+    until = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+    r = tc.put(f"/internal/app/cameras/{ids['gate']}/stay-active",
+               headers=_app(key), json={"until": until})
+    assert r.status_code == 200 and r.json()["until"]
+    flags = _flags()
+    assert flags[ids["gate"]] is True and flags[ids["yard"]] is False
+
+    # A camera outside the app's roster is not confirmed; one in the
+    # roster the app holds no claim on cannot be kept awake.
+    assert tc.put(f"/internal/app/cameras/{ids['yard']}/stay-active",
+                  headers=_app(key), json={"until": until}).status_code == 404
+    assert tc.put(f"/internal/app/cameras/{ids['lobby']}/stay-active", headers=_site(),
+                  params={"app_id": "loitering-detection"},
+                  json={"until": until}).status_code == 409
+    # The site key must name the app.
+    assert tc.put(f"/internal/app/cameras/{ids['gate']}/stay-active", headers=_site(),
+                  json={"until": until}).status_code == 400
+
+    # Re-declaring the claim (an admin saving the app's cameras) keeps it.
+    from services.skill_assignments import app_consumer, app_pick_skill, declare
+    s = SessionLocal()
+    declare(s, skill=app_pick_skill("loitering-detection"), camera_id=ids["gate"],
+            consumer=app_consumer("loitering-detection"))
+    s.commit()
+    s.close()
+    assert _flags()[ids["gate"]] is True
+
+    # Cleared: null, or a time already past.
+    r = tc.put(f"/internal/app/cameras/{ids['gate']}/stay-active",
+               headers=_app(key), json={"until": None})
+    assert r.status_code == 200 and r.json()["until"] is None
+    assert _flags()[ids["gate"]] is False
+
+    # A lease lapses on its own, and is capped at 12 hours.
+    from services import skill_assignments as sa
+    s = SessionLocal()
+    sa.set_stay_active(s, camera_id=ids["gate"], consumer=app_consumer("loitering-detection"),
+                       until=datetime.now(UTC) - timedelta(seconds=1))
+    s.commit()
+    s.close()
+    assert _flags()[ids["gate"]] is False
+    far = (datetime.now(UTC) + timedelta(days=3)).isoformat()
+    got = tc.put(f"/internal/app/cameras/{ids['gate']}/stay-active",
+                 headers=_app(key), json={"until": far}).json()["until"]
+    assert datetime.fromisoformat(got) <= datetime.now(UTC) + timedelta(hours=12, seconds=5)

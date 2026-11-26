@@ -1197,6 +1197,16 @@ def list_camera_agent_sources(
     from services.masks import masks_for_cameras
 
     masks = masks_for_cameras(db, (int(c.id) for c in cameras))
+    # Cameras an app holds a live stay-active lease on (a class running):
+    # the detect-pipeline keeps them at full decode instead of idling.
+    from services.skill_assignments import stay_active_cameras
+
+    try:
+        stay_active = stay_active_cameras(db)
+    except Exception:  # noqa: BLE001 — a lease never costs the fleet its listing
+        logger.debug("stay-active leases unreadable", exc_info=True)
+        db.rollback()   # a failed query poisons the transaction on Postgres
+        stay_active = set()
     out: list[dict[str, object]] = []
     for cam in cameras:
         evidence_url: str | None = None
@@ -1349,6 +1359,10 @@ def list_camera_agent_sources(
                 # This camera's overrides of the pipeline's global knobs
                 # (services/detection_settings.py). {} = inherit all.
                 "detection": normalize_detection(cam.detection_settings),
+                # An app needs this camera watched closely right now
+                # (services.skill_assignments, stay-active leases): no
+                # idle decode while it is true.
+                "stay_active": int(cam.id) in stay_active,
             }
         )
 

@@ -154,6 +154,7 @@ def test_shared_types_are_imported_not_copied():
 _ROUTE_WRAPPERS: dict[str, str] = {
     "GET /cameras/{camera_id}/snapshot": "snapshot",
     "GET /cameras/{camera_id}/description": "description",
+    "PUT /cameras/{camera_id}/stay-active": "stay_active",
     "GET /cameras/{camera_id}/stream": "stream",
     "GET /recordings/{camera_id}": "recordings",
     "GET /recordings/{camera_id}/url": "url",

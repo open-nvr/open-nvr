@@ -263,6 +263,12 @@ def declare(
         )
         db.add(row)
     else:
+        # A re-declare (an admin saving a room) replaces the params but
+        # keeps a stay-active lease the app holds: the class running on
+        # that camera has not ended because someone edited the room.
+        held = row.params.get(STAY_ACTIVE_KEY) if isinstance(row.params, dict) else None
+        if held and not (isinstance(params, dict) and STAY_ACTIVE_KEY in params):
+            params = {**(params or {}), STAY_ACTIVE_KEY: held}
         row.params = params or None
     db.flush()
     project_camera(db, camera)
@@ -786,3 +792,79 @@ def reconcile_on_startup(db: Session) -> dict[str, int]:
         project_camera(db, camera, disabled_consumers=disabled, manifests=manifests)
         stats["cameras_projected"] += 1
     return stats
+
+
+# ── Stay active: an app asks for full decode on a camera for a while ──
+#
+# The detect-pipeline idles a quiet camera (keyframes only, see its
+# AdaptiveDecode) and wakes it on the first motion. A class camera is the
+# case that goes wrong: students sit still, the camera idles, and a face
+# that would be recognised in a second goes unseen for minutes. An app
+# that knows a camera matters right now (Attendly: a class is running)
+# says so with a LEASE: ``stay_active_until`` in the params of its own
+# claim on that camera. The listing the pipeline reads turns live leases
+# into ``stay_active: true``; an app that crashes or forgets lets the
+# lease lapse on its own. Read at listing time, never projected, so
+# expiry needs no write.
+
+STAY_ACTIVE_KEY = "stay_active_until"
+#: The longest lease one call may take. A school day is longer than any
+#: class; an app renews while it still needs the camera.
+STAY_ACTIVE_MAX_S = 12 * 3600
+
+
+def _stay_active_until(params: Optional[dict]):
+    """The lease's end as an aware UTC datetime, or None."""
+    from datetime import UTC, datetime
+
+    if not isinstance(params, dict):
+        return None
+    raw = params.get(STAY_ACTIVE_KEY)
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        at = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+
+def set_stay_active(db: Session, *, camera_id: int, consumer: str, until) -> int:
+    """Set (``until`` an aware datetime) or clear (None) the stay-active
+    lease on every claim ``consumer`` holds on the camera (no commit).
+    Returns how many claims carry it now — 0 means the consumer holds no
+    claim there, which the caller reports: a lease rides a claim, so an
+    app can only keep awake a camera it was given."""
+    rows = (
+        db.query(SkillAssignment)
+        .filter(SkillAssignment.camera_id == int(camera_id),
+                SkillAssignment.consumer == consumer)
+        .all()
+    )
+    for row in rows:
+        params = dict(row.params) if isinstance(row.params, dict) else {}
+        if until is None:
+            params.pop(STAY_ACTIVE_KEY, None)
+        else:
+            params[STAY_ACTIVE_KEY] = until.isoformat()
+        # A new dict, so the JSON column sees the change.
+        row.params = params or None
+    db.flush()
+    return len(rows)
+
+
+def stay_active_cameras(db: Session, now=None) -> set[int]:
+    """Cameras some enabled consumer holds a live stay-active lease on."""
+    from datetime import UTC, datetime
+
+    now = now or datetime.now(UTC)
+    live = []
+    for row in db.query(SkillAssignment).filter(SkillAssignment.params.isnot(None)).all():
+        until = _stay_active_until(row.params)
+        if until is not None and until > now:
+            live.append(row)
+    if not live:
+        return set()
+    # A disabled app's lease is as dead as its claims (#539).
+    disabled = disabled_app_consumers(db)
+    return {int(row.camera_id) for row in live if row.consumer not in disabled}
