@@ -15,6 +15,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   topic (detections best effort, the rest reliable) and a `stamp` that
   says which time it is. Read-only: nothing comes back from ROS 2. The
   image is built on `ros:jazzy-ros-base`; the tests need no ROS.
+- **The `home_assistant` workflow action.** A workflow can call a Home
+  Assistant service (`service: lock.unlock`, `data: { entity_id: ... }`)
+  through a new **Home Assistant** integration type in Settings >
+  Integrations: its URL and a long-lived token, sealed like the other
+  secrets, with a Test that checks both. Like `site_mode`, it moves
+  things, so it may only follow a person's reply or a plain rule.
 
 - **Ways to reach other OpenNVR users.** `start.sh` / `start.ps1 up` and
   `build` end with the Discord, Discussions and bug-report links; the
