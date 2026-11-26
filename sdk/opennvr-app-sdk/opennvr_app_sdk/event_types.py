@@ -254,7 +254,9 @@ class OverlayBoxes(TypedPayload):
     """``overlay.boxes.v1`` — boxes an app wants drawn over the live video.
 
     ``boxes`` entries are ``{"label", "box": [x, y, w, h], "score"?, "id"?,
-    "track"?}`` with ``box`` normalized to 0..1 of the frame. ``track`` is
+    "track"?, "layer"?}`` with ``box`` normalized to 0..1 of the frame.
+    ``layer`` names the group the box belongs to ("Bars", "Zone counts"),
+    which a viewer can switch off as a whole in the live view. ``track`` is
     the Tier-0 track id the box labels: the live view then draws ``label``
     on that track's own box (see EVENT_CONTRACTS.md) — an app never knows the
     resolution the operator is watching at, and core draws over streams
