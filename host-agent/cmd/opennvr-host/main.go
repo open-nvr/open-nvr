@@ -9,6 +9,8 @@
 //
 //	opennvr-host            run (the service/task runs this)
 //	opennvr-host version    print the build
+//	opennvr-host enrol <server> <code>   site mode: enrol this site once
+//	opennvr-host site       site mode: relay this site's cameras
 package main
 
 import (
@@ -32,6 +34,16 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println(buildinfo.Build)
 		return
+	}
+	// Site mode (issue #925, cloud ingest): this machine is at a remote site
+	// and relays its cameras to an OpenNVR on the internet.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "enrol":
+			os.Exit(enrolCmd(os.Args[2:]))
+		case "site":
+			os.Exit(siteCmd(os.Args[2:]))
+		}
 	}
 
 	// The binary lives in <OpenNVR folder>/bin, so the folder is one up.

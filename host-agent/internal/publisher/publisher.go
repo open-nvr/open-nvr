@@ -381,6 +381,11 @@ type ffmpegProcess struct {
 	err  error
 }
 
+// Start runs ffmpeg the way the webcam publisher does (process adopted so it
+// dies with the agent, last lines kept and redacted); the site agent's
+// camera relays use it too.
+func Start(name string, args []string) Process { return runFFmpeg(context.Background(), name, args) }
+
 func runFFmpeg(_ context.Context, name string, args []string) Process {
 	// Not CommandContext: the supervisor stops ffmpeg itself, by its PID.
 	cmd := exec.Command(name, args...)
