@@ -16,6 +16,9 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (pictures, severity routing) is unchanged; use one or the other for
   alerts, or a chat gets them twice.
 
+- Live View now switches to an enabled layout when its saved default is
+  disabled, and the settings page updates the default when disabling it.
+
 - **ROS 2 bridge, phase 1** (`examples/ros2-bridge/`, discussion #985).
   Publishes the contracted events (detections, plates, visits, occupancy)
   and the alerts on ROS 2 topics, `/opennvr/<site>/<camera>/<schema>` and

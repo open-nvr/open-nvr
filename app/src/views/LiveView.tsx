@@ -49,7 +49,7 @@ import { useConfirm } from '../components/ui/ConfirmDialog'
 import { useCameras } from '../lib/queries'
 import { MiniSegment, STATE_INK, type CamState } from './dashboard/WidgetFrame'
 import { clsx } from 'clsx'
-import { PREDEFINED_LAYOUTS, type LayoutDefinition } from '../lib/liveLayouts'
+import { firstAvailableLayoutId, PREDEFINED_LAYOUTS, resolveLayout, type LayoutDefinition } from '../lib/liveLayouts'
 import { ToursMenu } from '../components/live/ToursMenu'
 import { webcamOfflineLabel } from '../lib/hostAgent'
 import { PtzPad } from '../components/PtzPad'
@@ -306,20 +306,10 @@ export function LiveView() {
   
   // Get current layout definition
   const getLayoutDef = (): LayoutDefinition => {
-    // Check custom layouts first
-    if (windowSettings?.custom_layouts) {
-      const custom = windowSettings.custom_layouts.find(l => l.id === currentLayout && l.enabled)
-      if (custom) {
-        return {
-          name: custom.name,
-          gridCols: custom.grid_columns,
-          gridRows: custom.grid_rows,
-          tiles: custom.tiles.map(t => ({ row: t.row, col: t.col, rowSpan: t.rowSpan, colSpan: t.colSpan }))
-        }
-      }
-    }
-    // Fall back to predefined layouts
-    return PREDEFINED_LAYOUTS[currentLayout] || PREDEFINED_LAYOUTS['3x3']
+    const current = resolveLayout(currentLayout, windowSettings)
+    if (current) return current
+    const fallbackId = firstAvailableLayoutId(windowSettings) ?? '3x3'
+    return resolveLayout(fallbackId, windowSettings) ?? PREDEFINED_LAYOUTS['3x3']
   }
   
   const layoutDef = focusCameraId ? PREDEFINED_LAYOUTS['1x1'] : getLayoutDef()
@@ -368,10 +358,11 @@ export function LiveView() {
   useEffect(() => {
     apiService.getWindowSettings().then(({ data }) => {
       setWindowSettings(data)
-      // Set default layout if available
-      if (data?.default_layout) {
-        setCurrentLayout(data.default_layout)
-      }
+      const preferred = data?.default_layout
+      const availableDefault = preferred && resolveLayout(preferred, data)
+        ? preferred
+        : firstAvailableLayoutId(data)
+      if (availableDefault) setCurrentLayout(availableDefault)
     }).catch(console.error)
   }, [])
 
