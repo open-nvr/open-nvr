@@ -135,3 +135,10 @@ export const PREDEFINED_LAYOUTS: Record<string, LayoutDefinition> = {
     tiles: [cell(0, 0, 2), cell(0, 2, 2), ...cells(6, 3, (r, c) => r < 2 && c < 4)],
   },
 }
+
+/** Return a usable default when a saved one is missing or has been disabled. */
+export function firstAvailableLayoutId(settings: WindowLayoutSettings | null | undefined): string | null {
+  const predefined = Object.keys(PREDEFINED_LAYOUTS).find((id) => settings?.layouts_enabled?.[id] !== false)
+  if (predefined) return predefined
+  return settings?.custom_layouts?.find((layout) => layout.enabled !== false)?.id ?? null
+}

@@ -20,7 +20,7 @@ import { useEffect, useState } from 'react'
 import { apiService } from '../../../lib/apiService'
 import { Plus, Trash2, Grid, LayoutGrid, Eye, EyeOff } from 'lucide-react'
 import { Modal } from '../../../components/Modal'
-import { PREDEFINED_LAYOUTS } from '../../../lib/liveLayouts'
+import { firstAvailableLayoutId, PREDEFINED_LAYOUTS } from '../../../lib/liveLayouts'
 
 interface WindowDivisionSettings {
   layouts_enabled: Record<string, boolean>
@@ -106,13 +106,18 @@ export function WindowSettings() {
   }
 
   const toggleLayout = (id: string) => {
-    setSettings(prev => ({
-      ...prev,
-      layouts_enabled: {
-        ...prev.layouts_enabled,
-        [id]: !prev.layouts_enabled[id],
-      },
-    }))
+    setSettings(prev => {
+      const enabling = prev.layouts_enabled[id] === false
+      const layouts_enabled = { ...prev.layouts_enabled, [id]: enabling }
+      const next = { ...prev, layouts_enabled }
+      if (!enabling && prev.default_layout === id) {
+        const nextDefault = firstAvailableLayoutId(next)
+        // Keep at least one enabled layout as the default.
+        if (!nextDefault) return prev
+        return { ...next, default_layout: nextDefault }
+      }
+      return next
+    })
   }
 
   const setDefaultLayout = (id: string) => {
