@@ -28,6 +28,8 @@ from __future__ import annotations
 import httpx
 from fastapi import HTTPException
 
+from services import camera_auth_guard
+
 
 async def isapi_request(
     ip: str,
@@ -51,11 +53,29 @@ async def isapi_request(
     url = f"{scheme}://{ip}:{port}{path}"
     auth = httpx.DigestAuth(username, password) if username else None
     headers = {"Content-Type": "application/xml"} if body else {}
+    # A login the device refused a moment ago is not sent again: each wrong
+    # try counts toward the device's account lockout, and a settings page
+    # makes a dozen ISAPI calls. The caller sees the same 401 it would get.
+    if username and camera_auth_guard.refused_for(
+        camera_auth_guard.WEB, ip, username, password
+    ) is not None:
+        return 401, ""
     async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
         try:
             resp = await client.request(
                 method, url, content=body, headers=headers, auth=auth
             )
+            if username:
+                if camera_auth_guard.digest_login_refused(
+                    resp.status_code, resp.headers.get("www-authenticate")
+                ):
+                    camera_auth_guard.note_refused(
+                        camera_auth_guard.WEB, ip, username, password
+                    )
+                elif resp.status_code != 401:
+                    camera_auth_guard.note_accepted(
+                        camera_auth_guard.WEB, ip, username, password
+                    )
             return resp.status_code, resp.text
         except httpx.TimeoutException:
             raise HTTPException(status_code=504, detail=f"ISAPI timeout to {url}")

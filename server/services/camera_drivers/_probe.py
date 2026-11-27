@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import httpx
 
+from services import camera_auth_guard
+
 # Kept short: a probe runs at most once per camera (result is persisted), but a
 # few of them may run in sequence during first-contact detection.
 _PROBE_TIMEOUT = 4.0
@@ -37,10 +39,23 @@ async def fingerprint_get(
     because cameras present self-signed certs on the LAN.
     """
     url = f"{scheme}://{ip}:{port}{path}"
+    # A login this device refused a moment ago answers as the device did,
+    # without another wrong try toward its account lockout.
+    if username and camera_auth_guard.refused_for(
+        camera_auth_guard.WEB, ip, username, password
+    ) is not None:
+        return 401, ""
     auth = httpx.DigestAuth(username or "", password or "")
     try:
         async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             resp = await client.get(url, auth=auth)
-            return resp.status_code, resp.text
     except Exception:
         return None, ""
+    if username:
+        if camera_auth_guard.digest_login_refused(
+            resp.status_code, resp.headers.get("www-authenticate")
+        ):
+            camera_auth_guard.note_refused(camera_auth_guard.WEB, ip, username, password)
+        elif resp.status_code == 200:
+            camera_auth_guard.note_accepted(camera_auth_guard.WEB, ip, username, password)
+    return resp.status_code, resp.text

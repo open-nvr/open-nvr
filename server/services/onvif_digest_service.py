@@ -46,6 +46,7 @@ import httpx
 from fastapi import HTTPException
 
 from core.logging_config import main_logger
+from services import camera_auth_guard
 
 
 def _xml_text(raw: str) -> str:
@@ -225,6 +226,31 @@ async def _camera_clock_offset(client, url: str, headers: dict) -> float | None:
     return (camera_now - datetime.now(UTC)).total_seconds()
 
 
+def _login_refused_detail() -> str:
+    """What the operator reads when the camera answered a Digest login with
+    HTTP 401, or when that refusal is served from memory."""
+    return (
+        "The camera refused the ONVIF username or password. Some cameras, "
+        "Hikvision among them, keep ONVIF accounts separate from the web "
+        "login, or need ONVIF turned on in the camera's integration settings. "
+        "Repeated wrong passwords can lock the camera's account for a while."
+    )
+
+
+def _digest_refused(response: httpx.Response) -> bool:
+    """HTTP 401 that still carries a Digest challenge: httpx's DigestAuth
+    answered the camera's challenge with the credentials, and the camera
+    refused them. (A 401 with no Digest challenge means the login was never
+    sent, because the camera does not offer Digest.)"""
+    return camera_auth_guard.digest_login_refused(
+        response.status_code, response.headers.get("www-authenticate")
+    )
+
+
+def _refused(response: httpx.Response) -> bool:
+    return response.status_code == 401 or _is_auth_fault(response.text)
+
+
 def _auth_refused_detail(offset_s: float | None) -> str:
     """What the operator reads when both schemes refused the credentials."""
     text = (
@@ -285,8 +311,13 @@ async def _onvif_request(
     ``_WSSE_PREFERRED_HOSTS`` so its later requests start with WS-Security.
     The mirror case is handled too: a remembered host that returns an auth
     fault to WS-Security is retried with Digest and forgotten. Either way
-    at most two requests are made, and a second auth fault is returned to
-    the caller as-is.
+    at most two logins are sent, and a second refusal becomes a 401.
+
+    A plain HTTP 401 to a Digest login (``_digest_refused``, Hikvision's way
+    of refusing) is final: no WS-Security retry, because every extra wrong
+    login counts toward the camera's account lockout. Any refusal is
+    remembered for a minute (``camera_auth_guard``), and a login refused in
+    that window raises 401 without contacting the camera.
 
     Args:
         url: Full URL to the ONVIF service endpoint
@@ -302,6 +333,24 @@ async def _onvif_request(
     has_credentials = bool(username and password)
     auth_key = _auth_key(url)
     wsse_first = has_credentials and auth_key in _WSSE_PREFERRED_HOSTS
+
+    if has_credentials:
+        held = camera_auth_guard.refused_for(
+            camera_auth_guard.ONVIF, url, username, password
+        )
+        if held is not None:
+            raise HTTPException(
+                status_code=401,
+                detail=_login_refused_detail() + camera_auth_guard.held_suffix(held),
+            )
+
+    def _refuse(detail: str) -> HTTPException:
+        camera_auth_guard.note_refused(camera_auth_guard.ONVIF, url, username, password)
+        return HTTPException(status_code=401, detail=detail)
+
+    def _accept(response: httpx.Response) -> tuple[int, str]:
+        camera_auth_guard.note_accepted(camera_auth_guard.ONVIF, url, username, password)
+        return response.status_code, response.text
 
     def _digest_request(fresh: bool = False):
         return {
@@ -334,8 +383,15 @@ async def _onvif_request(
                 # first-ever request would, so a camera that dislikes reused
                 # challenges behaves as it did before they were reused.
                 response = await client.post(url, **_digest_request(fresh=True))
-            if not (has_credentials and _is_auth_fault(response.text)):
+            if not has_credentials:
                 return response.status_code, response.text
+            if not wsse_first and _digest_refused(response):
+                main_logger.warning(
+                    "ONVIF Digest login refused by %s (HTTP 401); not retried", auth_key
+                )
+                raise _refuse(_login_refused_detail())
+            if not _refused(response):
+                return _accept(response)
 
             if wsse_first:
                 main_logger.info(
@@ -344,17 +400,19 @@ async def _onvif_request(
                 )
                 _WSSE_PREFERRED_HOSTS.discard(auth_key)
                 response = await client.post(url, **_digest_request())
+                if _digest_refused(response):
+                    raise _refuse(_login_refused_detail())
             else:
                 main_logger.info(
                     "ONVIF Digest authentication rejected by %s; retrying with WS-Security",
                     auth_key,
                 )
                 response = await client.post(url, **_wsse_request())
-                if not _is_auth_fault(response.text):
+                if not _refused(response):
                     _WSSE_PREFERRED_HOSTS.add(auth_key)
 
-            if not _is_auth_fault(response.text):
-                return response.status_code, response.text
+            if not _refused(response):
+                return _accept(response)
 
             # Both schemes refused the same credentials. A WS-Security
             # PasswordDigest also fails when the camera clock is outside its
@@ -371,16 +429,16 @@ async def _onvif_request(
                     auth_key, offset,
                 )
                 response = await client.post(url, **_wsse_request(offset))
-                if not _is_auth_fault(response.text):
+                if not _refused(response):
                     _CLOCK_OFFSETS[auth_key] = offset
                     _WSSE_PREFERRED_HOSTS.add(auth_key)
-                    return response.status_code, response.text
+                    return _accept(response)
             main_logger.warning(
                 "ONVIF authentication failed for %s with HTTP Digest and WS-Security "
                 "(camera clock offset: %s)",
                 auth_key, "unknown" if offset is None else f"{offset:+.0f} s",
             )
-            raise HTTPException(status_code=401, detail=_auth_refused_detail(offset))
+            raise _refuse(_auth_refused_detail(offset))
         except HTTPException:
             raise   # the 401 above, not an "ONVIF request failed" 500
         except httpx.TimeoutException as e:

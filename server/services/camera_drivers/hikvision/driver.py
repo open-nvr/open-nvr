@@ -34,6 +34,7 @@ from fastapi import HTTPException
 
 from ..base import (
     Capabilities,
+    DeviceInfo,
     ImagingInfo,
     MotionInfo,
     NetworkInfo,
@@ -50,7 +51,8 @@ from ..base import (
 from ..onvif.driver import OnvifDriver
 from .isapi import isapi_request
 
-_OVERLAY_PATH = "/ISAPI/System/Video/inputs/channels/1/overlays"
+_DEVICE_INFO_PATH = "/ISAPI/System/deviceInfo"
+_OVERLAY_PATH ="/ISAPI/System/Video/inputs/channels/1/overlays"
 _MOTION_PATH = "/ISAPI/System/Video/inputs/channels/1/motionDetection"
 _ALERT_PATH = "/ISAPI/Event/notification/alertStream"
 _USERS_PATH = "/ISAPI/Security/users"
@@ -241,6 +243,51 @@ def _nested_ip(block_name: str, text: str) -> str | None:
 
 class HikvisionIsapiDriver(OnvifDriver):
     driver_name = "hikvision"
+
+    # --- identity: ONVIF, else ISAPI ---
+
+    async def get_info(self) -> DeviceInfo:
+        """Device identity over ONVIF, or over ISAPI when ONVIF won't give it.
+
+        Hikvision ships ONVIF switched off and keeps its users apart from the
+        web login, so on many recorders ONVIF refuses the admin password that
+        ISAPI accepts. A refused GetDeviceInformation used to fail the whole
+        settings probe ("Authentication failed", every area "not supported")
+        although every ISAPI area would have worked. The ISAPI fallback costs
+        no extra wrong ONVIF login: the refusal is remembered
+        (``camera_auth_guard``), so asking ONVIF again during the same probe
+        does not reach the camera.
+        """
+        try:
+            return await super().get_info()
+        except HTTPException as onvif_error:
+            if onvif_error.status_code in (503, 504):
+                raise  # unreachable: ISAPI on the same host would be too
+            try:
+                status, xml = await isapi_request(
+                    self.ip, _DEVICE_INFO_PATH, self.username, self.password,
+                    port=self.http_port, scheme=self.scheme,
+                )
+            except HTTPException:
+                raise onvif_error from None
+            if status == 200 and "<DeviceInfo" in xml:
+                return DeviceInfo(
+                    manufacturer=_tag("manufacturer", xml) or "Hikvision",
+                    model=_tag("model", xml),
+                    firmware_version=_tag("firmwareVersion", xml),
+                    serial_number=_tag("serialNumber", xml),
+                )
+            if status == 401 and onvif_error.status_code == 401:
+                raise HTTPException(
+                    status_code=401,
+                    detail=(
+                        "The camera refused this username and password for "
+                        "both its web login and ONVIF. Check them on the "
+                        "camera's own web page. Repeated wrong passwords "
+                        "lock the camera's account for a while."
+                    ),
+                ) from None
+            raise onvif_error from None
 
     # --- capabilities: ONVIF baseline + ISAPI extras ---
 
