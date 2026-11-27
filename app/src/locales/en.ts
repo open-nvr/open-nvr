@@ -392,6 +392,7 @@ export const translations: TranslationCatalog = {
   'settings.source.placeholder': 'placeholder (nothing to advertise)',
   'settings.stunNone': 'No STUN server: the public address must be set above for viewers outside your network.',
   'settings.stunServers': 'STUN servers',
+  'settings.stunHint': 'Used by this server only, to learn its public IP for viewers outside your network. On a site with no internet, clear the list.',
   'settings.addStun': 'Add STUN',
   'settings.turnServers': 'TURN servers',
   'settings.addTurn': 'Add TURN',
