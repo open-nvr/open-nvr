@@ -99,6 +99,8 @@ class IntegrationService:
                 return await IntegrationService._test_webhook(integration)
             elif integration.type == "home_assistant":
                 return await IntegrationService._test_home_assistant(integration)
+            elif integration.type == "telegram":
+                return await IntegrationService._test_telegram(integration)
             elif integration.type == "mqtt":
                 from services.mqtt_settings import test_connection
 
@@ -286,6 +288,78 @@ class IntegrationService:
             return {"success": False, "message": f"Home Assistant returned {resp.status_code}"}
         return {"success": True, "message": "Connected to Home Assistant"}
 
+    #: Telegram's Bot API. A test passes its own ``transport``; nothing
+    #: else ever points a bot elsewhere.
+    TELEGRAM_API = "https://api.telegram.org"
+
+    @staticmethod
+    async def _telegram(integration: Integration, method: str, body: dict,
+                        *, transport: httpx.AsyncBaseTransport | None = None) -> dict:
+        """One Bot API call as the integration's bot: ``{"success", "message",
+        "result"}``. The token is in the URL, so neither it nor the URL is
+        ever logged or returned; errors are Telegram's own description."""
+        token = (integration.config or {}).get("token")
+        if not token:
+            return {"success": False, "message": "the integration has no bot token"}
+        refusal = _webhook_target_refusal(IntegrationService.TELEGRAM_API)
+        if refusal:
+            return {"success": False, "message": refusal}
+        async with httpx.AsyncClient(transport=transport) as client:
+            try:
+                resp = await client.post(
+                    f"{IntegrationService.TELEGRAM_API}/bot{token}/{method}", json=body,
+                    timeout=10.0)
+            except httpx.RequestError:
+                logger.warning("telegram %s failed for integration %s (connection)",
+                               method, getattr(integration, "id", "?"))
+                return {"success": False,
+                        "message": "Telegram connection failed — see the server log."}
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if resp.status_code == 401:
+            return {"success": False, "message": "Telegram refused the bot token"}
+        if not data.get("ok"):
+            why = str(data.get("description") or f"HTTP {resp.status_code}")[:200]
+            return {"success": False, "message": f"Telegram: {why}"}
+        return {"success": True, "message": f"Telegram {method} ok", "result": data.get("result")}
+
+    @staticmethod
+    async def send_telegram(integration: Integration, text: str, *, silent: bool = False,
+                            transport: httpx.AsyncBaseTransport | None = None) -> dict:
+        """A message to the integration's chat (``disable_notification`` when
+        ``silent``). Telegram caps a message at 4096 characters."""
+        chat = (integration.config or {}).get("chat_id")
+        if not chat:
+            return {"success": False, "message": "the integration has no chat id"}
+        out = await IntegrationService._telegram(
+            integration, "sendMessage",
+            {"chat_id": chat, "text": text[:4096], "disable_notification": silent},
+            transport=transport)
+        if out["success"]:
+            out["message"] = "Telegram message sent"
+        return out
+
+    @staticmethod
+    async def _test_telegram(integration: Integration,
+                             *, transport: httpx.AsyncBaseTransport | None = None) -> dict:
+        """``getMe`` then ``getChat``, sending nothing: a bot removed from its
+        group has a perfectly good token and can deliver nothing."""
+        me = await IntegrationService._telegram(integration, "getMe", {}, transport=transport)
+        if not me["success"]:
+            return me
+        chat = (integration.config or {}).get("chat_id")
+        if not chat:
+            return {"success": False, "message": "Missing chat id"}
+        got = await IntegrationService._telegram(integration, "getChat", {"chat_id": chat},
+                                                 transport=transport)
+        if not got["success"]:
+            return {"success": False,
+                    "message": f"the bot cannot reach that chat ({got['message']})"}
+        name = (me.get("result") or {}).get("username") or "the bot"
+        return {"success": True, "message": f"@{name} can post to that chat"}
+
     @staticmethod
     async def _test_webhook(integration: Integration) -> dict:
         payload = {
@@ -300,8 +374,8 @@ class IntegrationService:
 
     @staticmethod
     async def send_alert(*, subject: str, message: str, payload: dict) -> None:
-        """Fan an alert out to every enabled email/webhook/slack/teams
-        integration. Best-effort per integration — one failing endpoint never
+        """Fan an alert out to every enabled email/webhook/slack/teams/
+        telegram integration. Best-effort per integration — one failing endpoint never
         blocks the others, and callers treat the whole send as fire-and-forget.
         """
         from core.database import SessionLocal
@@ -331,6 +405,9 @@ class IntegrationService:
                         integration,
                         {"subject": subject, "message": message, **payload},
                     )
+                elif integration.type == "telegram":
+                    result = await IntegrationService.send_telegram(
+                        integration, f"🚨 {subject}\n{message}")
                 elif integration.type == "mqtt":
                     from services.mqtt_settings import publish_once
                     body = {"subject": subject, "message": message, **payload}

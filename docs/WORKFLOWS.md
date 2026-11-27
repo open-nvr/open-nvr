@@ -187,7 +187,7 @@ Event values reach the model as data only, never as instructions, so
 | `notify: {who, message, severity?}` | an inbox entry for `who` (default `low`) |
 | `save_clip: {camera, before?, after?}` | protects the camera's recordings around the moment the run began from retention (30 s each side by default) |
 | `ptz_preset: {camera, preset}` | points a PTZ camera at a preset, by name |
-| `webhook: {to, body?}` | posts to an enabled webhook, Slack or Teams integration named `to` (Settings > Integrations: the admin-approved destinations) |
+| `webhook: {to, body?}` | posts to an enabled webhook, Slack, Teams or Telegram integration named `to` (Settings > Integrations: the admin-approved destinations); Telegram gets the message as text, with the body's values as lines |
 | `app: {id, action, args?}` | an installed app's action, e.g. the gate controller's `open_now` |
 | `home_assistant: {service, data?, to?}` | calls a Home Assistant service, e.g. `service: lock.unlock`, `data: { entity_id: lock.gate }`, through an enabled **Home Assistant** integration (Settings > Integrations: its URL and a long-lived token), the one named `to` or the site's only one |
 | `site_mode: mode` | sets the site mode |

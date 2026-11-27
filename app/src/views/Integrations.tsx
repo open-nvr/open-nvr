@@ -25,7 +25,7 @@ import { Plus, Trash, Settings, Activity, CheckCircle, AlertCircle, Play, Plug }
 import { useTranslation } from '../i18n'
 import { useConfirm } from '../components/ui/ConfirmDialog'
 
-type IntegrationType = 'webhook' | 'slack' | 'teams' | 'email' | 'mqtt' | 's3' | 'syslog' | 'prometheus' | 'home_assistant'
+type IntegrationType = 'webhook' | 'slack' | 'teams' | 'email' | 'mqtt' | 's3' | 'syslog' | 'prometheus' | 'home_assistant' | 'telegram'
 
 const INTEGRATION_TYPES: { value: IntegrationType; label: string }[] = [
   { value: 'webhook', label: 'Webhook' },
@@ -37,6 +37,7 @@ const INTEGRATION_TYPES: { value: IntegrationType; label: string }[] = [
   { value: 'syslog', label: 'Syslog / SIEM' },
   { value: 'prometheus', label: 'Prometheus' },
   { value: 'home_assistant', label: 'Home Assistant' },
+  { value: 'telegram', label: 'Telegram' },
 ]
 
 export function Integrations() {
@@ -185,6 +186,21 @@ export function Integrations() {
             <p className="text-xs text-[var(--text-dim)]">
               Workflows call Home Assistant services through this (the home_assistant action).
               The token acts as its Home Assistant user, so give it a user that may do only that.
+            </p>
+          </>
+        )
+      case 'telegram':
+        return (
+          <>
+            <Field label="Bot token">
+              <input type="password" className="input" value={config.token || ''} onChange={e => setConfig({...config, token: e.target.value})} placeholder="From @BotFather: 123456:ABC-..." required />
+            </Field>
+            <Field label="Chat ID">
+              <input className="input" value={config.chat_id || ''} onChange={e => setConfig({...config, chat_id: e.target.value})} placeholder="-1001234567890 for a group, or a user's id" required />
+            </Field>
+            <p className="text-xs text-[var(--text-dim)]">
+              Add the bot to the chat first. Alerts and workflow messages (webhook: to this name) are sent here.
+              Test checks the bot can post to the chat without sending anything.
             </p>
           </>
         )
@@ -452,6 +468,7 @@ function getSummary(item: any) {
     case 'mqtt': return `${c.broker_url} (${c.topic_prefix})`
     case 's3': return `s3://${c.bucket}`
     case 'home_assistant': return c.url
+    case 'telegram': return c.chat_id ? `chat ${c.chat_id}` : ''
     default: return item.type
   }
 }

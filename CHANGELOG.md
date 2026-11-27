@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Telegram integration.** A Telegram type in Settings > Integrations
+  (a bot token, sealed like the other secrets, and a chat id): alerts go
+  to the chat, and a workflow's `webhook: { to: ... }` can send to it as
+  text. Test checks the bot can post to the chat (`getMe`, `getChat`)
+  without sending anything. The alert-notifier app's Telegram channel
+  (pictures, severity routing) is unchanged; use one or the other for
+  alerts, or a chat gets them twice.
+
 - **ROS 2 bridge, phase 1** (`examples/ros2-bridge/`, discussion #985).
   Publishes the contracted events (detections, plates, visits, occupancy)
   and the alerts on ROS 2 topics, `/opennvr/<site>/<camera>/<schema>` and
