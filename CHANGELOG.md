@@ -108,6 +108,8 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`examples/camera-agent/MODELS_AND_LATENCY.md`). No public set has a
   real guard: check on the site's recording before relying on it.
 
+- **Manual camera setup validates the name and IP before enabling Add Camera** (#118). Invalid values now show a field-level message and cannot be submitted.
+
 - **Browser webcam that can't reach the server now says why, on the right side** (#1025).
   The publish page used to blame the viewer's network for a missing port 8189.
   It now names the router or firewall in front of the server, and explains why

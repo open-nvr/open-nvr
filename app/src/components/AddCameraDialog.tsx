@@ -52,6 +52,45 @@ type DiscoveredCamera = {
   hardware?: string | null
 }
 
+function isValidIpv4Address(value: string): boolean {
+  const octets = value.split('.')
+  return octets.length === 4 && octets.every((octet) =>
+    /^(0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255,
+  )
+}
+
+function isValidIpv6Address(value: string): boolean {
+  if (value.includes(':::')) return false
+  const compressed = value.includes('::')
+  if (compressed && value.indexOf('::') !== value.lastIndexOf('::')) return false
+
+  const groups = value.split('::').flatMap((part) => part ? part.split(':') : [])
+  let groupCount = 0
+  for (const [index, group] of groups.entries()) {
+    if (group.includes('.')) {
+      if (index !== groups.length - 1 || !value.endsWith(group) || !isValidIpv4Address(group)) return false
+      groupCount += 2
+    } else if (/^[\da-f]{1,4}$/i.test(group)) {
+      groupCount += 1
+    } else {
+      return false
+    }
+  }
+
+  return compressed ? groupCount < 8 : groupCount === 8
+}
+
+function isValidCameraIpAddress(value: string): boolean {
+  const [address, zone, ...extraZones] = value.trim().split('%')
+  if (extraZones.length > 0 || (zone !== undefined && !/^[\w.-]+$/.test(zone))) return false
+  if (address.includes(':')) return isValidIpv6Address(address)
+  return zone === undefined && isValidIpv4Address(address)
+}
+
+function isValidCameraName(value: string): boolean {
+  return /[\p{L}\p{N}]/u.test(value.trim())
+}
+
 function ipKey(ip: unknown): number {
   if (typeof ip !== 'string') return Number.MAX_SAFE_INTEGER
   const p = ip.split('.')
@@ -234,6 +273,8 @@ export function AddCameraDialog({
     rtsp_url: '',
     substream_url: '',
   })
+  const validManualCameraName = isValidCameraName(form.name)
+  const validManualCameraIp = isValidCameraIpAddress(form.ip_address)
 
   // The address, port and credentials are captured here and again inside the
   // RTSP URL. Re-sync on blur so a camera cannot be *created* already
@@ -761,6 +802,14 @@ export function AddCameraDialog({
       setError(t('cameraDialog.requiredNameIp'))
       return
     }
+    if (!validManualCameraName) {
+      setError(t('cameraDialog.invalidName'))
+      return
+    }
+    if (!validManualCameraIp) {
+      setError(t('cameraDialog.invalidIp'))
+      return
+    }
 
     // rtsp_url is optional. If provided, the server embeds the username/password
     // into it (URL-encoding specials like "@") when they aren't already there.
@@ -849,7 +898,7 @@ export function AddCameraDialog({
       ? {
             label: loading ? t('cameraDialog.adding') : t('cameraDialog.title'),
           onClick: handleAddManualCamera,
-          disabled: loading || !form.name.trim() || !form.ip_address.trim(),
+          disabled: loading || !validManualCameraName || !validManualCameraIp,
         }
       : mode === 'discover' && selectedCamera && !connected
       ? {
@@ -1551,14 +1600,24 @@ export function AddCameraDialog({
               <WebcamAddPanel key={manualKind} source={manualKind} onDone={(id) => onCameraAdded(id)} onError={setError} onAction={setWebcamAction} />
             ) : (
               <div className="grid grid-cols-6 gap-3">
-                <Field label={t('cameraDialog.cameraName')} required className="col-span-6">
+                <Field
+                  label={t('cameraDialog.cameraName')}
+                  required
+                  className="col-span-6"
+                  error={form.name.trim() && !validManualCameraName ? t('cameraDialog.invalidName') : undefined}
+                >
                   <Input
                     placeholder="e.g., Front Door"
                     value={form.name}
                     onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
                   />
                 </Field>
-                <Field label={t('cameraDialog.ipAddress')} required className="col-span-4">
+                <Field
+                  label={t('cameraDialog.ipAddress')}
+                  required
+                  className="col-span-4"
+                  error={form.ip_address.trim() && !validManualCameraIp ? t('cameraDialog.invalidIp') : undefined}
+                >
                   <Input
                     placeholder="192.168.1.100"
                     value={form.ip_address}
