@@ -73,7 +73,7 @@ class SiteCreate(BaseModel):
 
 class SiteUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=100)
-    live_policy: Literal["always", "sub_only", "on_demand_main"] | None = None
+    live_policy: Literal["always", "sub_only"] | None = None
     uplink_cap_kbps: int | None = Field(None, ge=0, le=10_000_000)
 
 
@@ -214,8 +214,19 @@ def delete_site(
     audit_request(db, request, action="site.delete", user_id=user.id, entity_type="site", entity_id=site_id)
 
 
+async def _reprovision(camera_id: int) -> None:
+    """Re-provision a camera's MediaMTX paths after its site link changed:
+    a sub stream needs its ``-sub`` path (local_webcams.provisioning_for)."""
+    from services.mediamtx_startup_service import MediaMtxStartupService
+
+    try:
+        await MediaMtxStartupService.provision_camera_by_id(camera_id, force=True)
+    except Exception:  # noqa: BLE001 - the startup reconcile provisions it again
+        pass
+
+
 @router.put("/{site_id}/cameras/{camera_id}")
-def link_camera(
+async def link_camera(
     site_id: int,
     camera_id: int,
     body: CameraLink,
@@ -240,7 +251,9 @@ def link_camera(
         raise HTTPException(status_code=422, detail=str(e)) from e
     audit_request(db, request, action="site.camera_link", user_id=user.id, entity_type="camera",
                   entity_id=cam.id, details={"site_id": site.id, "lan_host": cam.site_lan_host})
-    return svc.public_view(db, site)
+    view = svc.public_view(db, site)
+    await _reprovision(cam.id)
+    return view
 
 
 @router.delete("/{site_id}/cameras/{camera_id}")
@@ -261,6 +274,7 @@ async def unlink_camera(
     paths = list(svc.stream_names(cam))
     svc.unlink_camera(db, cam)
     await MediaMtxAdminService.kick_path_sessions(paths)
+    await _reprovision(cam.id)
     audit_request(db, request, action="site.camera_unlink", user_id=user.id, entity_type="camera",
                   entity_id=cam.id, details={"site_id": site.id})
     return svc.public_view(db, site)

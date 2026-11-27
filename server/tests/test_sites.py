@@ -88,6 +88,15 @@ def env(monkeypatch):
         return {"status": "ok", "kicked": list(paths), "errors": []}
 
     monkeypatch.setattr(MediaMtxAdminService, "kick_path_sessions", staticmethod(fake_kick))
+    from services.mediamtx_startup_service import MediaMtxStartupService
+
+    provisioned: list[int] = []
+
+    async def fake_provision(camera_id, force=False):
+        provisioned.append(camera_id)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(MediaMtxStartupService, "provision_camera_by_id", staticmethod(fake_provision))
     sites_router._calls.clear()
 
     eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
@@ -143,7 +152,7 @@ def env(monkeypatch):
     app.dependency_overrides[core_auth.get_current_active_user] = lambda: current["user"]
     with TestClient(app, base_url="https://nvr.example.com") as tc:
         yield SimpleNamespace(tc=tc, ids=ids, users=users, current=current,
-                              SessionLocal=SessionLocal, kicked=kicked)
+                              SessionLocal=SessionLocal, kicked=kicked, provisioned=provisioned)
 
 
 def _create(env, name="Shop 12"):
@@ -455,6 +464,54 @@ def test_a_separate_control_host_is_used_and_sent_to_the_agent(env):
     assert r.status_code == 200 and r.json()["cameras"][0]["lan_host"] == "192.168.1.20"
     d = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()
     assert d["desired"][0]["control_host"] == "192.168.1.20"
+
+
+# ── bandwidth (C6) ─────────────────────────────────────────────────────
+
+
+def test_sub_only_sends_the_sub_stream_into_the_main_path(env):
+    a = _create(env)
+    token = _enrol(env, a["enrol_code"]).json()["token"]
+    env.tc.put(f"/api/v1/sites/{a['id']}/cameras/{env.ids['pushed']}",
+               json={"main_url": "rtsp://192.168.1.64/main", "sub_url": "rtsp://192.168.1.64/sub"})
+    # A camera without a sub stream keeps its main stream under sub_only.
+    env.tc.put(f"/api/v1/sites/{a['id']}/cameras/{env.ids['pushed2']}",
+               json={"main_url": "rtsp://192.168.1.65/main"})
+    before = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()
+    r = env.tc.patch(f"/api/v1/sites/{a['id']}", json={"live_policy": "sub_only", "uplink_cap_kbps": 4000})
+    assert r.status_code == 200 and r.json()["live_policy"] == "sub_only" and r.json()["uplink_cap_kbps"] == 4000
+    after = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()
+    assert after["etag"] != before["etag"] and after["uplink_cap_kbps"] == 4000
+    by_id = {d["camera_id"]: d for d in after["desired"]}
+    one, two = by_id[env.ids["pushed"]], by_id[env.ids["pushed2"]]
+    assert one["main_url"].endswith("/sub") and one["sub_url"] is None and one["sub_stream_name"] is None
+    assert one["main_from_sub"] is True
+    assert two["main_url"].endswith("/main") and two["main_from_sub"] is False
+
+
+def test_only_the_supported_live_policies_are_accepted(env):
+    a = _create(env)
+    assert env.tc.patch(f"/api/v1/sites/{a['id']}", json={"live_policy": "on_demand_main"}).status_code == 422
+    assert env.tc.patch(f"/api/v1/sites/{a['id']}", json={"uplink_cap_kbps": -5}).status_code == 422
+    # 0 or null clears the cap.
+    env.tc.patch(f"/api/v1/sites/{a['id']}", json={"uplink_cap_kbps": 3000})
+    assert env.tc.patch(f"/api/v1/sites/{a['id']}", json={"uplink_cap_kbps": 0}).json()["uplink_cap_kbps"] is None
+
+
+def test_linking_provisions_the_cameras_paths_and_a_sub_gets_its_sub_path(env):
+    from services.local_webcams import provisioning_for
+
+    a = _create(env)
+    env.tc.put(f"/api/v1/sites/{a['id']}/cameras/{env.ids['pushed']}",
+               json={"main_url": "rtsp://192.168.1.64/main", "sub_url": "rtsp://192.168.1.64/sub"})
+    assert env.provisioned == [env.ids["pushed"]]
+    with env.SessionLocal() as s:
+        cam = s.get(Camera, env.ids["pushed"])
+        assert provisioning_for(cam) == {"substream": True}
+        other = s.get(Camera, env.ids["pushed2"])  # a browser webcam: main path only
+        assert provisioning_for(other) == {}
+    env.tc.delete(f"/api/v1/sites/{a['id']}/cameras/{env.ids['pushed']}")
+    assert env.provisioned[-1] == env.ids["pushed"]
 
 
 # ── agent downloads ────────────────────────────────────────────────────

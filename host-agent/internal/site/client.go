@@ -38,6 +38,8 @@ type Desired struct {
 	MainURL       string `json:"main_url"` // carries the camera's credentials
 	SubURL        string `json:"sub_url"`
 	Mode          string `json:"mode"`
+	// MainFromSub: the main path is fed from the sub stream (sub_only).
+	MainFromSub bool `json:"main_from_sub"`
 	// ControlHost: where core's camera requests (ONVIF, PTZ) may go.
 	ControlHost string `json:"control_host"`
 }
@@ -63,6 +65,8 @@ type PublisherState struct {
 	State    string  `json:"state"`
 	Detail   string  `json:"detail,omitempty"`
 	Since    float64 `json:"since,omitempty"`
+	// Kbps: what the stream sends upstream (last 10 s).
+	Kbps float64 `json:"kbps,omitempty"`
 }
 
 // OnvifScan is the last discovery round on the site's LAN.

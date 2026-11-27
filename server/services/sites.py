@@ -52,7 +52,11 @@ WAIT_MAX_S = 25
 #: The ALPN the 443 stream layer routes to camera ingest (nginx/stream.conf.template).
 INGEST_ALPN = "opennvr-rtsps"
 
-LIVE_POLICIES = ("always", "sub_only", "on_demand_main")
+#: What a site sends of each camera:
+#:   always    main stream (and the sub stream when the camera has one)
+#:   sub_only  only the sub stream, into the camera's main path: live view and
+#:             recording at sub-stream quality, for a thin uplink
+LIVE_POLICIES = ("always", "sub_only")
 
 
 def _now() -> datetime:
@@ -303,13 +307,20 @@ def desired_state(db: Session, site: Site) -> list[dict[str, Any]]:
             except Exception:  # noqa: BLE001 - a broken secret must not stop the others
                 password = None
         main, sub = stream_names(cam)
+        main_src, sub_src = cam.site_main_url, cam.site_sub_url
+        # sub_only: the camera's small stream goes into its main path (what
+        # live view and recording read), and nothing else crosses the uplink.
+        sub_only = site.live_policy == "sub_only" and bool(cam.site_sub_url)
+        if sub_only:
+            main_src, sub_src = cam.site_sub_url, None
         out.append({
             "camera_id": cam.id,
             "name": cam.name,
             "stream_name": main,
-            "sub_stream_name": sub if cam.site_sub_url else None,
-            "main_url": _with_credentials(cam.site_main_url, cam.username, password),
-            "sub_url": _with_credentials(cam.site_sub_url, cam.username, password),
+            "sub_stream_name": sub if sub_src else None,
+            "main_url": _with_credentials(main_src, cam.username, password),
+            "sub_url": _with_credentials(sub_src, cam.username, password),
+            "main_from_sub": sub_only,
             "mode": "copy",
             # Where core's camera requests (ONVIF, PTZ) may go at this site.
             "control_host": cam.site_lan_host,
