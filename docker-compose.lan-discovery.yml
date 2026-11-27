@@ -39,8 +39,16 @@ services:
     network_mode: host
     restart: unless-stopped
     read_only: true
+    environment:
+      # The prober sees the host's interfaces, which core cannot: it keeps
+      # ./data/net-hints/advertise-ips (the WebRTC ICE host list core reads)
+      # current within 30 s of a DHCP change or a VPN coming up. A binary
+      # from an older core pin ignores both variables.
+      - OPENNVR_NET_HINTS_DIR=/net-hints
+      - NGINX_BIND_HOST=${NGINX_BIND_HOST:-}
     volumes:
       - ./data/host-agent-key:/key:ro
+      - ./data/net-hints:/net-hints
     depends_on:
       opennvr-core:
         condition: service_started

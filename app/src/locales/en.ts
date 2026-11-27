@@ -388,6 +388,8 @@ export const translations: TranslationCatalog = {
   'settings.source.admin': 'set here',
   'settings.source.stun': 'found automatically',
   'settings.source.env': 'this server\'s LAN address',
+  'settings.source.host': 'this server\'s address now (LAN or VPN)',
+  'settings.source.placeholder': 'placeholder (nothing to advertise)',
   'settings.stunNone': 'No STUN server: the public address must be set above for viewers outside your network.',
   'settings.stunServers': 'STUN servers',
   'settings.addStun': 'Add STUN',

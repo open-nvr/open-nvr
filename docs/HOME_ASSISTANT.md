@@ -97,6 +97,15 @@ MEDIAMTX_WEBRTC_HOSTS=192.168.1.100
 `start.sh` / `start.ps1` fill this from the detected LAN address. Set it by
 hand only if detection picked the wrong interface.
 
+Core also advertises the host's current addresses, VPN tunnels included
+(WireGuard, Tailscale, FortiClient), from `./data/net-hints/advertise-ips`.
+The launchers write that file on every run. On Linux with `LAN_DISCOVERY=on`,
+the LAN prober rewrites it every 30 seconds. Core reads it again every
+minute, so a new DHCP lease or a VPN coming up is followed without a restart.
+Elsewhere, run `./start.sh refresh-net` (or `.\start.ps1 refresh-net`) after
+the host's address changes. On a dual-NIC host with `NGINX_BIND_HOST` set,
+only that address is advertised.
+
 Home Assistant on another network needs the public address as well. OpenNVR
 adds it by itself: core asks the STUN server configured under Settings →
 WebRTC for the public IP and advertises it, refreshed every ten minutes; a

@@ -676,6 +676,9 @@ services:
       # address it opened the page on, so a LAN viewer needs none of this;
       # API clients (Home Assistant) do.
       - MEDIAMTX_WEBRTC_HOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
+      # Dual-NIC hosts publish the media ports on this address only; core
+      # then advertises no other host address (webrtc_ice_host_service).
+      - NGINX_BIND_HOST=${NGINX_BIND_HOST:-}
       # The ICE media port as published on the host (the mediamtx service
       # above): the player adds the page's own address on this port.
       - WEBRTC_ICE_PORT=${WEBRTC_ICE_PORT:-8189}
