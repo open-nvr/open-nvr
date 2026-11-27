@@ -184,6 +184,14 @@ function Get-ComposeArgs {
             Write-Color "APP_INSTALLER=on but docker-compose.installer.yml is missing" Yellow
         }
     }
+    # Built-in Let's Encrypt (docker-compose.yml `acme`): on by itself for a
+    # site with a public DNS name, unless ACME_DISABLE says otherwise.
+    # Mirrors compose_args in start.sh.
+    if (-not [string]::IsNullOrWhiteSpace((Get-EnvVar "PUBLIC_HOSTNAME"))) {
+        if (@("1", "true", "yes", "on") -notcontains "$(Get-EnvVar "ACME_DISABLE")".ToLower()) {
+            $args += @("--profile", "acme")
+        }
+    }
     # Opt-in host-side debug ports for mediamtx. Off by default because
     # Docker's publishing is all-or-nothing per container — see the header
     # of docker-compose.debug-ports.yml and #298. Mirrors compose_args

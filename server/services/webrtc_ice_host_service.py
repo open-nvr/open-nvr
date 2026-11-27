@@ -161,6 +161,10 @@ class WebRTCIceHostService:
     def admin_address(cls, db) -> str | None:
         val = (cls._webrtc_row_value(db).get("public_address") or "").strip()
         if not val:
+            # Nothing set on the WebRTC page: the site's PUBLIC_HOSTNAME
+            # (cloud install), which MediaMTX resolves itself.
+            val = (getattr(settings, "public_hostname", "") or "").strip().rstrip(".").lower()
+        if not val:
             return None
         if cls.is_hostname(val) or cls.is_advertisable(val):
             return val

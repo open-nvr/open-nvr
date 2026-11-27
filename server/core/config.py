@@ -213,6 +213,11 @@ class Settings(BaseSettings):
     # Compose sets it from the same switch (on by default); False here is for
     # a core run without the stock nginx in front.
     webrtc_single_port: bool = False
+    # The site's public DNS name (PUBLIC_HOSTNAME), on an internet-facing or
+    # cloud install. Used as the WebRTC public address when the admin has set
+    # none, so a viewer who opens the page by that name gets a candidate
+    # without STUN; the `acme` service gets its certificate for it.
+    public_hostname: str = ""
     #: Optional comma-separated allowlist of hosts an integration webhook
     #: may POST to (e.g. "hooks.slack.com,ntfy.local"). Empty = no
     #: restriction beyond the cloud-metadata deny that always applies.

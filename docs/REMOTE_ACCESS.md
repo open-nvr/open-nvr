@@ -46,6 +46,23 @@ Only one server can receive a given public port. If two OpenNVR servers share a 
 
 The web UI can share 443 through a reverse proxy that routes by host name. The media port can't, because WebRTC media carries no host name. The same goes for WebRTC over 443: the proxy can pass non-TLS connections on 443 to one of the servers only. The other one uses its own media port.
 
+## A real certificate (Let's Encrypt)
+
+A site reached by a DNS name from the internet (a cloud install, or a site with a domain pointing at its router) can have a browser-trusted certificate instead of the self-signed one. Set the name in `.env` and run `./start.sh up` (or `.\start.ps1 up`):
+
+```
+PUBLIC_HOSTNAME=nvr.example.com
+```
+
+The `acme` service then gets a Let's Encrypt certificate for that name and renews it by itself; nginx picks up each new one without a restart. It needs:
+
+- the name resolving to the site's public address, and
+- port **80** forwarded to the server, next to 443 (the HTTP-01 challenge; everything else on port 80 still redirects to HTTPS).
+
+Until a certificate is issued, and whenever a renewal fails, the current certificate stays in place: a failure never breaks the site. Check progress with `docker logs opennvr_acme`. The self-signed pair is kept as `nginx-certs/server.crt.selfsigned` and `server.key.selfsigned`.
+
+`PUBLIC_HOSTNAME` is also used as the WebRTC public address when none is set under Settings → WebRTC. Set `ACME_DISABLE=true` to keep the self-signed certificate, for example when another proxy in front terminates TLS. LAN-only and air-gapped sites leave `PUBLIC_HOSTNAME` unset.
+
 ## Checking from the server
 
 MediaMTX logs every WebRTC session:

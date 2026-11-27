@@ -234,6 +234,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Render and test both layouts
         run: bash tests/host-hardening/test_nginx_layout.sh
+      # Built-in Let's Encrypt against Pebble (Let's Encrypt's test CA): real
+      # HTTP-01 through nginx's port 80, install, nginx reload, renewal
+      # no-op, failure keeps the installed certificate.
+      - name: ACME end to end (Pebble)
+        run: bash tests/host-hardening/test_acme.sh
 
   # ── React frontend build ─────────────────────────────────────────
   frontend:

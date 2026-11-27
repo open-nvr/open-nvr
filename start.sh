@@ -682,6 +682,14 @@ compose_args() {
     # holds the Docker socket. The installer asks; APP_INSTALLER=on in
     # .env is the answer. The overlay mounts this checkout at ${PWD}, so
     # the launcher must run from the repo root (it always does).
+    # Built-in Let's Encrypt (docker-compose.yml `acme`): on by itself for a
+    # site with a public DNS name, unless ACME_DISABLE says otherwise.
+    if [[ -n "$(get_env_var PUBLIC_HOSTNAME)" ]]; then
+        case "$(get_env_var ACME_DISABLE | tr 'A-Z' 'a-z')" in
+            1|true|yes|on) ;;
+            *) args="$args --profile acme" ;;
+        esac
+    fi
     if [[ "$(get_env_var APP_INSTALLER)" == "on" ]]; then
         if [[ -f docker-compose.installer.yml ]]; then
             args="$args -f docker-compose.installer.yml --profile app-installer"
