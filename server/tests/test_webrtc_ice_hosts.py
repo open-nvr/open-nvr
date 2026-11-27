@@ -128,7 +128,15 @@ def _clean_state(monkeypatch, tmp_path):
     WebRTCIceHostService._resolved = {}
     WebRTCIceHostService._refresher = None
     WebRTCIceHostService._last_applied = []
+    WebRTCIceHostService._stun_failures = 0
     monkeypatch.setattr(WebRTCIceHostService, "ensure_refresher", classmethod(lambda cls: None))
+    # The background STUN round startup asks for: recorded, not run.
+    WebRTCIceHostService._soon_calls = 0
+
+    def _soon(cls):
+        cls._soon_calls += 1
+
+    monkeypatch.setattr(WebRTCIceHostService, "refresh_soon", classmethod(_soon))
     monkeypatch.setattr(settings, "mediamtx_webrtc_hosts", "", raising=False)
     monkeypatch.setattr(settings, "nginx_bind_host", "", raising=False)
     monkeypatch.setenv("OPENNVR_NET_HINTS_DIR", str(tmp_path / "net-hints"))
@@ -624,6 +632,78 @@ async def test_startup_apply_retries_until_mediamtx_takes_the_list(db: FakeDB, m
     assert await WebRTCIceHostService.apply_on_startup(attempts=5, delay=0.5) is True
     assert len(calls) == 3 and calls[-1] == ["171.78.153.53"]
     assert slept == [0.5, 0.5], "waits between failed attempts only"
+
+
+@pytest.mark.asyncio
+async def test_startup_pushes_before_any_stun_round(db: FakeDB, monkeypatch, tmp_path) -> None:
+    """An offline site's LAN addresses reach MediaMTX at once; STUN, which
+    can only time out there, follows in the background."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def fake_session():
+        yield db
+
+    async def never(cls, servers, timeout=2.0):
+        raise AssertionError("startup waited on STUN")
+
+    monkeypatch.setattr("core.database.SessionLocal", fake_session)
+    monkeypatch.setattr(WebRTCIceHostService, "discover_public_ip", classmethod(never))
+    pushed = _record_pushes(monkeypatch)
+    db.set_webrtc(stun_servers=["stun:a"])
+    _write_hints(tmp_path, "advertise-ips", "192.168.2.30")
+
+    assert await WebRTCIceHostService.apply_on_startup(attempts=1, delay=0) is True
+    assert pushed == [["192.168.2.30"]]
+    assert WebRTCIceHostService._soon_calls == 1, "the STUN round is asked for in the background"
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_dns_lookup_is_cut_at_the_stun_timeout(monkeypatch) -> None:
+    """Air-gapped: the resolver sits on the STUN server's name. That must
+    cost STUN_TIMEOUT_S, not however long the resolver likes."""
+    import asyncio
+    import time as _time
+
+    loop = asyncio.get_running_loop()
+
+    async def hang(*a, **k):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(loop, "getaddrinfo", hang)
+    t0 = _time.monotonic()
+    assert await WebRTCIceHostService.discover_public_ip(["stun:stun.example.org"], timeout=0.2) is None
+    assert _time.monotonic() - t0 < 2.0
+
+
+@pytest.mark.asyncio
+async def test_stun_backs_off_after_repeated_silence(db: FakeDB, monkeypatch) -> None:
+    from services import webrtc_ice_host_service as mod
+
+    calls = {"n": 0}
+
+    async def silent(cls, servers, timeout=2.0):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(WebRTCIceHostService, "discover_public_ip", classmethod(silent))
+    db.set_webrtc(stun_servers=["stun:a"])
+    assert WebRTCIceHostService.stun_interval() == mod.STUN_REFRESH_S
+    for _ in range(mod.STUN_FAILURES_BEFORE_BACKOFF):
+        await WebRTCIceHostService.refresh_public_ip(db, force=True)
+    assert WebRTCIceHostService.stun_interval() == mod.STUN_BACKOFF_S
+
+    # Within the backoff an unforced round does not ask again...
+    await WebRTCIceHostService.refresh_public_ip(db)
+    assert calls["n"] == mod.STUN_FAILURES_BEFORE_BACKOFF
+
+    # ...and one answer puts the normal interval back.
+    async def answers(cls, servers, timeout=2.0):
+        return ("171.78.153.53", "stun:a")
+
+    monkeypatch.setattr(WebRTCIceHostService, "discover_public_ip", classmethod(answers))
+    assert await WebRTCIceHostService.refresh_public_ip(db, force=True) == "171.78.153.53"
+    assert WebRTCIceHostService.stun_interval() == mod.STUN_REFRESH_S
 
 
 @pytest.mark.asyncio

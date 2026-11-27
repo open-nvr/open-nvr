@@ -85,6 +85,11 @@ STUN_TIMEOUT_S = 2.0
 #: How often the public IP is asked for again. An ISP change is picked up
 #: within this; a viewer whose WebRTC fails meanwhile gets HLS, not an error.
 STUN_REFRESH_S = 600
+#: After this many rounds in a row with no answer (an air-gapped site, a
+#: firewall that drops UDP out), STUN is asked only every STUN_BACKOFF_S: each
+#: dead round costs STUN_TIMEOUT_S per server for nothing.
+STUN_FAILURES_BEFORE_BACKOFF = 3
+STUN_BACKOFF_S = 3600
 #: How often the refresh loop re-reads the host's addresses (net-hints) and
 #: re-pushes the list if it changed. Reading two small files is cheap; STUN
 #: still runs only every STUN_REFRESH_S.
@@ -120,6 +125,8 @@ class WebRTCIceHostService:
     #: An empty resolve falls back to these (minus the admin's address) rather
     #: than wiping a working list.
     _last_applied: list[dict[str, str]] = []
+    #: STUN rounds in a row that got no answer from any server.
+    _stun_failures = 0
 
     # ---- validation -------------------------------------------------
 
@@ -269,7 +276,13 @@ class WebRTCIceHostService:
     @classmethod
     async def _stun_query(cls, host: str, port: int, timeout: float) -> str | None:
         loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        # The name lookup shares the reply's time budget: on an air-gapped
+        # site the resolver can sit on an unanswerable query for far longer
+        # than the binding exchange ever takes, and core's startup and every
+        # refresh used to wait on it.
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM), timeout
+        )
         if not infos:
             return None
         family, _, _, _, sockaddr = infos[0]
@@ -327,18 +340,28 @@ class WebRTCIceHostService:
         STUN servers, or when a server answers with a different one.
         """
         now = time.monotonic()
-        if not force and cls._public.at and now - cls._public.at < STUN_REFRESH_S:
+        if not force and cls._public.at and now - cls._public.at < cls.stun_interval():
             return cls._public.ip
         servers = cls.stun_servers(db)
         previous = cls._public
         if not servers:
             cls._public = PublicIP(None, now, None)
+            cls._stun_failures = 0
         else:
             found = await cls.discover_public_ip(servers)
             if found:
                 cls._public = PublicIP(found[0], now, found[1])
+                cls._stun_failures = 0
             else:
                 cls._public = PublicIP(previous.ip, now, previous.server)
+                cls._stun_failures += 1
+                if cls._stun_failures == STUN_FAILURES_BEFORE_BACKOFF:
+                    logger.info(
+                        "STUN unanswered %d times in a row; asking only every %d min "
+                        "from now on (an offline site needs no public IP)",
+                        cls._stun_failures,
+                        STUN_BACKOFF_S // 60,
+                    )
                 if previous.ip:
                     logger.info(
                         "STUN gave no answer; keeping the public IP %s for WebRTC", previous.ip
@@ -350,6 +373,14 @@ class WebRTCIceHostService:
     @classmethod
     def public_ip(cls) -> PublicIP:
         return cls._public
+
+    @classmethod
+    def stun_interval(cls) -> float:
+        """Seconds between STUN rounds: STUN_REFRESH_S, or STUN_BACKOFF_S once
+        STUN has stayed silent STUN_FAILURES_BEFORE_BACKOFF times in a row."""
+        if cls._stun_failures >= STUN_FAILURES_BEFORE_BACKOFF:
+            return STUN_BACKOFF_S
+        return STUN_REFRESH_S
 
     # ---- resolution -------------------------------------------------
 
@@ -569,7 +600,13 @@ class WebRTCIceHostService:
         for i in range(1, max(1, tries) + 1):
             try:
                 with SessionLocal() as db:
-                    if await cls.apply_to_mediamtx(db):
+                    # What is known now goes out first (the LAN addresses, a
+                    # fixed public address); the STUN round follows in the
+                    # background and re-pushes only if it adds something. On
+                    # an offline site STUN can only time out, and live view
+                    # on the LAN must not wait for that.
+                    if await cls.apply_to_mediamtx(db, stun=False):
+                        cls.refresh_soon()
                         return True
             except Exception as e:  # noqa: BLE001 - keep retrying
                 logger.debug("Startup WebRTC ICE host apply failed: %s", e)
