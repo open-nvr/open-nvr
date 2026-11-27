@@ -39,6 +39,7 @@ from typing import Any
 import httpx
 
 from .sofia import sofia_hash
+from services.site_relay import camera_http_client
 
 
 class CgiError(Exception):
@@ -61,7 +62,7 @@ class CgiSession:
 
     async def login(self, timeout: float = 10.0) -> None:
         headers = {"If-Modified-Since": "0"}
-        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+        async with camera_http_client(timeout=timeout, verify=False) as client:
             r1 = await client.get(
                 f"{self._base}/CGI/Security/sessionLogin?timestamp:1", headers=headers
             )
@@ -91,7 +92,7 @@ class CgiSession:
     async def get(self, path: str, timeout: float = 10.0) -> tuple[int, str]:
         if not self.session_id:
             raise CgiError("not logged in")
-        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+        async with camera_http_client(timeout=timeout, verify=False) as client:
             r = await client.get(
                 f"{self._base}{path}",
                 headers={"If-Modified-Since": "0"},
@@ -104,7 +105,7 @@ class CgiSession:
     ) -> tuple[int, str]:
         if not self.session_id:
             raise CgiError("not logged in")
-        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+        async with camera_http_client(timeout=timeout, verify=False) as client:
             r = await client.post(
                 f"{self._base}{path}",
                 headers={"If-Modified-Since": "0", "Content-Type": "application/json"},
@@ -160,7 +161,7 @@ async def probe(
     ``sessionLogin`` endpoint returns a salt unauthenticated. Returns False on
     any failure."""
     try:
-        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+        async with camera_http_client(timeout=timeout, verify=False) as client:
             r = await client.get(
                 f"{scheme}://{ip}/CGI/Security/sessionLogin?timestamp:1",
                 headers={"If-Modified-Since": "0"},

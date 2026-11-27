@@ -68,6 +68,8 @@ export type CameraLink = {
   sub_url?: string | null
   username?: string | null
   password?: string | null
+  /** Where the camera's control API (ONVIF, PTZ) answers, if not the stream's host. */
+  control_host?: string | null
 }
 
 export const siteService = {

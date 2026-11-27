@@ -46,6 +46,7 @@ import httpx
 from fastapi import HTTPException
 
 from core.logging_config import main_logger
+from services.site_relay import camera_http_client
 
 
 def _xml_text(raw: str) -> str:
@@ -321,7 +322,7 @@ async def _onvif_request(
 
     # verify=False: cameras use self-signed certs on the LAN; the whole point of
     # supporting https here is reaching devices whose control API is TLS-only.
-    async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+    async with camera_http_client(timeout=timeout, verify=False) as client:
         try:
             first = _wsse_request() if wsse_first else _digest_request()
             reused_challenge = _has_challenge(first.get("auth"))

@@ -49,6 +49,7 @@ from ..base import (
 )
 from ..onvif.driver import OnvifDriver
 from .isapi import isapi_request
+from services.site_relay import camera_http_client
 
 _OVERLAY_PATH = "/ISAPI/System/Video/inputs/channels/1/overlays"
 _MOTION_PATH = "/ISAPI/System/Video/inputs/channels/1/motionDetection"
@@ -641,7 +642,7 @@ class HikvisionIsapiDriver(OnvifDriver):
     async def get_snapshot(self) -> bytes:
         url = f"http://{self.ip}:{self.http_port}{_SNAPSHOT_PATH}"
         auth = httpx.DigestAuth(self.username, self.password)
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with camera_http_client(timeout=20.0) as client:
             resp = await client.get(url, auth=auth)
         if resp.status_code != 200:
             raise HTTPException(
@@ -664,7 +665,7 @@ class HikvisionIsapiDriver(OnvifDriver):
             )
         url = f"http://{self.ip}:{self.http_port}{_CONFIG_EXPORT_PATH}"
         auth = httpx.DigestAuth(self.username, self.password)
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with camera_http_client(timeout=60.0) as client:
             resp = await client.get(
                 url, auth=auth, params={"secretkey": secret_key.strip()}
             )

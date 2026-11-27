@@ -38,6 +38,8 @@ type Desired struct {
 	MainURL       string `json:"main_url"` // carries the camera's credentials
 	SubURL        string `json:"sub_url"`
 	Mode          string `json:"mode"`
+	// ControlHost: where core's camera requests (ONVIF, PTZ) may go.
+	ControlHost string `json:"control_host"`
 }
 
 // Answer is what sync and wait return.
@@ -50,6 +52,8 @@ type Answer struct {
 	Ingest     Ingest    `json:"ingest"`
 	PollAfterS int       `json:"poll_after_s"`
 	WaitMaxS   int       `json:"wait_max_s"`
+	// Camera requests core needs sent on this site's LAN (wait only).
+	RPC []RPC `json:"rpc"`
 }
 
 // PublisherState is one relayed stream, as reported.
@@ -181,6 +185,11 @@ func (c *Client) Wait(ctx context.Context, etag string) (*Answer, error) {
 	var out Answer
 	err := c.do(ctx, http.MethodGet, "/wait?etag="+url.QueryEscape(etag), nil, 60*time.Second, &out)
 	return &out, err
+}
+
+// RPCResult returns the answer to one camera request.
+func (c *Client) RPCResult(ctx context.Context, id string, r RPCResult) error {
+	return c.do(ctx, http.MethodPost, "/rpc/"+url.PathEscape(id)+"/result", r, 30*time.Second, nil)
 }
 
 // PublishToken asks for a short publish token for one camera.

@@ -82,6 +82,7 @@ function AddCameraDialog({ site, device, onClose }: { site: Site; device: Discov
   const [subUrl, setSubUrl] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [controlHost, setControlHost] = useState(device?.ip || '')
   const [busy, setBusy] = useState(false)
 
   const submit = async () => {
@@ -92,6 +93,7 @@ function AddCameraDialog({ site, device, onClose }: { site: Site; device: Discov
         sub_url: subUrl.trim() || null,
         username: username.trim() || null,
         password: password || null,
+        control_host: controlHost.trim() || null,
       })
       showSuccess(`${name} added; the site's agent starts relaying it within seconds`)
       void queryClient.invalidateQueries({ queryKey: SITES_KEY })
@@ -140,6 +142,9 @@ function AddCameraDialog({ site, device, onClose }: { site: Site; device: Discov
             <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
           </Field>
         </div>
+        <Field label="Control address (optional)" hint="Where the camera answers ONVIF and PTZ, if not the stream's address (an NVR channel, an encoder). Leave empty to use the stream's.">
+          <Input value={controlHost} onChange={(e) => setControlHost(e.target.value)} placeholder="192.168.1.64" />
+        </Field>
       </div>
     </Modal>
   )

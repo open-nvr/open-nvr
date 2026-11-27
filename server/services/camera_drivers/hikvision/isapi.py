@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import httpx
 from fastapi import HTTPException
+from services.site_relay import camera_http_client
 
 
 async def isapi_request(
@@ -51,7 +52,7 @@ async def isapi_request(
     url = f"{scheme}://{ip}:{port}{path}"
     auth = httpx.DigestAuth(username, password) if username else None
     headers = {"Content-Type": "application/xml"} if body else {}
-    async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+    async with camera_http_client(timeout=timeout, verify=False) as client:
         try:
             resp = await client.request(
                 method, url, content=body, headers=headers, auth=auth

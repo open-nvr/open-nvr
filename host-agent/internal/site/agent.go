@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"runtime"
@@ -37,8 +38,11 @@ type Agent struct {
 	mu      sync.Mutex
 	streams map[string]*stream
 	relay   *Relay
-	ingest  Ingest
-	scan    *OnvifScan
+	rpc     *rpcRunner
+	// Hosts of the cameras this site relays: core's camera requests may reach these.
+	camHosts []string
+	ingest   Ingest
+	scan     *OnvifScan
 }
 
 const (
@@ -56,6 +60,7 @@ func Run(ctx context.Context, o Options) error {
 		o:       o,
 		client:  NewClient(c.Server, c.Token, c.Pin, c.Insecure),
 		streams: map[string]*stream{},
+		rpc:     newRPCRunner(o.Logf),
 	}
 	a.d = &deps{
 		ffmpeg:    o.FFmpeg,
@@ -110,6 +115,9 @@ func Run(ctx context.Context, o Options) error {
 		if ans.ETag != etag {
 			a.apply(ctx, ans)
 			etag = ans.ETag
+		}
+		if len(ans.RPC) > 0 {
+			a.rpc.handle(ctx, a.client, ans.RPC)
 		}
 	}
 	return nil
@@ -174,6 +182,18 @@ func (a *Agent) apply(ctx context.Context, ans *Answer) {
 			want[streamKey(d.CameraID, "sub")] = wanted{d.CameraID, "sub", d.SubURL, d.SubStreamName}
 		}
 	}
+	a.camHosts = a.camHosts[:0]
+	for _, d := range ans.Desired {
+		if d.ControlHost != "" {
+			a.camHosts = append(a.camHosts, d.ControlHost)
+		}
+		for _, raw := range []string{d.MainURL, d.SubURL} {
+			if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+				a.camHosts = append(a.camHosts, u.Hostname())
+			}
+		}
+	}
+	a.refreshAllowedLocked()
 	var stopping []*stream
 	for k, s := range a.streams {
 		w, ok := want[k]
@@ -196,6 +216,18 @@ func (a *Agent) apply(ctx context.Context, ans *Answer) {
 }
 
 func streamKey(cameraID int, kind string) string { return fmt.Sprintf("%d/%s", cameraID, kind) }
+
+// refreshAllowedLocked: core's camera requests may reach the hosts of the
+// cameras this site relays and the devices its discovery found, nothing else.
+func (a *Agent) refreshAllowedLocked() {
+	hosts := append([]string(nil), a.camHosts...)
+	if a.scan != nil {
+		for _, d := range a.scan.Devices {
+			hosts = append(hosts, d.IP)
+		}
+	}
+	a.rpc.setAllowed(hosts)
+}
 
 func (a *Agent) stopAll() {
 	a.mu.Lock()
@@ -248,6 +280,7 @@ func (a *Agent) discoverLoop(ctx context.Context) {
 		devs := onvifdisc.Probe(ctx, 3*time.Second)
 		a.mu.Lock()
 		a.scan = &OnvifScan{ScannedAt: nowF(), Devices: devs}
+		a.refreshAllowedLocked()
 		a.mu.Unlock()
 		if !sleepCtx(ctx, discoverEvery) {
 			return

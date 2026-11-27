@@ -200,6 +200,24 @@ def validate_lan_url(url: str | None, *, field: str) -> str | None:
     return u
 
 
+def validate_lan_host(host: str | None) -> str | None:
+    """An IP address or a plain host name on the site's LAN, or None."""
+    import ipaddress
+    import re as _re
+
+    h = (host or "").strip().strip("[]")
+    if not h:
+        return None
+    try:
+        ipaddress.ip_address(h)
+        return h
+    except ValueError:
+        pass
+    if len(h) <= 253 and _re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*", h):
+        return h.lower()
+    raise ValueError("control_host must be an IP address or a host name")
+
+
 def link_camera(
     db: Session,
     site: Site,
@@ -209,6 +227,7 @@ def link_camera(
     sub_url: str | None,
     username: str | None,
     password: str | None,
+    control_host: str | None = None,
 ) -> Camera:
     """Make ``camera`` (a publisher camera created the usual way) one of the
     site's: the agent there relays ``main_url`` (and ``sub_url``) into its
@@ -226,7 +245,10 @@ def link_camera(
     camera.site_id = site.id
     camera.site_main_url = main
     camera.site_sub_url = sub
-    camera.site_lan_host = urlsplit(main).hostname
+    # Where its control API (ONVIF, PTZ, settings) answers: the stream's host,
+    # unless the camera's video comes from another box (an NVR channel, an
+    # encoder) and the admin named it.
+    camera.site_lan_host = validate_lan_host(control_host) or urlsplit(main).hostname
     if username is not None:
         camera.username = username.strip()[:50] or None
     if password is not None:
@@ -289,6 +311,8 @@ def desired_state(db: Session, site: Site) -> list[dict[str, Any]]:
             "main_url": _with_credentials(cam.site_main_url, cam.username, password),
             "sub_url": _with_credentials(cam.site_sub_url, cam.username, password),
             "mode": "copy",
+            # Where core's camera requests (ONVIF, PTZ) may go at this site.
+            "control_host": cam.site_lan_host,
         })
     return out
 
@@ -457,7 +481,12 @@ def notify(site_id: int) -> None:
     # waiter is on.
     owner = getattr(ev, "_opennvr_loop", None)
     if owner is not None:
-        owner.call_soon_threadsafe(ev.set)
+        try:
+            owner.call_soon_threadsafe(ev.set)
+        except RuntimeError:
+            # The loop that waited is gone (a restart, a test client): no
+            # one is waiting on this event any more.
+            _events.pop(site_id, None)
 
 
 def arm(site_id: int) -> asyncio.Event:

@@ -257,19 +257,28 @@ async def get_driver_for_camera(
     camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
-    if is_publisher(camera):
+    from services import site_relay
+
+    site_camera = bool(getattr(camera, "site_id", None) and getattr(camera, "site_lan_host", None))
+    if is_publisher(camera) and not site_camera:
         # A webcam has no control API, and its placeholder address must
         # never be dialled (0.0.0.0 reaches this host's own ports).
         raise HTTPException(
             status_code=409, detail="A webcam has no camera settings or controls"
         )
+    # A camera at a remote site is reached through its site's agent: its
+    # control host is a synthetic name that camera_http_client() routes
+    # there (services/site_relay.py). Its placeholder address is never used.
+    host = site_relay.control_host(camera)
+    if site_camera:
+        site_relay.prime(camera)
 
     if force:
         invalidate_port_cache(camera_id)
 
     scheme, port = await resolve_endpoint(
         camera_id,
-        camera.ip_address,
+        host,
         getattr(camera, "onvif_port", None),
         getattr(camera, "control_scheme", None),
     )
@@ -289,7 +298,7 @@ async def get_driver_for_camera(
             db.rollback()
     creds = {
         "camera_id": camera_id,
-        "ip": camera.ip_address,
+        "ip": host,
         "username": camera.username,
         "password": camera.password,  # hybrid property auto-decrypts
         "http_port": port,
