@@ -13,6 +13,7 @@ camera never fingerprints as another's.
 from __future__ import annotations
 
 import httpx
+from services.site_relay import camera_http_client
 
 # Kept short: a probe runs at most once per camera (result is persisted), but a
 # few of them may run in sequence during first-contact detection.
@@ -39,7 +40,7 @@ async def fingerprint_get(
     url = f"{scheme}://{ip}:{port}{path}"
     auth = httpx.DigestAuth(username or "", password or "")
     try:
-        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+        async with camera_http_client(timeout=timeout, verify=False) as client:
             resp = await client.get(url, auth=auth)
             return resp.status_code, resp.text
     except Exception:

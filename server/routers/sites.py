@@ -82,6 +82,8 @@ class CameraLink(BaseModel):
     sub_url: str | None = Field(None, max_length=500)
     username: str | None = Field(None, max_length=50)
     password: str | None = Field(None, max_length=200)
+    # Where the camera's control API answers, when it is not the stream's host.
+    control_host: str | None = Field(None, max_length=255)
 
 
 def _site_or_404(db: Session, site_id: int) -> Site:
@@ -232,7 +234,8 @@ def link_camera(
         raise HTTPException(status_code=404, detail="Camera not found")
     try:
         svc.link_camera(db, site, cam, main_url=body.main_url, sub_url=body.sub_url,
-                        username=body.username, password=body.password)
+                        username=body.username, password=body.password,
+                        control_host=body.control_host)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     audit_request(db, request, action="site.camera_link", user_id=user.id, entity_type="camera",
@@ -394,16 +397,38 @@ async def wait(
 ):
     """Long poll: answers as soon as the desired state differs from ``etag``,
     or after WAIT_MAX_S with the same state."""
+    from services import site_relay
+
     ev = svc.arm(site.id)  # before reading, so no change slips between
     answer = _agent_answer(db, site, request)
-    if answer["etag"] == etag:
+    if answer["etag"] == etag and not site_relay.has_pending(site.id):
         await svc.wait(ev)
         db.expire_all()
         site = db.get(Site, site.id)
         if site is None or not site.credential_hash:
             raise _not_found()  # deleted or revoked while waiting
         answer = _agent_answer(db, site, request)
+    # HTTP requests core needs sent to this site's cameras (ONVIF, PTZ,
+    # settings): the agent sends each and posts the answer to /rpc/{id}.
+    answer["rpc"] = site_relay.take_pending(site.id)
     return answer
+
+
+class RpcResult(BaseModel):
+    status: int | None = Field(None, ge=100, le=599)
+    headers: dict[str, list[str]] = Field(default_factory=dict)
+    body_b64: str = Field("", max_length=6 * (1 << 20))  # 4 MiB, base64
+    error: str | None = Field(None, max_length=500)
+
+
+@agent_router.post("/rpc/{rpc_id}/result")
+def rpc_result(rpc_id: str, body: RpcResult, site: Site = Depends(_require_site)):
+    """The answer to one camera request this site's agent was handed."""
+    from services import site_relay
+
+    if not site_relay.complete(site.id, rpc_id[:32], body.model_dump()):
+        raise _not_found()
+    return {"ok": True}
 
 
 @agent_router.post("/publish-token/{camera_id}")

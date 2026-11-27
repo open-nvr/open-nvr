@@ -2956,9 +2956,12 @@ def _ptz_target(db: Session, camera_id: int, current_user) -> dict:
     a database error instead of the camera's. The audit write afterwards
     opens a fresh, short transaction on the same session.
     """
+    from services.site_relay import control_host
+
     cam = _ptz_camera(db, camera_id, current_user)
     target = {
-        "camera_id": cam.id, "ip": cam.ip_address, "username": cam.username,
+        # A site camera's synthetic host: its PTZ goes through the site's agent.
+        "camera_id": cam.id, "ip": control_host(cam), "username": cam.username,
         "password": cam.password, "camera_port": cam.port,
     }
     release(db)

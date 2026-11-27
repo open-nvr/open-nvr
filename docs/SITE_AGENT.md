@@ -10,6 +10,7 @@ camera ──RTSP──▶ opennvr-host site ──TLS 443 (ALPN opennvr-rtsps)�
 
 - **Video** is relayed as it is: the agent copies each camera's stream (`-c copy`), it does not re-encode, so a small box is enough. It goes over TLS to port 443; nginx on the server ends TLS and hands the stream to MediaMTX. Each stream needs a short-lived token for that one camera.
 - **Control** is HTTPS to `/api/v1/site-agent` with the site's credential. A camera added on the Sites page starts within a second.
+- **Camera control** (ONVIF, PTZ, settings): core's HTTP requests for a site camera ride the same long poll; the agent sends them on the site's LAN and posts the answers back. Core keeps all the protocol logic.
 - **Camera credentials** are stored encrypted on the server and sent only to that site's agent, over TLS. They never leave the agent's memory.
 
 ## What the server needs
@@ -50,5 +51,5 @@ The camera then appears on the Cameras page as **Site · \<its LAN address\>** a
 ## Limits
 
 - The site's uplink carries every relayed stream all the time (recording needs the main stream). Add a sub stream for each camera where you can.
-- PTZ, the camera's own settings and its motion events are not reachable through the agent yet; OpenNVR's own detection works.
+- PTZ and the camera's settings work through the agent, and ONVIF (PullPoint) events take the same path, though they have not been tried against a real camera yet: core sends each HTTP request to the site's agent, which sends it to the camera (only to cameras of that site, never to loopback or link-local addresses, no redirects) and returns the answer. Long-lived vendor event streams (Hikvision alertStream, Dahua eventManager) are not relayed; use the camera's ONVIF events or OpenNVR's own detection. If a camera's control API answers on another address than its stream (an NVR channel, an encoder), set **Control address** when adding it.
 - If the uplink drops, nothing is recorded until it comes back.

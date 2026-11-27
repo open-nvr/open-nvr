@@ -418,6 +418,45 @@ def test_no_readable_certificate_no_pin(env, monkeypatch, tmp_path):
     assert site["server_pin"] is None and "-pin" not in site["enrol_command"]
 
 
+# ── camera requests for the agent (site_relay) ──────────────────────────
+
+
+def test_wait_hands_queued_camera_requests_to_the_agent_at_once(env):
+    from services import site_relay
+
+    a = _create(env)
+    token = _enrol(env, a["enrol_code"]).json()["token"]
+    etag = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()["etag"]
+    site_relay._pending[a["id"]] = {"r1": {"id": "r1", "method": "GET", "url": "http://192.168.1.64/x"}}
+    try:
+        r = env.tc.get("/api/v1/site-agent/wait", params={"etag": etag}, headers=_auth(token))
+        assert r.status_code == 200 and [x["id"] for x in r.json()["rpc"]] == ["r1"]
+        # Taken: not handed out twice.
+        assert not site_relay.has_pending(a["id"])
+    finally:
+        site_relay._pending.clear()
+
+
+def test_an_rpc_result_for_an_unknown_request_is_a_404(env):
+    a = _create(env)
+    token = _enrol(env, a["enrol_code"]).json()["token"]
+    r = env.tc.post("/api/v1/site-agent/rpc/r999/result", json={"status": 200}, headers=_auth(token))
+    assert r.status_code == 404
+
+
+def test_a_separate_control_host_is_used_and_sent_to_the_agent(env):
+    """An NVR channel or an encoder: the video comes from one box, the
+    control API (ONVIF, PTZ) answers on another."""
+    a = _create(env)
+    token = _enrol(env, a["enrol_code"]).json()["token"]
+    put = lambda body: env.tc.put(f"/api/v1/sites/{a['id']}/cameras/{env.ids['pushed']}", json=body)  # noqa: E731
+    assert put({"main_url": "rtsp://192.168.1.10/ch1", "control_host": "http://x"}).status_code == 422
+    r = put({"main_url": "rtsp://192.168.1.10/ch1", "control_host": "192.168.1.20"})
+    assert r.status_code == 200 and r.json()["cameras"][0]["lan_host"] == "192.168.1.20"
+    d = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()
+    assert d["desired"][0]["control_host"] == "192.168.1.20"
+
+
 # ── agent downloads ────────────────────────────────────────────────────
 
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import httpx
 from fastapi import HTTPException
+from services.site_relay import camera_http_client
 
 
 async def dahua_request(
@@ -54,7 +55,7 @@ async def dahua_request(
     """
     url = f"{scheme}://{ip}:{port}{path}"
     auth = httpx.DigestAuth(username, password) if username else None
-    async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+    async with camera_http_client(timeout=timeout, verify=False) as client:
         try:
             resp = await client.request(method, url, params=params, auth=auth)
             return resp.status_code, resp.text
