@@ -27,7 +27,7 @@ echo ""
 compose="$REPO_ROOT/docker-compose.yml"
 start_test "nginx mounts the ./nginx folder and runs the layout script first"
 if grep -q -- '- ./nginx:/opt/opennvr-nginx:ro' "$compose" \
-    && grep -q '15-opennvr-layout.sh; exec /docker-entrypoint.sh' "$compose"; then pass
+    && grep -qE '15-opennvr-layout.sh; .*exec /docker-entrypoint.sh' "$compose"; then pass
 else fail "the nginx service must mount ./nginx at /opt/opennvr-nginx and run the script before the stock entrypoint"; fi
 
 start_test "the loopback hops (8443/8445) are never published"

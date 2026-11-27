@@ -590,3 +590,22 @@ async def test_rtc_config_survives_a_resolver_failure(db: FakeDB, monkeypatch) -
     monkeypatch.setattr(WebRTCIceHostService, "resolved_ips", classmethod(boom))
     out = await webrtc_router.get_client_rtc_config(db=db, current_user=types.SimpleNamespace(id=1))
     assert out.serverHosts == []
+
+
+# ------------------------------------------------------- PUBLIC_HOSTNAME
+
+
+def test_public_hostname_is_the_public_address_when_none_is_set(db: FakeDB, monkeypatch) -> None:
+    """A cloud install names itself once (PUBLIC_HOSTNAME, also the name its
+    Let's Encrypt certificate is for); live view advertises it without the
+    admin repeating it under Settings -> WebRTC."""
+    monkeypatch.setattr(settings, "public_hostname", "NVR.Example.com.", raising=False)
+    assert WebRTCIceHostService.admin_address(db) == "nvr.example.com"
+    # What the admin sets wins.
+    db.set_webrtc(public_address="171.78.153.53")
+    assert WebRTCIceHostService.admin_address(db) == "171.78.153.53"
+
+
+def test_no_public_hostname_no_public_address(db: FakeDB, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "public_hostname", "", raising=False)
+    assert WebRTCIceHostService.admin_address(db) is None

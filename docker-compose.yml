@@ -684,6 +684,10 @@ services:
       # If nginx fell back to the direct layout that candidate just never
       # answers, and the others still do.
       - WEBRTC_SINGLE_PORT=${NGINX_SINGLE_PORT_WEBRTC:-on}
+      # The site's public DNS name (internet-facing / cloud install): the
+      # WebRTC public address when none is set under Settings → WebRTC, and
+      # the name the `acme` service gets a Let's Encrypt certificate for.
+      - PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-}
       - KAI_C_URL=http://127.0.0.1:8100
       # Duplicate-sighting dedup for plate reads: a fragmented track
       # (moving camera, occlusion) re-reads the car just read; the same
@@ -920,6 +924,12 @@ services:
         if [ -n "$${OPENNVR_HOST_IP}" ]; then
           SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
         fi
+        # The public DNS name (cloud / internet-facing sites): covered by
+        # the self-signed certificate until the `acme` service installs a
+        # Let's Encrypt one.
+        if [ -n "$${PUBLIC_HOSTNAME}" ]; then
+          SAN="$${SAN},DNS:$${PUBLIC_HOSTNAME}"
+        fi
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
           -keyout /certs/server.key -out /certs/server.crt \
           -subj "/CN=opennvr-ui" \
@@ -931,6 +941,7 @@ services:
         echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
     environment:
       - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
+      - PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-}
     volumes:
       - ./nginx-certs:/certs
 
@@ -958,7 +969,9 @@ services:
     # the default), or the web UI alone on 443 (off). A render that fails
     # `nginx -t` falls back to "off" by itself. Run here rather than from
     # /docker-entrypoint.d so the mounted script needs no exec bit.
-    entrypoint: ["/bin/sh", "-c", "/bin/sh /opt/opennvr-nginx/15-opennvr-layout.sh; exec /docker-entrypoint.sh \"$$@\"", "--"]
+    # The cert watcher (nginx/20-opennvr-cert-watch.sh) reloads nginx when
+    # the `acme` service installs a new certificate.
+    entrypoint: ["/bin/sh", "-c", "/bin/sh /opt/opennvr-nginx/15-opennvr-layout.sh; /bin/sh /opt/opennvr-nginx/20-opennvr-cert-watch.sh & exec /docker-entrypoint.sh \"$$@\"", "--"]
     command: ["nginx", "-g", "daemon off;"]
     environment:
       - NGINX_SINGLE_PORT_WEBRTC=${NGINX_SINGLE_PORT_WEBRTC:-on}
@@ -966,6 +979,9 @@ services:
     volumes:
       - ./nginx-certs:/etc/nginx/certs:ro
       - ./nginx:/opt/opennvr-nginx:ro
+      # Let's Encrypt HTTP-01 tokens, written by the `acme` service and
+      # served on port 80 under /.well-known/acme-challenge/.
+      - ./data/acme-webroot:/var/www/acme:ro
     networks:
       - opennvr_internal
     healthcheck:
@@ -978,6 +994,36 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+
+  # Built-in Let's Encrypt for an internet-facing site (cloud install).
+  # Profile "acme": the launchers add it when PUBLIC_HOSTNAME is set in .env
+  # (and ACME_DISABLE is not). HTTP-01 through nginx's port 80, so the only
+  # requirements are PUBLIC_HOSTNAME resolving to this site and port 80
+  # forwarded. Renews twice a day when due; nginx reloads by itself.
+  # Air-gapped sites leave PUBLIC_HOSTNAME unset and keep the self-signed
+  # certificate. See scripts/acme/acme-loop.sh.
+  acme:
+    image: goacme/lego:v5.7.0
+    container_name: opennvr_acme
+    logging: *svc-logs
+    profiles: [acme]
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/opennvr-acme/acme-loop.sh"]
+    environment:
+      - PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-}
+      - ACME_EMAIL=${ACME_EMAIL:-}
+      - ACME_SERVER=${ACME_SERVER:-}
+      - ACME_DISABLE=${ACME_DISABLE:-}
+    volumes:
+      - ./scripts/acme:/opt/opennvr-acme:ro
+      - ./data/acme:/acme
+      - ./data/acme-webroot:/webroot
+      - ./nginx-certs:/nginx-certs
+    depends_on:
+      nginx:
+        condition: service_healthy
+    networks:
+      - opennvr_internal
 
 # ==========================================
 # Networks
