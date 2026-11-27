@@ -20,14 +20,21 @@ camera ──RTSP──▶ opennvr-host site ──TLS 443 (ALPN opennvr-rtsps)�
 ## Add a site
 
 1. **Administration → Sites → Add site.** Name it; you get a one-time code (15 minutes, single use) and the command to run at the site.
-2. **At the site**, on any machine that can reach the cameras (a Linux box, a Raspberry Pi, a Windows PC), install `ffmpeg` and the `opennvr-host` binary (the same one as the host agent; the server ships it under `/opt/opennvr-host/<os>-<arch>/` in the core image). Run the command from step 1:
+2. **At the site**, on any machine that can reach the cameras (a Linux box, a Raspberry Pi, a Windows PC, a Mac), install `ffmpeg`, then run the three commands the dialog shows for that machine's OS: download the agent, enrol it, start it. On Linux or macOS they look like:
 
-   ```
-   opennvr-host enrol -pin sha256/… https://nvr.example.com ABCDE-FGHJK
+   ```sh
+   (curl -fso opennvr-host "https://nvr.example.com/api/v1/site-agent/download/$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+     || curl -fsSko opennvr-host --pinnedpubkey "sha256//…" "…same URL…") && chmod +x opennvr-host
+   ./opennvr-host enrol -pin sha256/… https://nvr.example.com ABCDE-FGHJK
+   ./opennvr-host site
    ```
 
-   The `-pin` is the server certificate's fingerprint, as the Sites page shows it. If you leave it out and the server's certificate is self-signed, `enrol` refuses and prints the fingerprint it saw: compare it with the Sites page before using it.
-3. **Start the agent**: `opennvr-host site`, or as a service:
+   **Getting the agent.** The server serves the build it ships (`/api/v1/site-agent/download/<os>-<arch>`, `<os>` = `linux`, `darwin` or `windows`, `<arch>` = `amd64` or `arm64`; `GET /api/v1/site-agent/download` lists them with their SHA-256), so the agent always matches the server's version and the site needs nothing but the server. The download first trusts the normal certificate chain; if the server's certificate is self-signed, the second `curl` accepts it only if its key matches the pin (curl checks `--pinnedpubkey` even with `-k`). The dialog also has plain download links, to fetch the file in a browser and copy it over. On Windows the download is a console build, so `enrol` prints its result in the terminal.
+
+   The same builds are attached to every [GitHub release](https://github.com/open-nvr/open-nvr/releases) (`opennvr-host-<os>-<arch>`, plus `SHA256SUMS`), with a build provenance attestation: `gh attestation verify opennvr-host-linux-amd64 -R open-nvr/open-nvr`. Use the release that matches your server's version.
+
+   **Enrolling.** The `-pin` is the server certificate's fingerprint, as the Sites page shows it. If you leave it out and the server's certificate is self-signed, `enrol` refuses and prints the fingerprint it saw: compare it with the Sites page before using it.
+3. **Keep it running** as a service, so it starts again after a reboot:
    - Linux (systemd): `host-agent/packaging/opennvr-site.service`, steps in its header. Logs: `journalctl -u opennvr-site -f`.
    - Windows: a scheduled task that runs `opennvr-host site` at startup as SYSTEM, with the config under `C:\ProgramData\opennvr-site\config.json` (`enrol -config` and `site -config`).
 4. Back on the Sites page the site turns **Online**. Cameras the agent finds by ONVIF on the site's network are listed: click one, enter its stream URL (as the camera serves it on the site's LAN, without credentials) and its user and password. Or add one by hand with **Camera**.

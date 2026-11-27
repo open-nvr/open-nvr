@@ -91,13 +91,22 @@ def _site_or_404(db: Session, site_id: int) -> Site:
     return site
 
 
+def _enrol_host(request: Request) -> str:
+    return svc.ingest_target(request.headers.get("host"))["host"] or "<this-server>"
+
+
 def _enrol_command(request: Request, code: str) -> str:
-    host = svc.ingest_target(request.headers.get("host"))["host"] or "<this-server>"
     pin = svc.server_pin()
     # The pin lets a self-signed server be trusted from the first call;
     # with a Let's Encrypt certificate it is harmless (the chain verifies).
     pin_arg = f"-pin {pin} " if pin else ""
-    return f"opennvr-host enrol {pin_arg}https://{host} {code}"
+    return f"opennvr-host enrol {pin_arg}https://{_enrol_host(request)} {code}"
+
+
+def _enrol_answer(request: Request, code: str, expires) -> dict:
+    return {"enrol_code": code, "enrol_expires_at": expires,
+            "enrol_command": _enrol_command(request, code),
+            "setup": svc.setup_commands(_enrol_host(request), code, svc.server_pin())}
 
 
 @router.get("")
@@ -118,8 +127,7 @@ def create_site(
     site, code, expires = svc.create_site(db, body.name, user.id)
     audit_request(db, request, action="site.create", user_id=user.id,
                   entity_type="site", entity_id=site.id, details={"name": site.name})
-    return {**svc.public_view(db, site), "enrol_code": code, "enrol_expires_at": expires,
-            "enrol_command": _enrol_command(request, code)}
+    return {**svc.public_view(db, site), **_enrol_answer(request, code, expires)}
 
 
 @router.get("/{site_id}")
@@ -161,8 +169,7 @@ def new_enrol_code(
     code, expires = svc.issue_enrol_code(db, site)
     audit_request(db, request, action="site.enrol_code", user_id=user.id,
                   entity_type="site", entity_id=site.id)
-    return {"enrol_code": code, "enrol_expires_at": expires,
-            "enrol_command": _enrol_command(request, code)}
+    return _enrol_answer(request, code, expires)
 
 
 @router.delete("/{site_id}/credential")
@@ -322,6 +329,33 @@ def _agent_answer(db: Session, site: Site, request: Request) -> dict:
         "poll_after_s": 5,
         "wait_max_s": svc.WAIT_MAX_S,
     }
+
+
+#: Agent downloads per client address per minute: one machine fetches one
+#: build; this only stops a loop pulling ~15 MB files from the server.
+DOWNLOADS_PER_MINUTE = 10
+
+
+@agent_router.get("/download")
+def list_downloads():
+    """The agent builds this server ships (the same ones its own updates
+    carry), with SHA-256 sums. Public: the agent is open source, and the
+    site machine has no credential before it enrols."""
+    return {"build": svc.agent_build(), "files": svc.agent_downloads()}
+
+
+@agent_router.get("/download/{platform}")
+def download_agent(platform: str, request: Request):
+    from fastapi.responses import FileResponse
+
+    found = svc.agent_binary(platform)
+    if found is None:
+        raise _not_found()
+    if _rate_limited(f"download:{get_client_ip(request)}", DOWNLOADS_PER_MINUTE):
+        raise HTTPException(status_code=429, detail="Too many requests; slow down")
+    path, name = found
+    return FileResponse(path, filename=name, media_type="application/octet-stream",
+                        headers={"Cache-Control": "no-store"})
 
 
 @agent_router.post("/enrol")

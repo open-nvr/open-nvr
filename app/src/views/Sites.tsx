@@ -20,8 +20,9 @@ import { Badge, Button, EmptyState } from '../components/ui'
 import { Field, Input } from '../components/ui/form'
 import { PageTitleBar } from '../components/ui/layout'
 import { Modal } from '../components/Modal'
+import { SegmentedControl } from '../components/ui/SegmentedControl'
 import {
-  cameraRelayState, siteService, siteStatus, suggestedRtspUrl,
+  AGENT_DOWNLOADS, cameraRelayState, siteService, siteStatus, suggestedRtspUrl,
   type DiscoveredDevice, type EnrolCode, type Site,
 } from '../services/siteService'
 
@@ -51,23 +52,56 @@ function CopyBox({ text, label }: { text: string; label: string }) {
 
 function EnrolDialog({ site, code, onClose }: { site: Site; code: EnrolCode; onClose: () => void }) {
   const expires = new Date(code.enrol_expires_at)
+  const setups = code.setup ?? []
+  const [os, setOs] = useState<string>(() =>
+    /windows/i.test(navigator.userAgent) ? 'windows' : 'linux')
+  const setup = setups.find((s) => s.os === os) ?? setups[0]
+  // Same origin as this page: the SPA is served by the server it talks to.
+  const base = '/api/v1/site-agent/download/'
   return (
     <Modal open title={`Enrol the agent at "${site.name}"`} onClose={onClose}>
       <div className="space-y-3 text-sm">
         <p>
           On a machine at the site that can reach its cameras (a small Linux box, a Raspberry Pi, a
-          Windows PC), install the OpenNVR host agent and ffmpeg, then run:
+          Windows PC), with <b>ffmpeg</b> installed:
         </p>
-        <CopyBox text={code.enrol_command} label="the enrol command" />
+        {setup ? (
+          <>
+            <SegmentedControl
+              label="Operating system of the site machine"
+              options={setups.map((s) => ({ value: s.os, label: s.label }))}
+              value={setup.os}
+              onChange={setOs}
+            />
+            <p className="font-medium">1. Download the agent from this server</p>
+            <CopyBox text={setup.download} label="the download command" />
+            <p className="font-medium">2. Enrol it</p>
+            <CopyBox text={setup.enrol} label="the enrol command" />
+            <p className="font-medium">3. Start it</p>
+            <CopyBox text={setup.run} label="the start command" />
+          </>
+        ) : (
+          <CopyBox text={code.enrol_command} label="the enrol command" />
+        )}
         <p className="text-[var(--text-dim)]">
-          The code <b>{code.enrol_code}</b> works once, until {expires.toLocaleTimeString()}. Then start the
-          agent with <code>opennvr-host site</code> (or as a service, see the docs). It only dials out, on
+          The code <b>{code.enrol_code}</b> works once, until {expires.toLocaleTimeString()}. To keep the
+          agent running after a reboot, install it as a service (see the docs). It only dials out, on
           port 443: the site needs no port forwarded.
+        </p>
+        <p className="text-[var(--text-dim)]">
+          Or download it here and copy it over:{' '}
+          {AGENT_DOWNLOADS.map((d, i) => (
+            <span key={d.platform}>
+              {i > 0 && ' · '}
+              <a className="underline" href={base + d.platform} download>{d.label}</a>
+            </span>
+          ))}
+          . Releases on GitHub carry the same builds.
         </p>
         {site.server_pin && (
           <p className="text-[var(--text-dim)]">
-            The <code>-pin</code> is this server's certificate fingerprint ({site.server_pin.slice(0, 18)}…). It
-            lets the agent trust this server even with its self-signed certificate.
+            The pin ({site.server_pin.slice(0, 18)}…) is this server's certificate fingerprint. It lets
+            the download and the agent trust this server even with its self-signed certificate.
           </p>
         )}
       </div>
