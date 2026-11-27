@@ -1605,15 +1605,25 @@ class MediaMtxAdminService:
             # pulling from the camera forever after every delete or re-path.
             from services.stream_service import substream_name
 
+            sub_http_status = None
             try:
-                await client.delete(
+                sub_resp = await client.delete(
                     MediaMtxAdminService._base()
                     + f"/config/paths/delete/{substream_name(name)}",
                     headers=MediaMtxAdminService._headers(),
                 )
+                sub_http_status = sub_resp.status_code
             except Exception:  # pragma: no cover - best effort
                 pass
-        return MediaMtxAdminService._to_result(name, resp)
+        result = MediaMtxAdminService._to_result(name, resp)
+        # Only MediaMTX's own "path configuration not found" 404 means the path
+        # is already gone (#926). Any other 404 (wrong base URL, other MediaMTX
+        # version) stays an error. The sub delete is best-effort and does not
+        # change the main status; its HTTP status is recorded for the audit.
+        if resp.status_code == 404 and "path configuration not found" in resp.text.lower():
+            result["status"] = "ok"
+        result["sub_http_status"] = sub_http_status
+        return result
 
     @staticmethod
     async def restart_recording_paths(
