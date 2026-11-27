@@ -70,6 +70,11 @@ _OPEN_API_PREFIXES = (
     # Signed media URLs (HA-112): the signature is the credential, names one
     # resource, expires, and the signer's access is re-checked per fetch.
     "/api/v1/media/s/",
+    # A site agent at another site (issue #925, cloud ingest) is a service,
+    # not a browser to approve: its site credential (or, to enrol, a
+    # one-time code) is checked on every route, which answers 404 to
+    # anything else.
+    "/api/v1/site-agent/",
 )
 
 

@@ -390,6 +390,18 @@ class Camera(Base):
     # Foreign keys
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
 
+    # A camera at another site, pushed to this server by that site's agent
+    # (issue #925, cloud ingest). The camera itself is a publisher
+    # (source_type "publisher", ip_address the 0.0.0.0 placeholder): core
+    # never dials site_lan_host, which is the camera's address on the site's
+    # LAN, only the agent there does. site_main_url / site_sub_url are the
+    # camera's RTSP URLs on that LAN without credentials; username and
+    # encrypted_password above hold those, as for any camera.
+    site_id = Column(Integer, ForeignKey("sites.id", ondelete="RESTRICT"), nullable=True, index=True)
+    site_lan_host = Column(String(255), nullable=True)
+    site_main_url = Column(String(500), nullable=True)
+    site_sub_url = Column(String(500), nullable=True)
+
     # Relationships
     owner = relationship("User", back_populates="cameras")
     recordings = relationship("Recording", back_populates="camera")
@@ -408,6 +420,43 @@ class Camera(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+
+
+class Site(Base):
+    """A remote site whose cameras reach this server through a site agent
+    (issue #925, cloud ingest). The agent enrols once with a one-time code
+    and then holds a long-lived credential; only hashes of either are kept.
+
+    The agent dials out (HTTPS for control, RTSP over TLS on 443 for video),
+    so the site needs no port forwarded and core never dials into it."""
+
+    __tablename__ = "sites"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # One-time enrolment code (sha256 hex), single use, short-lived.
+    enrol_code_hash = Column(String(64), nullable=True, index=True)
+    enrol_expires_at = Column(DateTime(timezone=True), nullable=True)
+    enrolled_at = Column(DateTime(timezone=True), nullable=True)
+
+    # The agent's credential: sha256 hex of its secret, and a short prefix
+    # to tell credentials apart in the UI and the audit log.
+    credential_hash = Column(String(64), nullable=True)
+    credential_prefix = Column(String(16), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    # What the agent last reported.
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    last_ip = Column(String(45), nullable=True)
+    agent_version = Column(String(100), nullable=True)
+    report = Column(Text, nullable=True)  # JSON: hostname, os, publishers, onvif scan
+
+    # Bandwidth (used by the agent; see the plan's C6).
+    uplink_cap_kbps = Column(Integer, nullable=True)
+    live_policy = Column(String(20), nullable=False, default="always", server_default="always")
 
 
 class CameraPermission(Base):
