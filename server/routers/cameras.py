@@ -450,7 +450,8 @@ async def create_camera_checked(
     the owner-wide IP check here would refuse every channel of an NVR after
     the first, as they all share its address.
     """
-    _log_camera_creation_start(current_user.id, camera_create, request)
+    owner_id = current_user.id
+    _log_camera_creation_start(owner_id, camera_create, request)
 
     # A webcam (core/camera_source.py) has no address: nothing below dials
     # anything for it (the schema refused credentials and URLs), and every
@@ -504,6 +505,17 @@ async def create_camera_checked(
     # being used as someone else's port scanner, or as an out-of-band
     # beacon to a host they control.
     _reject_external_camera_hosts(camera_create)
+
+    # Probes (resolve_source, fetch_identity, sync_camera_time, substream discovery)
+    # can block on unreachable cameras past Postgres's 60s idle_in_transaction_session_timeout.
+    # Release the auth dependency's open read transaction and pool slot before touching the
+    # network; owner_id is cached above because release() expunges ORM instances.
+    will_probe = bool(
+        (camera_create.username and camera_create.password and (not camera_create.rtsp_url or probe))
+        or (probe and camera_create.rtsp_url and not camera_create.substream_url)
+    )
+    if will_probe:
+        release(db)
 
     # Referenced after creation regardless of the credentials branch below —
     # without these initializers a credential-less create crashed with
@@ -655,7 +667,7 @@ async def create_camera_checked(
     # the final URL is what's matched. 409 carries the matches so the client
     # can show "already added — add anyway?" and retry with ?force=true.
     duplicates = _find_duplicate_cameras(
-        db, current_user.id, camera_create.ip_address, camera_create.rtsp_url
+        db, owner_id, camera_create.ip_address, camera_create.rtsp_url
     ) if duplicate_check else []
     if duplicates and not force:
         raise HTTPException(
@@ -682,12 +694,12 @@ async def create_camera_checked(
 
     try:
         cam = await CameraService.create_camera(
-            db=db, camera_create=camera_create, owner_id=current_user.id
+            db=db, camera_create=camera_create, owner_id=owner_id
         )
 
         if duplicates:
             # User explicitly confirmed past the duplicate warning.
-            _record_forced_duplicate_audit(db, current_user.id, cam, duplicates, request)
+            _record_forced_duplicate_audit(db, owner_id, cam, duplicates, request)
 
         # Persist the ONVIF control endpoint discovered above (Hikvision http:80,
         # Secureye/Tiandy http:8088, TLS-only devices https:…) so the driver
@@ -701,10 +713,10 @@ async def create_camera_checked(
             db.commit()
             db.refresh(cam)
 
-        _log_camera_creation_success(current_user.id, cam, request)
-        _record_audit_log(db, current_user.id, cam, request)
+        _log_camera_creation_success(owner_id, cam, request)
+        _record_audit_log(db, owner_id, cam, request)
         if not webcam:
-            _check_duplicate_ips(db, current_user.id, cam)
+            _check_duplicate_ips(db, owner_id, cam)
 
         # Helper to construct response with computed fields
         # Ideally this should be in a schema converter or helper
@@ -736,7 +748,7 @@ async def create_camera_checked(
         camera_logger.error(
             f"Failed to create camera: {camera_create.name}",
             extra={
-                "user_id": current_user.id,
+                "user_id": owner_id,
                 "camera_data": camera_create.model_dump(exclude={"password"}),
                 "ip_address": request.client.host
                 if request and request.client
