@@ -372,3 +372,128 @@ async def test_a_change_wakes_the_waiter():
     assert await asyncio.wait_for(waiter, 2) is True
     ev = svc.arm(4242)
     assert await svc.wait(ev, timeout=0.05) is False
+
+
+# ── server pin ─────────────────────────────────────────────────────────
+
+
+def _self_signed(path):
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "opennvr-ui")])
+    now = _dt.datetime.now(_dt.UTC)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(1)
+            .not_valid_before(now).not_valid_after(now + _dt.timedelta(days=1))
+            .sign(key, hashes.SHA256()))
+    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return key
+
+
+def test_the_enrol_command_carries_the_servers_pin(env, monkeypatch, tmp_path):
+    import base64
+    import hashlib
+
+    from cryptography.hazmat.primitives import serialization
+
+    cert = tmp_path / "server.crt"
+    key = _self_signed(cert)
+    monkeypatch.setenv("NGINX_CERT_PATH", str(cert))
+    spki = key.public_key().public_bytes(serialization.Encoding.DER,
+                                         serialization.PublicFormat.SubjectPublicKeyInfo)
+    want = "sha256/" + base64.b64encode(hashlib.sha256(spki).digest()).decode()
+    assert svc.server_pin() == want
+    site = _create(env)
+    assert f"-pin {want} https://nvr.example.com " in site["enrol_command"]
+    assert site["server_pin"] == want
+
+
+def test_no_readable_certificate_no_pin(env, monkeypatch, tmp_path):
+    monkeypatch.setenv("NGINX_CERT_PATH", str(tmp_path / "missing.crt"))
+    site = _create(env)
+    assert site["server_pin"] is None and "-pin" not in site["enrol_command"]
+
+
+# ── agent downloads ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def agent_dir(tmp_path, monkeypatch):
+    for rel, body in (("linux-amd64/opennvr-host", b"linux-bin"),
+                      ("linux-arm64/opennvr-host", b"pi-bin"),
+                      ("windows-amd64/opennvr-host.exe", b"gui-bin"),
+                      ("windows-amd64/console/opennvr-host.exe", b"console-bin"),
+                      ("windows-arm64/opennvr-host.exe", b"old-gui-only")):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(body)
+    (tmp_path / "BUILD").write_text("0.1.12+abc1234\n")
+    monkeypatch.setenv("OPENNVR_HOST_AGENT_DIR", str(tmp_path))
+    svc._sum_cache.clear()
+    return tmp_path
+
+
+def test_the_agent_downloads_without_a_login(env, agent_dir):
+    env.current["user"] = None  # the site machine has no credential yet
+    r = env.tc.get("/api/v1/site-agent/download/linux-arm64")
+    assert r.status_code == 200 and r.content == b"pi-bin"
+    assert 'filename="opennvr-host"' in r.headers["content-disposition"]
+
+
+def test_windows_gets_the_console_build(env, agent_dir):
+    r = env.tc.get("/api/v1/site-agent/download/windows-amd64")
+    assert r.content == b"console-bin"
+    assert 'filename="opennvr-host.exe"' in r.headers["content-disposition"]
+    # An image without the console build still serves what it has.
+    assert env.tc.get("/api/v1/site-agent/download/windows-arm64").content == b"old-gui-only"
+
+
+def test_unknown_or_missing_platforms_are_404(env, agent_dir):
+    for p in ("darwin-arm64", "linux-mips", "..%2F..%2Fetc%2Fpasswd", "BUILD"):
+        assert env.tc.get(f"/api/v1/site-agent/download/{p}").status_code == 404, p
+
+
+def test_the_listing_carries_sums_and_the_build(env, agent_dir):
+    import hashlib
+
+    body = env.tc.get("/api/v1/site-agent/download").json()
+    assert body["build"] == "0.1.12+abc1234"
+    files = {f["platform"]: f for f in body["files"]}
+    assert set(files) == {"linux-amd64", "linux-arm64", "windows-amd64", "windows-arm64"}
+    assert files["windows-amd64"]["sha256"] == hashlib.sha256(b"console-bin").hexdigest()
+    assert files["linux-amd64"]["size"] == len(b"linux-bin")
+
+
+def test_downloads_are_rate_limited(env, agent_dir):
+    codes = [env.tc.get("/api/v1/site-agent/download/linux-amd64").status_code for _ in range(12)]
+    assert codes[:10] == [200] * 10 and codes[-1] == 429
+
+
+def test_setup_commands_fetch_from_this_server_with_the_pin(env, agent_dir, monkeypatch):
+    monkeypatch.setattr(svc, "server_pin", lambda: "sha256/AbC+/=")
+    site = _create(env)
+    setup = {s["os"]: s for s in site["setup"]}
+    linux, win = setup["linux"], setup["windows"]
+    base = "https://nvr.example.com/api/v1/site-agent/download/"
+    assert base + "$(uname -s" in linux["download"]
+    # Chain first, then the pinned key; curl's pin format has two slashes.
+    assert linux["download"].index("curl -fso") < linux["download"].index('--pinnedpubkey "sha256//AbC+/="')
+    assert linux["download"].endswith("&& chmod +x opennvr-host")
+    assert linux["enrol"] == f"./opennvr-host enrol -pin sha256/AbC+/= https://nvr.example.com {site['enrol_code']}"
+    assert base + "windows-$($env:PROCESSOR_ARCHITECTURE.ToLower())" in win["download"]
+    assert "$LASTEXITCODE" in win["download"] and win["enrol"].startswith(".\opennvr-host.exe enrol -pin ")
+    # A fresh code carries fresh commands.
+    again = env.tc.post(f"/api/v1/sites/{site['id']}/enrol-code").json()
+    assert again["enrol_code"] in again["setup"][0]["enrol"]
+
+
+def test_setup_without_a_pin_trusts_the_chain_only(env, monkeypatch):
+    monkeypatch.setattr(svc, "server_pin", lambda: None)
+    site = _create(env)
+    for s in site["setup"]:
+        assert "pinnedpubkey" not in s["download"] and "-k" not in s["download"].split()
+        assert " -pin " not in s["enrol"]

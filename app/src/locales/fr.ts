@@ -24,6 +24,8 @@ export const translations: TranslationCatalog = {
   'nav.configuration': 'Configuration',
   'nav.mediaServerConfig': 'Configuration du serveur média',
   'nav.integrations': 'Intégrations',
+  'nav.sites': 'Sites',
+  'sites.description': 'Caméras d’autres lieux, relayées ici par un agent sur chaque site via le port 443',
   'nav.cloud': 'Cloud',
   'nav.firmware': 'Firmware',
   'nav.support': 'Support',

@@ -1,0 +1,135 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+#
+# The host agent (opennvr-host, docs/SITE_AGENT.md) as GitHub release assets,
+# for people who set up a site agent from GitHub rather than from their
+# server's own download route (/api/v1/site-agent/download/<os>-<arch>).
+#
+# The binaries are not built here: they are copied out of the published,
+# signed core image of the same commit (Dockerfile stage 1b puts them in
+# /opt/opennvr-host), so a release asset is byte for byte what that
+# version's server serves. The image's signature is verified first, then
+# the assets get SHA256SUMS and a build provenance attestation:
+#   gh attestation verify opennvr-host-linux-amd64 -R open-nvr/open-nvr
+#
+# Triggered on:
+#   - publish-images finishing for a v* tag: attached to that release (a
+#     draft is created if release-manifest has not made it yet);
+#   - publish-images finishing for main: attached to the rolling `edge`
+#     pre-release, replacing the previous main build's;
+#   - workflow_dispatch with a tag: backfill or re-run.
+
+name: release-agent
+
+on:
+  workflow_run:
+    workflows: [publish-images]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.1.13"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-agent-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  attach:
+    name: attach opennvr-host builds
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       (startsWith(github.event.workflow_run.head_branch, 'v') ||
+        github.event.workflow_run.head_branch == 'main'))
+    permissions:
+      contents: write      # upload the release assets
+      id-token: write      # sign the attestation (Sigstore keyless)
+      attestations: write  # store it
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REF: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
+
+      - name: Which release, which image
+        id: target
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [ "$REF" = main ]; then release=edge; else release="$REF"; fi
+          # publish-images tags every push sha-<7 chars>: the exact commit,
+          # never a moving tag.
+          echo "image=ghcr.io/open-nvr/core:sha-${sha:0:7}" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/install-cosign
+
+      - name: Copy the agent out of the verified core image
+        env:
+          IMAGE: ${{ steps.target.outputs.image }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker pull --quiet "$IMAGE"
+          digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")"
+          cosign verify --output text \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github.com/open-nvr/' "$digest" >/dev/null
+          rev="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")"
+          [ "$rev" = "$SHA" ] || { echo "::error::$IMAGE is revision $rev, expected $SHA"; exit 1; }
+          cid="$(docker create "$IMAGE")"
+          docker cp "$cid:/opt/opennvr-host" ./agent
+          docker rm "$cid" >/dev/null
+          mkdir assets
+          for d in agent/*-*/; do
+            p="$(basename "$d")"
+            case "$p" in
+              windows-*)
+                # The console build: what a person runs from a terminal.
+                src="agent/$p/console/opennvr-host.exe"
+                [ -f "$src" ] || src="agent/$p/opennvr-host.exe"
+                cp "$src" "assets/opennvr-host-$p.exe" ;;
+              *) cp "agent/$p/opennvr-host" "assets/opennvr-host-$p" ;;
+            esac
+          done
+          (cd assets && sha256sum opennvr-host-* > SHA256SUMS)
+          cat assets/SHA256SUMS
+          {
+            echo "### opennvr-host $(cat agent/BUILD) from \`$digest\`"
+            echo '```'; cat assets/SHA256SUMS; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: assets/opennvr-host-*
+
+      - name: Attach to the release
+        env:
+          RELEASE: ${{ steps.target.outputs.release }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE" >/dev/null 2>&1; then
+            # Same as release-manifest: a draft for a tag (publishing stays a
+            # person's decision), the rolling pre-release for main. Either
+            # workflow may get here first; losing that race is fine.
+            if [ "$RELEASE" = edge ]; then
+              gh release create edge --prerelease --title "Edge (main)" --target main \
+                --notes "The newest main build, for test sites only: ./start.sh update --channel edge" || true
+            else
+              gh release create "$RELEASE" --draft --verify-tag --title "$RELEASE" \
+                --notes "See CHANGELOG.md. Signed update manifest attached. Questions or feedback: https://opennvr.org/discord or https://github.com/open-nvr/open-nvr/discussions" || true
+            fi
+            gh release view "$RELEASE" >/dev/null
+          fi
+          gh release upload "$RELEASE" assets/* --clobber
+          echo "attached $(ls assets | wc -l) files to $RELEASE" >> "$GITHUB_STEP_SUMMARY"

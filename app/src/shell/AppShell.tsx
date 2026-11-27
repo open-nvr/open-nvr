@@ -112,6 +112,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/settings', label: 'Configuration', icon: <SettingsIcon size={16} />, perm: '/settings' },
       { to: '/updates', label: 'Media Server Config', icon: <RefreshCcw size={16} />, perm: '/updates' },
       { to: '/integrations', label: 'Integrations', icon: <Plug size={16} />, perm: '/integrations' },
+      { to: '/sites', label: 'Sites', icon: <Globe size={16} />, perm: '/sites' },
       { to: '/cloud', label: 'Cloud', icon: <Cloud size={16} />, perm: '/cloud' },
       { to: '/firmware', label: 'Firmware', icon: <Cpu size={16} />, perm: '/firmware' },
       { to: '/support', label: 'Support', icon: <LifeBuoy size={16} />, perm: '/support' },
@@ -127,7 +128,7 @@ const NAV_LABEL_KEYS: Record<string, string> = {
   Network: 'nav.network', 'Logs & Forensics': 'nav.logsForensics', Governance: 'nav.governance', 'Audit Logs': 'nav.auditLogs',
   'Compliance & Reports': 'nav.complianceReports', 'Alerts & Incidents': 'nav.alertsIncidents', 'Access Control (RBAC)': 'nav.accessControl',
   'Customer Keys (BYOK)': 'nav.customerKeys', Administration: 'nav.administration', Configuration: 'nav.configuration',
-  'Media Server Config': 'nav.mediaServerConfig', Integrations: 'nav.integrations', Cloud: 'nav.cloud', Firmware: 'nav.firmware',
+  'Media Server Config': 'nav.mediaServerConfig', Integrations: 'nav.integrations', Sites: 'nav.sites', Cloud: 'nav.cloud', Firmware: 'nav.firmware',
   Support: 'nav.support', Applications: 'nav.applications', 'App Catalog': 'nav.appCatalog',
 }
 
