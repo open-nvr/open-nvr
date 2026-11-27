@@ -33,7 +33,7 @@ type Settings = {
 
 /** GET /webrtc/advertised: what MediaMTX tells viewers to connect to. */
 type Advertised = {
-  hosts: Array<{ host: string; source: 'admin' | 'stun' | 'env' }>
+  hosts: Array<{ host: string; source: 'admin' | 'stun' | 'env' | 'host' | 'placeholder' }>
   ice_port: number
   public_ice_port: number
 }
