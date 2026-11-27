@@ -222,6 +222,19 @@ jobs:
         working-directory: examples/${{ matrix.example }}
         run: uv run opennvr-app validate .
 
+  # ── nginx layout (WebRTC over 443) ────────────────────────────────
+  # The layout script picks nginx's config at every container start, in the
+  # image compose uses; a render that fails `nginx -t` must fall back to the
+  # direct layout or a live site loses its web UI. Renders both layouts and
+  # a deliberately broken one.
+  nginx-layout:
+    name: nginx layout (nginx -t, fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render and test both layouts
+        run: bash tests/host-hardening/test_nginx_layout.sh
+
   # ── React frontend build ─────────────────────────────────────────
   frontend:
     name: frontend (build)

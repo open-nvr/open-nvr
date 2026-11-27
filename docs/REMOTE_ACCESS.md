@@ -1,13 +1,24 @@
 # Reaching OpenNVR from outside
 
-To use OpenNVR from outside the site's network, the router in front of the server must forward two things:
+To use OpenNVR from outside the site's network, forward TCP `443` to the server. That alone gives viewers on the internet real-time video too. Forwarding the media port as well gives the lowest latency, and Home Assistant needs it:
 
 | Port | What it carries | Without it |
 |---|---|---|
-| TCP `443` | The web UI, the API, and the request that starts each video session | Nothing works from outside |
-| UDP `8189` (and TCP `8189`) | Real-time video: WebRTC live view, browser webcams, Home Assistant | See below |
+| TCP `443` | The web UI, the API, and WebRTC live view over TCP for viewers who reach the server's public address | Nothing works from outside |
+| UDP `8189` (and TCP `8189`) | Real-time video over UDP (lowest latency), browser webcams, Home Assistant | See below |
 
 If the ICE port is changed in `.env` (`WEBRTC_ICE_PORT`), forward that port instead.
+
+### WebRTC over 443
+
+nginx reads the first bytes of every connection on 443. A TLS handshake goes to the web UI; anything else is a browser's WebRTC connection check and goes to the media server. The player offers the page's own address and port as a candidate, so a browser that loaded the page can carry live video the same way.
+
+Two limits come from the browsers, not from OpenNVR:
+
+- Chrome and Edge refuse a WebRTC candidate on port 80 or 443 at a **private** address (10.x, 172.16-31.x, 192.168.x, and the 100.64.x range Tailscale uses). On the LAN or over a VPN, live view uses UDP/TCP `8189`, which is normally open there. A VPN that lets only 443 through gets HLS.
+- A firewall that inspects traffic and allows only real TLS on 443 (some corporate gateways) drops the WebRTC connection. Those viewers get HLS too.
+
+To turn it off and serve only the web UI on 443, set `NGINX_SINGLE_PORT_WEBRTC=off` in `.env` and run `./start.sh up`.
 
 ## What happens without the media port
 
@@ -33,7 +44,7 @@ So a browser webcam that published fine from home Wi-Fi and fails from a hotspot
 
 Only one server can receive a given public port. If two OpenNVR servers share a public IP, forward a different external port to the second one. For example, forward external `8190` to `8189` on the second server. Then set *Public media port* to `8190` in that server's Settings → WebRTC, so browsers are told to use it.
 
-The web UI can share 443 through a reverse proxy that routes by host name. The media port can't, because WebRTC media carries no host name.
+The web UI can share 443 through a reverse proxy that routes by host name. The media port can't, because WebRTC media carries no host name. The same goes for WebRTC over 443: the proxy can pass non-TLS connections on 443 to one of the servers only. The other one uses its own media port.
 
 ## Checking from the server
 

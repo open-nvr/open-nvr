@@ -208,8 +208,10 @@ class Settings(BaseSettings):
     # candidate, so it must match WEBRTC_ICE_PORT in compose.
     webrtc_ice_port: int = 8189
     # nginx also hands non-TLS connections on the HTTPS port to MediaMTX's
-    # ICE-TCP listener (NGINX_SINGLE_PORT_WEBRTC); the player then adds the
-    # page's own host:port as a TCP candidate. Off until that nginx layout ships.
+    # ICE-TCP listener (NGINX_SINGLE_PORT_WEBRTC, nginx/stream.conf.template);
+    # the player then adds the page's own host:port as a TCP candidate.
+    # Compose sets it from the same switch (on by default); False here is for
+    # a core run without the stock nginx in front.
     webrtc_single_port: bool = False
     #: Optional comma-separated allowlist of hosts an integration webhook
     #: may POST to (e.g. "hooks.slack.com,ntfy.local"). Empty = no

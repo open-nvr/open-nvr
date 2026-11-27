@@ -679,6 +679,11 @@ services:
       # The ICE media port as published on the host (the mediamtx service
       # above): the player adds the page's own address on this port.
       - WEBRTC_ICE_PORT=${WEBRTC_ICE_PORT:-8189}
+      # nginx carries WebRTC media on 443 too (its own NGINX_SINGLE_PORT_WEBRTC
+      # below); the player then offers the page's host:port as a candidate.
+      # If nginx fell back to the direct layout that candidate just never
+      # answers, and the others still do.
+      - WEBRTC_SINGLE_PORT=${NGINX_SINGLE_PORT_WEBRTC:-on}
       - KAI_C_URL=http://127.0.0.1:8100
       # Duplicate-sighting dedup for plate reads: a fragmented track
       # (moving camera, occlusion) re-reads the car just read; the same
@@ -948,9 +953,19 @@ services:
       # (e.g. a management VLAN). Default 0.0.0.0 for LAN reachability.
       - "${NGINX_BIND_HOST:-0.0.0.0}:${NGINX_HOST_HTTPS_PORT:-443}:443"
       - "${NGINX_BIND_HOST:-0.0.0.0}:${NGINX_HOST_HTTP_PORT:-80}:80"
+    # The layout is picked at each start (nginx/15-opennvr-layout.sh):
+    # WebRTC media over 443 next to the web UI (NGINX_SINGLE_PORT_WEBRTC=on,
+    # the default), or the web UI alone on 443 (off). A render that fails
+    # `nginx -t` falls back to "off" by itself. Run here rather than from
+    # /docker-entrypoint.d so the mounted script needs no exec bit.
+    entrypoint: ["/bin/sh", "-c", "/bin/sh /opt/opennvr-nginx/15-opennvr-layout.sh; exec /docker-entrypoint.sh \"$$@\"", "--"]
+    command: ["nginx", "-g", "daemon off;"]
+    environment:
+      - NGINX_SINGLE_PORT_WEBRTC=${NGINX_SINGLE_PORT_WEBRTC:-on}
+      - WEBRTC_ICE_PORT=${WEBRTC_ICE_PORT:-8189}
     volumes:
       - ./nginx-certs:/etc/nginx/certs:ro
-      - ./nginx/opennvr.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx:/opt/opennvr-nginx:ro
     networks:
       - opennvr_internal
     healthcheck:
