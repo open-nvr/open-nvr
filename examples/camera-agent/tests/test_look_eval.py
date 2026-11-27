@@ -54,8 +54,8 @@ def gate(decision, company="none"):
     return {"reason": "seen", "company": company, "decision": decision, "confidence": 0.9}
 
 
-def yard(who):
-    return {"reason": "seen", "who": who, "confidence": 0.9}
+def yard(who, sign="none"):
+    return {"reason": "seen", "who": who, "guard_sign": sign, "confidence": 0.9}
 
 
 # ── the templates and the labels ───────────────────────────────────────
@@ -200,6 +200,15 @@ def test_the_confusion_table_shows_a_wrong_fact_behind_a_right_outcome(tmp_path)
     assert runs[0]["decision"] == "ignore" and runs[0]["pass"] is False
     confusion = le.summarise(runs, hardware="cpu", gate=0.8)["confusion"]
     assert confusion == {"ignore who=animal": {"ignore who=nobody": 1}}
+
+
+@pytest.mark.parametrize("sign, decision", [
+    ("uniform_or_vest", "ignore"), ("torch", "ignore"), ("none", "alert")])
+def test_a_yard_guard_is_ignored_only_on_a_sign_the_model_saw(tmp_path, sign, decision):
+    p = write_cases(tmp_path, "a.png,yard_threat,who=guard,,\n")
+    (r,) = asyncio.run(le.run(Script(yard("guard", sign)), TEMPLATES,
+                              le.load_cases(p, TEMPLATES), repeat=1, hardware="cpu"))
+    assert r["decision"] == decision
 
 
 def test_rescore_uses_the_current_labels(tmp_path):
