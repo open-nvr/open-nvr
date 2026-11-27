@@ -121,14 +121,37 @@ def db() -> FakeDB:
 
 
 @pytest.fixture(autouse=True)
-def _clean_state(monkeypatch):
-    """Class-level caches must not leak between tests; no background task."""
+def _clean_state(monkeypatch, tmp_path):
+    """Class-level caches must not leak between tests; no background task;
+    the net-hints dir is an empty temp dir unless a test writes into it."""
     WebRTCIceHostService._public = PublicIP()
     WebRTCIceHostService._resolved = {}
     WebRTCIceHostService._refresher = None
+    WebRTCIceHostService._last_applied = []
     monkeypatch.setattr(WebRTCIceHostService, "ensure_refresher", classmethod(lambda cls: None))
     monkeypatch.setattr(settings, "mediamtx_webrtc_hosts", "", raising=False)
+    monkeypatch.setattr(settings, "nginx_bind_host", "", raising=False)
+    monkeypatch.setenv("OPENNVR_NET_HINTS_DIR", str(tmp_path / "net-hints"))
+    monkeypatch.delenv("OPENNVR_HOST_IPS_FILE", raising=False)
+    monkeypatch.delenv("OPENNVR_ADVERTISE_IPS_FILE", raising=False)
     yield
+
+
+def _write_hints(tmp_path, name: str, content: str) -> None:
+    d = tmp_path / "net-hints"
+    d.mkdir(exist_ok=True)
+    (d / name).write_text(content, encoding="utf-8")
+
+
+def _record_pushes(monkeypatch) -> list[list[str]]:
+    pushed: list[list[str]] = []
+
+    async def fake_set(hosts):
+        pushed.append(list(hosts))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(MediaMtxAdminService, "set_webrtc_additional_hosts", staticmethod(fake_set))
+    return pushed
 
 
 # ------------------------------------------------------------- validation
@@ -294,6 +317,44 @@ def test_resolve_is_empty_when_nothing_is_known(db: FakeDB) -> None:
     assert WebRTCIceHostService.resolve(db) == []
 
 
+def test_resolve_adds_the_hosts_current_addresses_vpn_included(db: FakeDB, monkeypatch, tmp_path) -> None:
+    """advertise-ips is re-read on every resolve: a DHCP change or a VPN
+    coming up reaches MediaMTX without recreating core."""
+    monkeypatch.setattr(settings, "mediamtx_webrtc_hosts", "192.168.2.30", raising=False)
+    _write_hints(tmp_path, "advertise-ips", "192.168.2.30 100.83.173.49 10.8.0.1 172.28.0.5 127.0.0.1\n")
+    assert WebRTCIceHostService.resolve_entries(db) == [
+        {"host": "192.168.2.30", "source": "env"},
+        {"host": "100.83.173.49", "source": "host"},  # Tailscale
+        {"host": "10.8.0.1", "source": "host"},  # WireGuard
+    ]
+    _write_hints(tmp_path, "advertise-ips", "192.168.2.44")
+    assert WebRTCIceHostService.resolve(db) == ["192.168.2.30", "192.168.2.44"]
+
+
+def test_resolve_falls_back_to_host_ips_from_an_older_launcher(db: FakeDB, tmp_path) -> None:
+    _write_hints(tmp_path, "host-ips", "192.168.2.30")
+    assert WebRTCIceHostService.resolve(db) == ["192.168.2.30"]
+    # Once advertise-ips exists it is the one that counts, even when empty.
+    _write_hints(tmp_path, "advertise-ips", "")
+    assert WebRTCIceHostService.resolve(db) == []
+
+
+def test_dual_nic_advertises_only_the_bound_address(db: FakeDB, monkeypatch, tmp_path) -> None:
+    """The media ports are published on NGINX_BIND_HOST alone; the camera
+    NIC must not be shown to browsers."""
+    monkeypatch.setattr(settings, "nginx_bind_host", "192.168.1.10", raising=False)
+    monkeypatch.setattr(settings, "mediamtx_webrtc_hosts", "192.168.1.10,10.10.0.1", raising=False)
+    _write_hints(tmp_path, "advertise-ips", "192.168.1.10 10.10.0.1")
+    WebRTCIceHostService._public = PublicIP("171.78.153.53", 1.0, "stun:a")
+    assert WebRTCIceHostService.resolve(db) == ["171.78.153.53", "192.168.1.10"]
+
+
+@pytest.mark.parametrize("bind", ["", "0.0.0.0", "::"])
+def test_a_wildcard_bind_host_is_not_a_dual_nic_host(bind: str, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "nginx_bind_host", bind, raising=False)
+    assert WebRTCIceHostService.bind_host() is None
+
+
 def test_admin_address_ignores_unusable_values(db: FakeDB) -> None:
     db.set_webrtc(public_address="127.0.0.1")
     assert WebRTCIceHostService.admin_address(db) is None
@@ -347,15 +408,52 @@ def test_legacy_row_never_overwrites_an_admin_address(db: FakeDB) -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_warns_instead_of_failing_silently(db: FakeDB, monkeypatch, caplog) -> None:
+async def test_apply_warns_and_pushes_nothing_when_nothing_is_known(db: FakeDB, monkeypatch, caplog) -> None:
     async def _none(cls, servers, timeout=2.0):
         return None
 
     monkeypatch.setattr(WebRTCIceHostService, "discover_public_ip", classmethod(_none))
+    pushed = _record_pushes(monkeypatch)
     with caplog.at_level("WARNING"):
-        assert await WebRTCIceHostService.apply_to_mediamtx(db) is False
-    # The original bug was invisible; an empty list must say so out loud.
+        assert await WebRTCIceHostService.apply_to_mediamtx(db) is True
+    # The original bug was invisible; an empty list must say so out loud...
     assert any("No WebRTC ICE host" in r.message for r in caplog.records)
+    # ...and must never be pushed: MediaMTX keeps whatever it started with.
+    assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_resolve_keeps_the_last_list(db: FakeDB, monkeypatch, tmp_path) -> None:
+    """vms, 2026-11-27: STUN and the launcher seed both came up empty and core
+    pushed [] over a working list, so every remote WHEP session timed out.
+    A source drying up must not wipe what MediaMTX advertises."""
+    pushed = _record_pushes(monkeypatch)
+    _write_hints(tmp_path, "advertise-ips", "192.168.2.30\n")
+    assert await WebRTCIceHostService.apply_to_mediamtx(db, stun=False) is True
+    (tmp_path / "net-hints" / "advertise-ips").unlink()
+    assert await WebRTCIceHostService.apply_to_mediamtx(db, stun=False) is True
+    assert pushed == [["192.168.2.30"], ["192.168.2.30"]]
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_only_address_stops_advertising_it(db: FakeDB, monkeypatch) -> None:
+    pushed = _record_pushes(monkeypatch)
+    db.set_webrtc(public_address="171.78.153.53", stun_servers=[])
+    await WebRTCIceHostService.apply_to_mediamtx(db, stun=False)
+    db.set_webrtc(public_address=None, stun_servers=[])
+    await WebRTCIceHostService.apply_to_mediamtx(db, stun=False)
+    assert pushed == [["171.78.153.53"], ["127.0.0.1"]]
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_admin_address_keeps_the_other_sources(db: FakeDB, monkeypatch, tmp_path) -> None:
+    pushed = _record_pushes(monkeypatch)
+    _write_hints(tmp_path, "advertise-ips", "192.168.2.30")
+    db.set_webrtc(public_address="171.78.153.53", stun_servers=[])
+    await WebRTCIceHostService.apply_to_mediamtx(db, stun=False)
+    db.set_webrtc(public_address=None, stun_servers=[])
+    await WebRTCIceHostService.apply_to_mediamtx(db, stun=False)
+    assert pushed == [["171.78.153.53", "192.168.2.30"], ["192.168.2.30"]]
 
 
 @pytest.mark.asyncio
@@ -529,6 +627,52 @@ async def test_startup_apply_retries_until_mediamtx_takes_the_list(db: FakeDB, m
 
 
 @pytest.mark.asyncio
+async def test_refresh_pushes_only_when_the_list_changes(db: FakeDB, monkeypatch, tmp_path) -> None:
+    """The refresh tick re-reads the host's addresses: a new DHCP lease is
+    pushed once, an unchanged list is not pushed again, and a hint file that
+    disappears never empties MediaMTX's list."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def fake_session():
+        yield db
+
+    monkeypatch.setattr("core.database.SessionLocal", fake_session)
+    pushed = _record_pushes(monkeypatch)
+    db.set_webrtc(stun_servers=[])
+
+    _write_hints(tmp_path, "advertise-ips", "192.168.2.30")
+    await WebRTCIceHostService.refresh_once(force_stun=False)
+    await WebRTCIceHostService.refresh_once(force_stun=False)
+    _write_hints(tmp_path, "advertise-ips", "192.168.2.31")
+    await WebRTCIceHostService.refresh_once(force_stun=False)
+    (tmp_path / "net-hints" / "advertise-ips").unlink()
+    await WebRTCIceHostService.refresh_once(force_stun=False)
+    assert pushed == [["192.168.2.30"], ["192.168.2.31"]]
+
+
+@pytest.mark.asyncio
+async def test_refresh_tick_does_not_force_stun(db: FakeDB, monkeypatch) -> None:
+    """The 60 s tick asks STUN only when STUN_REFRESH_S has passed."""
+    import contextlib
+    import time as _time
+
+    @contextlib.contextmanager
+    def fake_session():
+        yield db
+
+    async def never(cls, servers, timeout=2.0):
+        raise AssertionError("STUN asked before it was due")
+
+    monkeypatch.setattr("core.database.SessionLocal", fake_session)
+    monkeypatch.setattr(WebRTCIceHostService, "discover_public_ip", classmethod(never))
+    _record_pushes(monkeypatch)
+    db.set_webrtc(stun_servers=["stun:a"])
+    WebRTCIceHostService._public = PublicIP("171.78.153.53", _time.monotonic(), "stun:a")
+    await WebRTCIceHostService.refresh_once(force_stun=False)
+
+
+@pytest.mark.asyncio
 async def test_startup_apply_gives_up_loudly_after_the_attempts(db: FakeDB, monkeypatch, caplog) -> None:
     import contextlib
     import logging
@@ -548,6 +692,7 @@ async def test_startup_apply_gives_up_loudly_after_the_attempts(db: FakeDB, monk
     monkeypatch.setattr(MediaMtxAdminService, "set_webrtc_additional_hosts", staticmethod(never))
     monkeypatch.setattr("core.database.SessionLocal", fake_session)
     monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+    db.set_webrtc(public_address="171.78.153.53", stun_servers=[])
 
     with caplog.at_level(logging.WARNING):
         assert await WebRTCIceHostService.apply_on_startup(attempts=3, delay=0) is False

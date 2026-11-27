@@ -706,7 +706,7 @@ function Show-CommunityLinks {
 # always wins.
 function Test-VpnAddress {
     param([string]$InterfaceAlias, [string]$Ip)
-    if ($InterfaceAlias -match 'Tailscale|WireGuard|OpenVPN|ZeroTier|Nebula|TAP') { return $true }
+    if ($InterfaceAlias -match 'Tailscale|WireGuard|OpenVPN|ZeroTier|Nebula|TAP|Fortinet|FortiClient') { return $true }
     # CGNAT 100.64.0.0/10 — Tailscale-style overlay addresses.
     $parts = $Ip -split '\.'
     if ($parts.Count -eq 4 -and [int]$parts[0] -eq 100 -and [int]$parts[1] -ge 64 -and [int]$parts[1] -le 127) { return $true }
@@ -830,6 +830,52 @@ function Write-NetHints {
             New-Item -ItemType Directory -Force "data\net-hints" | Out-Null
             # ASCII avoids a BOM the container-side parser would choke on.
             Set-Content -Path $file -Value ($hints -join ' ') -Encoding Ascii
+        } elseif (Test-Path $file) {
+            Remove-Item -Force $file -Confirm:$false
+        }
+    } catch {}
+    Write-AdvertiseHints $hints
+}
+
+# The addresses a viewer's browser may reach this server on, VPN tunnels
+# included (WireGuard, Tailscale, FortiClient), written to
+# ./data/net-hints/advertise-ips. Core advertises them as WebRTC ICE host
+# candidates (webrtc_ice_host_service.py) and re-reads the file every
+# minute. host-ips stays VPN-free: ONVIF discovery scans it as camera LANs.
+# With nginx bound to one address (dual-NIC), only that address.
+function Get-VpnIPs {
+    $found = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($a in (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop)) {
+            $ip = $a.IPAddress
+            if ($ip -like '127.*' -or $ip -like '169.254.*') { continue }
+            if (-not (Test-VpnAddress $a.InterfaceAlias $ip)) { continue }
+            $ad = try { Get-NetAdapter -InterfaceIndex $a.InterfaceIndex -ErrorAction Stop } catch { $null }
+            if ($ad -and $ad.Status -ne 'Up') { continue }
+            if (-not $found.Contains($ip)) { $found.Add($ip) }
+        }
+    } catch {}
+    return $found
+}
+
+function Write-AdvertiseHints {
+    param($LanHints)
+    $adv = New-Object System.Collections.Generic.List[string]
+    $bindHost = $env:NGINX_BIND_HOST
+    if ([string]::IsNullOrWhiteSpace($bindHost)) { $bindHost = Get-EnvVar "NGINX_BIND_HOST" }
+    if (-not [string]::IsNullOrWhiteSpace($bindHost) -and $bindHost -ne '0.0.0.0') {
+        $adv.Add($bindHost.Trim())
+    } else {
+        foreach ($ip in @($LanHints) + @(Get-LanIPs) + @(Get-VpnIPs)) {
+            if ($ip -and -not $adv.Contains($ip)) { $adv.Add($ip) }
+        }
+    }
+    $file = Join-Path "data\net-hints" "advertise-ips"
+    try {
+        if ($adv.Count -gt 0) {
+            New-Item -ItemType Directory -Force "data\net-hints" | Out-Null
+            # ASCII avoids a BOM the container-side parser would choke on.
+            Set-Content -Path $file -Value ($adv -join ' ') -Encoding Ascii
         } elseif (Test-Path $file) {
             Remove-Item -Force $file -Confirm:$false
         }
@@ -1066,6 +1112,10 @@ switch ($Command) {
         if (Test-Path $hintsFile) {
             Write-Color "  ✓ Network hints refreshed: $(Get-Content $hintsFile)" Green
             Write-Color "  Camera discovery picks this up immediately - no restart needed." DarkGray
+            $advFile = Join-Path "data\net-hints" "advertise-ips"
+            if (Test-Path $advFile) {
+                Write-Color "  ✓ WebRTC addresses: $(Get-Content $advFile) (live view picks these up within a minute)" Green
+            }
         } else {
             Write-Color "  ⚠ No LAN address detected; hint file cleared." Yellow
         }
