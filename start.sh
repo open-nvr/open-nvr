@@ -1391,6 +1391,21 @@ detect_routable_nics() {
     fi
 }
 
+# Like detect_routable_nics, but VPN tunnels (tun/tap/wg/tailscale/...)
+# are kept: these are the addresses a remote viewer on the VPN reaches the
+# server on. Only Docker's own interfaces are dropped.
+detect_advertise_nics() {
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 -o addr show scope global 2>/dev/null \
+            | awk '{print $2":"$4}' \
+            | sed 's|/[0-9]*||' \
+            | grep -Ev '^(docker|br-|veth)' \
+            || true
+    else
+        detect_routable_nics
+    fi
+}
+
 # Resolve a declared interface name (e.g. "eth1") to its IPv4 address.
 # Returns empty string if the interface has no address or doesn't exist.
 nic_ip() {
@@ -1934,6 +1949,19 @@ detect_lan_ip() {
             return
         fi
     fi
+    # No usable default route (an air-gapped host, or one whose only
+    # default route is a VPN): the first global address on a non-tunnel
+    # interface, in interface order — deterministic, unlike the
+    # `hostname -I` fallback below.
+    local nic_if nic_addr
+    while IFS=: read -r nic_if nic_addr; do
+        [ -n "$nic_addr" ] || continue
+        if is_vpn_tunnel_source "$nic_addr" "$nic_if"; then continue; fi
+        echo "$nic_addr"
+        return
+    done <<EOF
+$(detect_routable_nics)
+EOF
     # Linux: hostname -I returns space-separated v4/v6 addresses on
     # configured interfaces. Take the first non-loopback v4.
     if command -v hostname >/dev/null 2>&1; then
@@ -2020,6 +2048,45 @@ write_net_hints() {
             || echo -e "  ${YELLOW}⚠ Couldn't write ./data/net-hints/host-ips (check permissions)${NC}" >&2
     else
         rm -f ./data/net-hints/host-ips 2>/dev/null || true
+    fi
+    write_advertise_hints "$hints"
+}
+
+# ── WebRTC advertise hint file (./data/net-hints/advertise-ips) ──
+# The addresses a viewer's browser may reach this server on, which core
+# advertises as WebRTC ICE host candidates (webrtc_ice_host_service.py).
+# Unlike host-ips (which ONVIF discovery scans as camera LANs) this one
+# includes VPN tunnels — WireGuard, Tailscale, FortiClient — so a remote
+# viewer on the VPN gets a candidate it can use. On a dual-NIC host with
+# nginx bound to one address, only that address: the media ports are
+# published there alone. $1 = the host-ips list, listed first so the
+# operator-facing LAN address leads.
+write_advertise_hints() {
+    local adv="" token iface ip bind
+    bind="${NGINX_BIND_HOST:-$(get_env_var NGINX_BIND_HOST 2>/dev/null || true)}"
+    if [ -n "$bind" ] && [ "$bind" != "0.0.0.0" ]; then
+        adv="$bind"
+    else
+        for token in $1; do
+            case " ${adv} " in *" ${token} "*) continue ;; esac
+            adv="${adv}${adv:+ }${token}"
+        done
+        while IFS=: read -r iface ip; do
+            [ -n "$ip" ] || continue
+            case "$ip" in 127.*|169.254.*) continue ;; esac
+            case " ${adv} " in *" ${ip} "*) continue ;; esac
+            adv="${adv}${adv:+ }${ip}"
+        done <<EOF
+$(detect_advertise_nics)
+EOF
+    fi
+    if [ -n "$adv" ]; then
+        { mkdir -p ./data/net-hints \
+            && printf '%s\n' "$adv" > ./data/net-hints/advertise-ips.tmp \
+            && mv -f ./data/net-hints/advertise-ips.tmp ./data/net-hints/advertise-ips; } 2>/dev/null \
+            || echo -e "  ${YELLOW}⚠ Couldn't write ./data/net-hints/advertise-ips (check permissions)${NC}" >&2
+    else
+        rm -f ./data/net-hints/advertise-ips 2>/dev/null || true
     fi
 }
 
@@ -2525,6 +2592,9 @@ case "$COMMAND" in
     if [ -f ./data/net-hints/host-ips ]; then
         echo -e "  ${GREEN}✓ Network hints refreshed:${NC} $(cat ./data/net-hints/host-ips)"
         echo -e "  ${GRAY}Camera discovery picks this up immediately — no restart needed.${NC}"
+        if [ -f ./data/net-hints/advertise-ips ]; then
+            echo -e "  ${GREEN}✓ WebRTC addresses:${NC} $(cat ./data/net-hints/advertise-ips) ${GRAY}(live view picks these up within a minute)${NC}"
+        fi
     else
         echo -e "  ${YELLOW}⚠ No LAN address detected; hint file cleared.${NC}"
     fi

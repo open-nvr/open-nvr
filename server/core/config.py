@@ -203,6 +203,11 @@ class Settings(BaseSettings):
     # admin, or found with STUN) and pushes the whole list to MediaMTX at
     # runtime, on every MediaMTX start. See services/webrtc_ice_host_service.py.
     mediamtx_webrtc_hosts: str = ""
+    # The host address nginx and the ICE port are published on
+    # (compose NGINX_BIND_HOST). A specific IP means a dual-NIC host: only
+    # that address can carry media, so it is the only host address
+    # advertised; empty or 0.0.0.0 means every interface.
+    nginx_bind_host: str = ""
     # MediaMTX's ICE media port (UDP + TCP), as published on the host. The
     # live player adds the address it opened the page on, on this port, as a
     # candidate, so it must match WEBRTC_ICE_PORT in compose.

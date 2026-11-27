@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from core.auth import get_current_superuser
 from core.database import get_db
+from core.net_hints import read_host_ips
 from models import Camera, CameraConfig, FirewallRule, SecuritySetting
 from schemas import NetworkConfig
 from services.audit_service import write_audit_log
@@ -107,14 +108,9 @@ def detect_local_subnets() -> list[str]:
     # rewrite it on every run, so a host that moved to a new subnet is picked
     # up without recreating the container — the env vars below are frozen at
     # container creation.
-    hints_file = os.environ.get("OPENNVR_HOST_IPS_FILE") or "/app/net-hints/host-ips"
-    try:
-        with open(hints_file, encoding="utf-8") as fh:
-            for token in fh.read().replace(",", " ").split():
-                if token not in ips:
-                    ips.append(token)
-    except OSError:
-        pass
+    for token in read_host_ips() or []:
+        if token not in ips:
+            ips.append(token)
 
     # The host's own LAN addresses, when the launcher passed them in. Listed
     # ahead of the probes so the default-route subnet becomes the primary

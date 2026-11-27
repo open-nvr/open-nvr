@@ -20,7 +20,7 @@ The addresses MediaMTX advertises as WebRTC ICE host candidates (issue #925).
 MediaMTX runs on the Docker bridge, so left to itself it can only gather the
 container's own addresses (127.0.0.1 and 172.28.0.x), which no browser on
 another machine can reach. Something has to tell it the addresses viewers
-can use, on the ICE port. That list is built here from three sources, in
+can use, on the ICE port. That list is built here from four sources, in
 this order:
 
 1. The admin's public address (Settings → WebRTC): an IP or a DNS name.
@@ -30,14 +30,21 @@ this order:
    Only the IP is kept; the port STUN reports is a random NAT mapping, not
    the forwarded ICE port, which is also why MediaMTX's own STUN gathering
    cannot do this job (its reflexive candidate lands on a random socket).
-3. The LAN address ``start.sh`` detected at ``up`` (MEDIAMTX_WEBRTC_HOSTS).
-   Core cannot see the host's interfaces, so it cannot refresh this one;
-   the browser covers a moved LAN address by adding the address it opened
-   the page on (app/src/lib/liveTransport.ts).
+3. The LAN address the launcher passed in at container creation
+   (MEDIAMTX_WEBRTC_HOSTS). Frozen until the container is recreated.
+4. The host's current addresses, VPN tunnels included, from the launcher's
+   hint file (core/net_hints.py ``advertise-ips``; ``host-ips`` from an
+   older launcher). Re-read on every refresh, so a DHCP change or a VPN
+   coming up is followed without a restart.
+
+On a dual-NIC host (NGINX_BIND_HOST set to one address) sources 3 and 4
+shrink to that address: the media ports are published there alone, and the
+camera NIC must not be shown to browsers.
 
 The list is pushed to MediaMTX from the ``runOnInit`` startup hook on every
-MediaMTX start (so a recreated container keeps it), when the settings are
-saved, and whenever the STUN answer changes.
+MediaMTX start (so a recreated container keeps it), from core's own startup,
+when the settings are saved, and by a refresh loop whenever it changes. An
+empty list is never pushed over a working one: see ``apply_to_mediamtx``.
 
 An earlier version "learned" addresses from nginx's ``X-Server-Addr``. In
 the stock layout nginx sits on the bridge too, so it never learned anything;
@@ -78,6 +85,15 @@ STUN_TIMEOUT_S = 2.0
 #: How often the public IP is asked for again. An ISP change is picked up
 #: within this; a viewer whose WebRTC fails meanwhile gets HLS, not an error.
 STUN_REFRESH_S = 600
+#: After this many rounds in a row with no answer (an air-gapped site, a
+#: firewall that drops UDP out), STUN is asked only every STUN_BACKOFF_S: each
+#: dead round costs STUN_TIMEOUT_S per server for nothing.
+STUN_FAILURES_BEFORE_BACKOFF = 3
+STUN_BACKOFF_S = 3600
+#: How often the refresh loop re-reads the host's addresses (net-hints) and
+#: re-pushes the list if it changed. Reading two small files is cheap; STUN
+#: still runs only every STUN_REFRESH_S.
+REFRESH_TICK_S = 60
 #: A DNS name in the admin's address is resolved for the browser's own
 #: candidates (rtc-config) at most this often.
 RESOLVE_CACHE_S = 300
@@ -105,6 +121,12 @@ class WebRTCIceHostService:
     #: task is not garbage-collected mid-flight.
     _pending_refresh: asyncio.Task | None = None
     _resolved: dict[str, tuple[float, list[str]]] = {}
+    #: The entries last pushed to MediaMTX successfully, with their sources.
+    #: An empty resolve falls back to these (minus the admin's address) rather
+    #: than wiping a working list.
+    _last_applied: list[dict[str, str]] = []
+    #: STUN rounds in a row that got no answer from any server.
+    _stun_failures = 0
 
     # ---- validation -------------------------------------------------
 
@@ -258,7 +280,13 @@ class WebRTCIceHostService:
     @classmethod
     async def _stun_query(cls, host: str, port: int, timeout: float) -> str | None:
         loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        # The name lookup shares the reply's time budget: on an air-gapped
+        # site the resolver can sit on an unanswerable query for far longer
+        # than the binding exchange ever takes, and core's startup and every
+        # refresh used to wait on it.
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM), timeout
+        )
         if not infos:
             return None
         family, _, _, _, sockaddr = infos[0]
@@ -316,18 +344,28 @@ class WebRTCIceHostService:
         STUN servers, or when a server answers with a different one.
         """
         now = time.monotonic()
-        if not force and cls._public.at and now - cls._public.at < STUN_REFRESH_S:
+        if not force and cls._public.at and now - cls._public.at < cls.stun_interval():
             return cls._public.ip
         servers = cls.stun_servers(db)
         previous = cls._public
         if not servers:
             cls._public = PublicIP(None, now, None)
+            cls._stun_failures = 0
         else:
             found = await cls.discover_public_ip(servers)
             if found:
                 cls._public = PublicIP(found[0], now, found[1])
+                cls._stun_failures = 0
             else:
                 cls._public = PublicIP(previous.ip, now, previous.server)
+                cls._stun_failures += 1
+                if cls._stun_failures == STUN_FAILURES_BEFORE_BACKOFF:
+                    logger.info(
+                        "STUN unanswered %d times in a row; asking only every %d min "
+                        "from now on (an offline site needs no public IP)",
+                        cls._stun_failures,
+                        STUN_BACKOFF_S // 60,
+                    )
                 if previous.ip:
                     logger.info(
                         "STUN gave no answer; keeping the public IP %s for WebRTC", previous.ip
@@ -340,12 +378,42 @@ class WebRTCIceHostService:
     def public_ip(cls) -> PublicIP:
         return cls._public
 
+    @classmethod
+    def stun_interval(cls) -> float:
+        """Seconds between STUN rounds: STUN_REFRESH_S, or STUN_BACKOFF_S once
+        STUN has stayed silent STUN_FAILURES_BEFORE_BACKOFF times in a row."""
+        if cls._stun_failures >= STUN_FAILURES_BEFORE_BACKOFF:
+            return STUN_BACKOFF_S
+        return STUN_REFRESH_S
+
     # ---- resolution -------------------------------------------------
+
+    @classmethod
+    def bind_host(cls) -> str | None:
+        """The one address the media ports are published on, on a dual-NIC
+        host (NGINX_BIND_HOST); None when they are published everywhere."""
+        val = (getattr(settings, "nginx_bind_host", "") or "").strip()
+        if not val or val in ("0.0.0.0", "::"):
+            return None
+        return val if cls.is_advertisable(val) else None
+
+    @staticmethod
+    def host_hint_ips() -> list[str]:
+        """The host's current addresses from the launcher's hint files:
+        ``advertise-ips`` (VPN tunnels included), or ``host-ips`` from a
+        launcher that predates it."""
+        from core.net_hints import read_advertise_ips, read_host_ips
+
+        ips = read_advertise_ips()
+        if ips is None:
+            ips = read_host_ips()
+        return ips or []
 
     @classmethod
     def resolve_entries(cls, db) -> list[dict[str, str]]:
         """What MediaMTX advertises, with where each entry came from:
-        the admin's address, then STUN, then the launcher's LAN seed."""
+        the admin's address, then STUN, then the launcher's LAN seed, then
+        the host's current addresses."""
         out: list[dict[str, str]] = []
         seen: set[str] = set()
 
@@ -356,11 +424,20 @@ class WebRTCIceHostService:
 
         add(cls.admin_address(db), "admin")
         add(cls._public.ip, "stun")
-        seed = (getattr(settings, "mediamtx_webrtc_hosts", "") or "").strip()
-        for part in seed.split(","):
-            part = part.strip()
-            if part and cls.is_advertisable(part):
-                add(part, "env")
+        bind = cls.bind_host()
+        if bind:
+            # Dual-NIC: the bound address is the only host address that can
+            # carry media; the seed and hint files may list the camera NIC.
+            add(bind, "host")
+        else:
+            seed = (getattr(settings, "mediamtx_webrtc_hosts", "") or "").strip()
+            for part in seed.split(","):
+                part = part.strip()
+                if part and cls.is_advertisable(part):
+                    add(part, "env")
+            for ip in cls.host_hint_ips():
+                if cls.is_advertisable(ip):
+                    add(ip, "host")
         return out[:MAX_HOSTS]
 
     @classmethod
@@ -434,8 +511,6 @@ class WebRTCIceHostService:
         ``stun=False`` pushes what is known now without waiting on a STUN
         round (each unreachable server costs STUN_TIMEOUT_S): the settings
         save uses it and asks for the round in the background."""
-        from services.mediamtx_admin_service import MediaMtxAdminService
-
         try:
             cls.migrate_legacy(db)
         except Exception as e:  # noqa: BLE001 - never block advertising on it
@@ -447,20 +522,48 @@ class WebRTCIceHostService:
                 logger.debug("STUN lookup failed: %s", e)
         cls.ensure_refresher()
 
-        hosts = cls.resolve(db)
-        if not hosts:
-            # Made loud: with no advertisable host every WHEP session from
-            # another machine dies on the ICE timeout, and the UI quietly
-            # takes the HLS rung. The empty list is still pushed: an address
-            # the admin just cleared must stop being advertised.
-            logger.warning(
-                "No WebRTC ICE host to advertise — live WebRTC from other machines "
-                "will fall back to HLS. Set a public address under Settings → WebRTC, "
-                "configure a STUN server there, or set MEDIAMTX_WEBRTC_HOSTS in .env "
-                "to this server's LAN IP (start.sh does this for you)."
-            )
+        entries = cls.entries_to_push(db)
+        if entries is None:
+            return True  # nothing known and nothing to keep: leave MediaMTX as is
+        return await cls._push(entries)
+
+    @classmethod
+    def entries_to_push(cls, db) -> list[dict[str, str]] | None:
+        """The entries to send to MediaMTX, or None to send nothing.
+
+        An empty list is never pushed. It was, once, so that an address the
+        admin cleared would stop being advertised, and the price was a site
+        whose launcher seed and STUN both came up empty advertising nothing
+        at all: every WHEP session from another machine died on the ICE
+        timeout and the UI quietly took the HLS rung. Now an empty resolve
+        keeps the last applied list minus the admin's address (so a clear
+        still takes effect). With nothing left it sends nothing — unless the
+        last list held only the cleared address, which is then replaced by
+        compose's own placeholder (127.0.0.1, harmless: no browser on
+        another machine pairs with it) so it stops being advertised."""
+        entries = cls.resolve_entries(db)
+        if entries:
+            return entries
+        kept = [e for e in cls._last_applied if e.get("source") != "admin"]
+        if not kept and cls._last_applied:
+            kept = [{"host": "127.0.0.1", "source": "placeholder"}]
+        logger.warning(
+            "No WebRTC ICE host to advertise — live WebRTC from other machines "
+            "will fall back to HLS until the host's address is known. Run "
+            "`./start.sh refresh-net` (or start.ps1 refresh-net), or set a public "
+            "address under Settings → WebRTC.%s",
+            f" Keeping the last list: {[e['host'] for e in kept]}" if kept else "",
+        )
+        return kept or None
+
+    @classmethod
+    async def _push(cls, entries: list[dict[str, str]]) -> bool:
+        from services.mediamtx_admin_service import MediaMtxAdminService
+
+        hosts = [e["host"] for e in entries]
         result = await MediaMtxAdminService.set_webrtc_additional_hosts(hosts)
         if result.get("status") == "ok":
+            cls._last_applied = list(entries)
             logger.info("Applied WebRTC ICE hosts to MediaMTX: %s", hosts)
             return True
         logger.warning("Could not apply WebRTC ICE hosts %s: %s", hosts, result)
@@ -489,10 +592,25 @@ class WebRTCIceHostService:
 
         tries = attempts if attempts is not None else cls.STARTUP_ATTEMPTS
         wait = delay if delay is not None else cls.STARTUP_RETRY_S
+        # The stored STUN/TURN list too: like the hosts, the runOnInit hook
+        # that normally applies it fired before core existed on a cold start.
+        # (Only TURN reaches MediaMTX itself; STUN is clientOnly.)
+        try:
+            from routers.webrtc import _apply_stored_ice_to_mediamtx
+
+            await _apply_stored_ice_to_mediamtx()
+        except Exception as e:  # noqa: BLE001 - never block the host list on it
+            logger.debug("Startup WebRTC ICE server apply failed: %s", e)
         for i in range(1, max(1, tries) + 1):
             try:
                 with SessionLocal() as db:
-                    if await cls.apply_to_mediamtx(db):
+                    # What is known now goes out first (the LAN addresses, a
+                    # fixed public address); the STUN round follows in the
+                    # background and re-pushes only if it adds something. On
+                    # an offline site STUN can only time out, and live view
+                    # on the LAN must not wait for that.
+                    if await cls.apply_to_mediamtx(db, stun=False):
+                        cls.refresh_soon()
                         return True
             except Exception as e:  # noqa: BLE001 - keep retrying
                 logger.debug("Startup WebRTC ICE host apply failed: %s", e)
@@ -507,8 +625,10 @@ class WebRTCIceHostService:
 
     @classmethod
     def ensure_refresher(cls) -> None:
-        """A background loop that re-asks STUN and re-applies the list when
-        the public IP changes. Started once, from the first apply."""
+        """A background loop that keeps the list current: it re-reads the
+        host's addresses every REFRESH_TICK_S, re-asks STUN when that is due,
+        and re-applies the list whenever it changed. Started once, from the
+        first apply."""
         if cls._refresher and not cls._refresher.done():
             return
         try:
@@ -518,20 +638,20 @@ class WebRTCIceHostService:
         cls._refresher = loop.create_task(cls._refresh_loop())
 
     @classmethod
-    async def refresh_once(cls) -> None:
-        """One forced STUN round on a session of its own; the list is pushed
-        again only when the public IP changed."""
+    async def refresh_once(cls, force_stun: bool = True) -> None:
+        """One refresh on a session of its own: a STUN round (forced, or only
+        when due), then the list is pushed again if it differs from what
+        MediaMTX last took — a new public IP, a DHCP change, a VPN that came
+        up. Never pushes an empty list (entries_to_push)."""
         from core.database import SessionLocal
-        from services.mediamtx_admin_service import MediaMtxAdminService
 
-        before = cls._public.ip
         with SessionLocal() as db:
-            await cls.refresh_public_ip(db, force=True)
-            if cls._public.ip != before:
-                hosts = cls.resolve(db)
-                if hosts:
-                    await MediaMtxAdminService.set_webrtc_additional_hosts(hosts)
-                    logger.info("Re-applied WebRTC ICE hosts after public IP change: %s", hosts)
+            await cls.refresh_public_ip(db, force=force_stun)
+            entries = cls.resolve_entries(db)
+            if not entries:
+                return
+            if [e["host"] for e in entries] != [e["host"] for e in cls._last_applied]:
+                await cls._push(entries)
 
     @classmethod
     def refresh_soon(cls) -> None:
@@ -554,9 +674,9 @@ class WebRTCIceHostService:
     @classmethod
     async def _refresh_loop(cls) -> None:
         while True:
-            await asyncio.sleep(STUN_REFRESH_S)
+            await asyncio.sleep(REFRESH_TICK_S)
             try:
-                await cls.refresh_once()
+                await cls.refresh_once(force_stun=False)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - keep the loop alive

@@ -21,6 +21,7 @@ import (
 	"github.com/open-nvr/open-nvr/host-agent/internal/core"
 	"github.com/open-nvr/open-nvr/host-agent/internal/ffmpeg"
 	"github.com/open-nvr/open-nvr/host-agent/internal/metrics"
+	"github.com/open-nvr/open-nvr/host-agent/internal/nethints"
 	"github.com/open-nvr/open-nvr/host-agent/internal/onvifdisc"
 	"github.com/open-nvr/open-nvr/host-agent/internal/publisher"
 	"github.com/open-nvr/open-nvr/host-agent/internal/webcams"
@@ -89,6 +90,16 @@ func Run(ctx context.Context, o Options) int {
 	// ready; core can ask for one now (Discover opened), and the loop syncs
 	// as soon as it is done so the answer reaches the dialog at once.
 	disc := newDiscoverer(ctx)
+
+	// The LAN prober sees the host's interfaces, which core cannot: it keeps
+	// the WebRTC advertise list current (a DHCP change, a VPN coming up).
+	// Switched on by the env, not a flag: the prober's binary comes from the
+	// pinned core image, and an older one would die on an unknown flag.
+	if o.DiscoveryOnly {
+		if dir := os.Getenv("OPENNVR_NET_HINTS_DIR"); dir != "" {
+			go nethints.Run(ctx, dir, os.Getenv("NGINX_BIND_HOST"), logf)
+		}
+	}
 
 	for {
 		wait := 5 * time.Second

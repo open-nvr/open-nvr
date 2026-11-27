@@ -33,7 +33,7 @@ type Settings = {
 
 /** GET /webrtc/advertised: what MediaMTX tells viewers to connect to. */
 type Advertised = {
-  hosts: Array<{ host: string; source: 'admin' | 'stun' | 'env' }>
+  hosts: Array<{ host: string; source: 'admin' | 'stun' | 'env' | 'host' | 'placeholder' }>
   ice_port: number
   public_ice_port: number
 }
@@ -193,6 +193,7 @@ export function WebRTCSettings() {
       {/* STUN */}
       <div className="border border-[var(--border)] p-3 space-y-2">
         <div className="text-sm text-[var(--text-dim)]">{t('settings.stunServers')}</div>
+        <div className="text-xs text-[var(--text-dim)]">{t('settings.stunHint')}</div>
         {cfg.stun_servers.map((s, i) => (
           <div key={i} className="flex items-center gap-2">
             <input

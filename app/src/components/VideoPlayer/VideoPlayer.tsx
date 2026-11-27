@@ -522,10 +522,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     giveUpRef.current = giveUpWebRTC
 
     // The RTCPeerConnection configuration. ICE servers come from Settings >
-    // More Settings > WebRTC and from nowhere else: MediaMTX advertises every
-    // address the server knows, and the player adds the address-bar host, so
-    // no STUN server is needed for the common case and none is contacted
-    // unless the admin configured one.
+    // More Settings > WebRTC and from nowhere else (a fresh install lists one
+    // public STUN server there; the admin can clear it). MediaMTX advertises
+    // every address the server knows and the player adds the address-bar
+    // host, so the browser needs no STUN server to reach the server; the
+    // server-side use is core learning its public IP for viewers who open
+    // the page by name from outside.
     const rtcConfig = useCallback(async (): Promise<RTCConfiguration> => {
       let iceServers: RTCIceServer[] = []
       let policy: RTCIceTransportPolicy | undefined
