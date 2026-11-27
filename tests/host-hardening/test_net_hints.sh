@@ -89,11 +89,11 @@ reset_site() {
 
 FAKE_ADDRS="eth0:192.168.2.30
 wg0:10.8.0.1
-tailscale0:100.83.173.49
+tailscale0:100.101.102.103
 tun0:10.200.0.5
 docker0:172.17.0.1
 br-abc:172.28.0.1"
-export FAKE_ADDRS FAKE_ROUTE="" FAKE_HOSTNAME_I="100.83.173.49 192.168.2.30"
+export FAKE_ADDRS FAKE_ROUTE="" FAKE_HOSTNAME_I="100.101.102.103 192.168.2.30"
 
 # ── 1. advertise-ips: LAN first, VPN tunnels included, Docker dropped ──
 start_test "advertise-ips lists the LAN address first and keeps every VPN tunnel"
@@ -101,7 +101,7 @@ reset_site
 export OPENNVR_HOST_IP=192.168.2.30
 write_net_hints
 got=$(cat data/net-hints/advertise-ips 2>/dev/null)
-want="192.168.2.30 10.8.0.1 100.83.173.49 10.200.0.5"
+want="192.168.2.30 10.8.0.1 100.101.102.103 10.200.0.5"
 if [ "$got" = "$want" ]; then pass; else fail "got '$got', want '$want'"; fi
 
 # ── 2. host-ips stays VPN-free ──
@@ -144,7 +144,7 @@ if [ "$got" = "192.168.2.30" ]; then pass; else fail "got '$got'"; fi
 
 start_test "a VPN default route is skipped for the first LAN NIC"
 reset_site
-FAKE_ROUTE="1.1.1.1 dev tailscale0 src 100.83.173.49 uid 1000"
+FAKE_ROUTE="1.1.1.1 dev tailscale0 src 100.101.102.103 uid 1000"
 got=$(detect_lan_ip)
 if [ "$got" = "192.168.2.30" ]; then pass; else fail "got '$got'"; fi
 

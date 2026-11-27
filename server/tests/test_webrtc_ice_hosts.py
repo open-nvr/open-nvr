@@ -321,10 +321,10 @@ def test_resolve_adds_the_hosts_current_addresses_vpn_included(db: FakeDB, monke
     """advertise-ips is re-read on every resolve: a DHCP change or a VPN
     coming up reaches MediaMTX without recreating core."""
     monkeypatch.setattr(settings, "mediamtx_webrtc_hosts", "192.168.2.30", raising=False)
-    _write_hints(tmp_path, "advertise-ips", "192.168.2.30 100.83.173.49 10.8.0.1 172.28.0.5 127.0.0.1\n")
+    _write_hints(tmp_path, "advertise-ips", "192.168.2.30 100.101.102.103 10.8.0.1 172.28.0.5 127.0.0.1\n")
     assert WebRTCIceHostService.resolve_entries(db) == [
         {"host": "192.168.2.30", "source": "env"},
-        {"host": "100.83.173.49", "source": "host"},  # Tailscale
+        {"host": "100.101.102.103", "source": "host"},  # Tailscale
         {"host": "10.8.0.1", "source": "host"},  # WireGuard
     ]
     _write_hints(tmp_path, "advertise-ips", "192.168.2.44")

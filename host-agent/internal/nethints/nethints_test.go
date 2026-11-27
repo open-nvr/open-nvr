@@ -15,7 +15,7 @@ var site = []Iface{
 	{Name: "eth1", Up: true, Addrs: []string{"10.10.0.1"}},
 	{Name: "eth0", Up: true, Addrs: []string{"192.168.2.30", "fe80::1"}},
 	{Name: "wg0", Up: true, Addrs: []string{"10.8.0.1"}},
-	{Name: "tailscale0", Up: true, Addrs: []string{"100.83.173.49"}},
+	{Name: "tailscale0", Up: true, Addrs: []string{"100.101.102.103"}},
 	{Name: "docker0", Up: true, Addrs: []string{"172.17.0.1"}},
 	{Name: "br-1a2b", Up: true, Addrs: []string{"172.28.0.1"}},
 	{Name: "veth9", Up: true, Addrs: []string{"169.254.1.1"}},
@@ -24,7 +24,7 @@ var site = []Iface{
 
 func TestBuildPutsTheEgressLANFirstAndVPNsLast(t *testing.T) {
 	got := Build(site, "192.168.2.30", "")
-	want := []string{"192.168.2.30", "10.10.0.1", "10.8.0.1", "100.83.173.49"}
+	want := []string{"192.168.2.30", "10.10.0.1", "10.8.0.1", "100.101.102.103"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -32,7 +32,7 @@ func TestBuildPutsTheEgressLANFirstAndVPNsLast(t *testing.T) {
 
 func TestBuildWithoutADefaultRouteKeepsInterfaceOrder(t *testing.T) {
 	got := Build(site, "", "")
-	want := []string{"10.10.0.1", "192.168.2.30", "10.8.0.1", "100.83.173.49"}
+	want := []string{"10.10.0.1", "192.168.2.30", "10.8.0.1", "100.101.102.103"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
