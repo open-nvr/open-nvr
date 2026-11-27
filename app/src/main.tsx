@@ -102,6 +102,7 @@ const Updates = lazy(reloadOnStale(() => import('./views/Updates').then((m) => (
 const Logs = lazy(reloadOnStale(() => import('./views/Logs').then((m) => ({ default: m.Logs }))))
 const Compliance = lazy(reloadOnStale(() => import('./views/Compliance').then((m) => ({ default: m.Compliance }))))
 const AlertsIncidents = lazy(reloadOnStale(() => import('./views/AlertsIncidents').then((m) => ({ default: m.AlertsIncidents }))))
+const Sites = lazy(reloadOnStale(() => import('./views/Sites').then((m) => ({ default: m.Sites }))))
 const Integrations = lazy(reloadOnStale(() => import('./views/Integrations').then((m) => ({ default: m.Integrations }))))
 const Support = lazy(reloadOnStale(() => import('./views/Support').then((m) => ({ default: m.Support }))))
 const AccessControl = lazy(reloadOnStale(() => import('./views/AccessControl').then((m) => ({ default: m.AccessControl }))))
@@ -216,6 +217,7 @@ const router = createBrowserRouter([
           // renders this same view. /alarms stays valid for old links.
           { path: 'alarms', element: <Navigate to="/alerts-incidents" replace /> },
           { path: 'integrations', element: <Integrations /> },
+          { path: 'sites', element: <Sites /> },
           { path: 'cloud', element: <Cloud /> },
           { path: 'support', element: <Support /> },
           { path: 'settings/*', element: <Settings /> },

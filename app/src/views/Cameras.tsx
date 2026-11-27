@@ -27,7 +27,7 @@ import { useCameraStatusConnected } from '../hooks/useCameraStatus'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
 import { usePermissions } from '../hooks/usePermissions'
-import { Camera as CameraIcon, CameraOff, Download, LayoutGrid, List, PauseCircle, Pencil, Play, PlayCircle, Plus, Search as SearchIcon, Trash2, Unplug, Upload, Video, Webcam } from 'lucide-react'
+import { Camera as CameraIcon, CameraOff, Download, Globe, LayoutGrid, List, PauseCircle, Pencil, Play, PlayCircle, Plus, Search as SearchIcon, Trash2, Unplug, Upload, Video, Webcam } from 'lucide-react'
 import { Badge, Button, EmptyState, Skeleton, Table, THead, TBody, TR, TH, TD } from '../components/ui'
 import { Checkbox, Field, Input, Select } from '../components/ui/form'
 import { IconButton, PageTitleBar, TITLE_ACTION_CLASS, TITLE_PANEL_BODY_CLASS } from '../components/ui/layout'
@@ -102,6 +102,9 @@ type Camera = {
   source_type?: string | null
   /** For a USB webcam on the OpenNVR server: the host agent's device id. */
   source_device?: string | null
+  // A camera at a remote site, relayed by that site's agent (Sites page).
+  site_id?: number | null
+  site_lan_host?: string | null
   /** Display-only aspect override; null = auto-detect. See lib/aspect.ts. */
   display_aspect_ratio?: string | null
   location?: string | null
@@ -361,7 +364,7 @@ export function Cameras() {
       // A browser webcam has no source to dial: it is down because no tab is
       // sending it, or because a tab is and its video cannot get through.
       // Only this tab's own session is known here.
-      if (c.source_type === 'publisher' && !c.source_device) {
+      if (c.source_type === 'publisher' && !c.source_device && !c.site_id) {
         const mine = webcamSessions.find((s) => s.cameraId === c.id)
         if (mine && mine.state.kind !== 'live') {
           const reason = mine.state.kind === 'retrying' || mine.state.kind === 'error' ? mine.state.reason : 'Connecting'
@@ -456,7 +459,7 @@ export function Cameras() {
   // One camera's buttons, shared by the table row and the grid card.
   const cameraActions = (c: Camera) => (
     <>
-      {canManageCameras && c.source_type === 'publisher' && !c.source_device && (
+      {canManageCameras && c.source_type === 'publisher' && !c.source_device && !c.site_id && (
         <IconButton
           variant="outline"
           onClick={() => navigate(`/cameras/${c.id}/publish`)}
@@ -1466,7 +1469,11 @@ export function Cameras() {
                   </TD>
                   <TD>{activeBadge(c)}</TD>
                   {c.source_type === 'publisher' ? (
-                    c.source_device && isLocalDevice(c.source_device) ? (
+                    c.site_id ? (
+                      <TD className="whitespace-nowrap truncate" title="Relayed from a remote site by its site agent (Administration → Sites)">
+                        <span className="inline-flex items-center gap-1 text-[var(--text-dim)]"><Globe size={13} /> Site · {c.site_lan_host || 'remote'}</span>
+                      </TD>
+                    ) : c.source_device && isLocalDevice(c.source_device) ? (
                       <TD className="whitespace-nowrap truncate" title={`USB webcam on the OpenNVR server, captured by its media server (${localDeviceLabel(c.source_device)})`}>
                         <span className="inline-flex items-center gap-1 text-[var(--text-dim)]"><Webcam size={13} /> Server · {localDeviceLabel(c.source_device)}</span>
                       </TD>
@@ -1600,7 +1607,13 @@ export function Cameras() {
             </div>
 
             {editing.source_type === 'publisher' ? (
-              editing.source_device ? (
+              editing.site_id ? (
+                <p className="text-xs text-[var(--text-dim)]">
+                  This camera is at a remote site ({editing.site_lan_host || 'its LAN'}) and is relayed by
+                  that site's agent. Its address, stream URLs and credentials are set on the Sites page
+                  (Administration → Sites).
+                </p>
+              ) : editing.source_device ? (
                 <Field label="Webcam on the OpenNVR server">
                   <ServerWebcamPicker
                     value={form.source_device || null}

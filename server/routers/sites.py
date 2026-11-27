@@ -93,7 +93,11 @@ def _site_or_404(db: Session, site_id: int) -> Site:
 
 def _enrol_command(request: Request, code: str) -> str:
     host = svc.ingest_target(request.headers.get("host"))["host"] or "<this-server>"
-    return f"opennvr-host enrol https://{host} {code}"
+    pin = svc.server_pin()
+    # The pin lets a self-signed server be trusted from the first call;
+    # with a Let's Encrypt certificate it is harmless (the chain verifies).
+    pin_arg = f"-pin {pin} " if pin else ""
+    return f"opennvr-host enrol {pin_arg}https://{host} {code}"
 
 
 @router.get("")

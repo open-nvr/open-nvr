@@ -878,6 +878,10 @@ class CameraResponse(CameraBase):
         return v or "opennvr"
 
     deleted_at: datetime | None = None
+    # A camera at a remote site, relayed by that site's agent (Sites page).
+    # Its LAN URLs and credentials are not sent here.
+    site_id: int | None = None
+    site_lan_host: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
     # Optional MediaMTX provisioning info (populated at creation time)

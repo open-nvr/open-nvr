@@ -341,6 +341,43 @@ def record_report(db: Session, site: Site, report: dict[str, Any], ip: str | Non
     db.commit()
 
 
+#: nginx's certificate as core sees it (compose mounts ./nginx-certs read-only).
+NGINX_CERT_PATH_DEFAULT = "/app/nginx-certs/server.crt"
+_pin_cache: tuple[float, str | None] = (-1.0, None)
+
+
+def server_pin() -> str | None:
+    """The SPKI pin of the certificate the site agent will meet on 443
+    (``sha256/<base64>``, as `opennvr-host enrol -pin` takes it), or None when
+    core cannot read it. Re-read when the file changes (Let's Encrypt)."""
+    import base64
+    import os
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    global _pin_cache
+    path = os.environ.get("NGINX_CERT_PATH") or NGINX_CERT_PATH_DEFAULT
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        return None
+    if mtime == _pin_cache[0]:
+        return _pin_cache[1]
+    pin: str | None = None
+    try:
+        with open(path, "rb") as fh:
+            cert = x509.load_pem_x509_certificate(fh.read())
+        spki = cert.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        pin = "sha256/" + base64.b64encode(hashlib.sha256(spki).digest()).decode()
+    except Exception:  # noqa: BLE001 - an unreadable cert just means no pin
+        pin = None
+    _pin_cache = (mtime, pin)
+    return pin
+
+
 def ingest_target(request_host: str | None) -> dict[str, Any]:
     """Where the agent sends video: this site's public name when set,
     otherwise the host the agent reached core on; always 443 with the
@@ -385,6 +422,8 @@ def public_view(db: Session, site: Site) -> dict[str, Any]:
         "discovered": [d for d in onvif if d.get("ip") not in linked_hosts],
         "live_policy": site.live_policy,
         "uplink_cap_kbps": site.uplink_cap_kbps,
+        # What the agent's enrol checks the server's certificate against.
+        "server_pin": server_pin(),
     }
 
 

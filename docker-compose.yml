@@ -622,6 +622,11 @@ services:
       # OPENNVR_HOST_IP/OPENNVR_LAN_IPS env vars (frozen at container
       # creation) go stale after a subnet change.
       - ./data/net-hints:/app/net-hints:ro
+      # nginx's certificate, for the pin a site agent enrols with (Sites
+      # page). The folder, not the file, so a renewed certificate (renamed
+      # into place) is seen; server.key in it is 0600 root and stays
+      # unreadable to core (uid 1000).
+      - ./nginx-certs:/app/nginx-certs:ro
       # OpenNVR updates (services/update_status.py): core reads the host
       # updater's state and writes requests for it; it never runs Docker.
       - ./data/updates:/app/update-state:ro

@@ -372,3 +372,47 @@ async def test_a_change_wakes_the_waiter():
     assert await asyncio.wait_for(waiter, 2) is True
     ev = svc.arm(4242)
     assert await svc.wait(ev, timeout=0.05) is False
+
+
+# ── server pin ─────────────────────────────────────────────────────────
+
+
+def _self_signed(path):
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "opennvr-ui")])
+    now = _dt.datetime.now(_dt.UTC)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(1)
+            .not_valid_before(now).not_valid_after(now + _dt.timedelta(days=1))
+            .sign(key, hashes.SHA256()))
+    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return key
+
+
+def test_the_enrol_command_carries_the_servers_pin(env, monkeypatch, tmp_path):
+    import base64
+    import hashlib
+
+    from cryptography.hazmat.primitives import serialization
+
+    cert = tmp_path / "server.crt"
+    key = _self_signed(cert)
+    monkeypatch.setenv("NGINX_CERT_PATH", str(cert))
+    spki = key.public_key().public_bytes(serialization.Encoding.DER,
+                                         serialization.PublicFormat.SubjectPublicKeyInfo)
+    want = "sha256/" + base64.b64encode(hashlib.sha256(spki).digest()).decode()
+    assert svc.server_pin() == want
+    site = _create(env)
+    assert f"-pin {want} https://nvr.example.com " in site["enrol_command"]
+    assert site["server_pin"] == want
+
+
+def test_no_readable_certificate_no_pin(env, monkeypatch, tmp_path):
+    monkeypatch.setenv("NGINX_CERT_PATH", str(tmp_path / "missing.crt"))
+    site = _create(env)
+    assert site["server_pin"] is None and "-pin" not in site["enrol_command"]

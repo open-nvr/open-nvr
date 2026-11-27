@@ -171,6 +171,8 @@ export const NAV_PERMISSIONS = {
   '/alerts-incidents': 'alerts.view',
   '/alarms': 'alerts.view',
   '/integrations': 'integrations.view',
+  // Remote sites (cloud ingest): cameras are what they relay.
+  '/sites': 'cameras.manage',
   '/cloud': 'cloud.view',
   '/support': null, // Always visible
   '/settings': 'settings.view',

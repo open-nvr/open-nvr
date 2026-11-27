@@ -1,0 +1,46 @@
+# systemd unit for the OpenNVR site agent (docs/SITE_AGENT.md).
+#
+# The site agent runs at a remote site and relays its cameras to an OpenNVR
+# on the internet over port 443. It only dials out.
+#
+# Install (as root):
+#   install -m 0755 opennvr-host /usr/local/bin/opennvr-host
+#   install -d -m 0700 /etc/opennvr-site
+#   opennvr-host enrol -config /etc/opennvr-site/config.json -pin sha256/... https://nvr.example.com ABCDE-FGHJK
+#   install -m 0644 opennvr-site.service /etc/systemd/system/opennvr-site.service
+#   systemctl daemon-reload && systemctl enable --now opennvr-site
+#
+# Logs: journalctl -u opennvr-site -f
+
+[Unit]
+Description=OpenNVR site agent (relays this site's cameras to OpenNVR)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# The config holds the site's credential. It stays 0600 root in
+# /etc/opennvr-site; systemd hands this unit a private read-only copy.
+LoadCredential=config.json:/etc/opennvr-site/config.json
+ExecStart=/usr/local/bin/opennvr-host site -config ${CREDENTIALS_DIRECTORY}/config.json
+Restart=always
+RestartSec=5
+
+# No privileges needed: it reads its config, runs ffmpeg, opens outgoing
+# connections and (for ONVIF discovery) a UDP multicast socket.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
