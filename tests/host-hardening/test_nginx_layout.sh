@@ -30,8 +30,8 @@ if grep -q -- '- ./nginx:/opt/opennvr-nginx:ro' "$compose" \
     && grep -qE '15-opennvr-layout.sh; .*exec /docker-entrypoint.sh' "$compose"; then pass
 else fail "the nginx service must mount ./nginx at /opt/opennvr-nginx and run the script before the stock entrypoint"; fi
 
-start_test "the loopback hops (8443/8445) are never published"
-if grep -nE '"[^"]*:(8443|8445)(/tcp)?"' "$REPO_ROOT"/docker-compose*.yml | grep -v '^\s*#'; then
+start_test "the loopback hops (8443/8445/8446) are never published"
+if grep -nE '"[^"]*:(8443|8445|8446)(/tcp)?"' "$REPO_ROOT"/docker-compose*.yml | grep -v '^\s*#'; then
     fail "a compose file publishes a loopback-only nginx port"
 else pass; fi
 
@@ -93,6 +93,11 @@ if grep -q 'WebRTC over 443 on' <<<"$out" \
     && ! grep -qE 'listen (\[::\]:)?443 ssl' <<<"$out" \
     && grep -q 'mediamtx:18189' <<<"$out"; then pass
 else fail "$out"; fi
+
+start_test "camera ingest: ALPN opennvr-rtsps ends TLS at 8446 and reaches MediaMTX RTSP"
+out=$(run_layout "$REPO_ROOT/nginx" -- 'cat /etc/nginx/stream.d/opennvr.conf')
+if grep -q '"11"    127.0.0.1:8446;' <<<"$out"     && grep -q 'opennvr-rtsps' <<<"$out"     && grep -q 'listen 127.0.0.1:8446 ssl proxy_protocol;' <<<"$out"     && grep -q 'ssl_certificate     /etc/nginx/certs/server.crt;' <<<"$out"     && grep -q 'set $opennvr_rtsp mediamtx:8554;' <<<"$out"; then pass
+else fail "the ingest route or hop is missing from the rendered stream config"; fi
 
 # ── 2. "off" ──
 start_test "NGINX_SINGLE_PORT_WEBRTC=off: opennvr.conf as it is, no stream layer"

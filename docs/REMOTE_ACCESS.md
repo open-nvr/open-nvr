@@ -46,6 +46,10 @@ Only one server can receive a given public port. If two OpenNVR servers share a 
 
 The web UI can share 443 through a reverse proxy that routes by host name. The media port can't, because WebRTC media carries no host name. The same goes for WebRTC over 443: the proxy can pass non-TLS connections on 443 to one of the servers only. The other one uses its own media port.
 
+## Cameras pushed over 443
+
+Port 443 also accepts camera video pushed from another site, as RTSP over TLS with ALPN `opennvr-rtsps`. This is the route the site agent uses, so a cloud-hosted OpenNVR needs no ingest port of its own. TLS ends at nginx with the site's certificate (the Let's Encrypt one when `PUBLIC_HOSTNAME` is set). MediaMTX accepts a publish only with a JWT for that one camera path. The route needs the default `NGINX_SINGLE_PORT_WEBRTC=on`.
+
 ## A real certificate (Let's Encrypt)
 
 A site reached by a DNS name from the internet (a cloud install, or a site with a domain pointing at its router) can have a browser-trusted certificate instead of the self-signed one. Set the name in `.env` and run `./start.sh up` (or `.\start.ps1 up`):
