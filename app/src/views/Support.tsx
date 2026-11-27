@@ -30,6 +30,8 @@ type DiagItem = {
   details?: any
 }
 
+type MediaSnapshot = { global?: unknown; pathdefaults?: unknown; paths?: unknown }
+
 export function Support() {
   const fmt = useDateFormat()
   const { t } = useTranslation()
@@ -37,7 +39,8 @@ export function Support() {
   const canAdmin = !!user?.is_superuser
   const [health, setHealth] = useState<any | null>(null)
   const [diag, setDiag] = useState<Record<string, DiagItem>>({})
-  const [mtx, setMtx] = useState<{ global?: any; pathdefaults?: any; paths?: any } | null>(null)
+  const [mtx, setMtx] = useState<MediaSnapshot | null>(null)
+  const [snapshotRefreshing, setSnapshotRefreshing] = useState(false)
   const [settings, setSettings] = useState<{ webrtc?: any; media_source?: any } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -119,6 +122,30 @@ export function Support() {
 
     setNotice('Diagnostics completed')
   }, [canAdmin, resetDiag])
+
+  const refreshMediaSnapshot = useCallback(async () => {
+    setSnapshotRefreshing(true)
+    setError(null)
+    try {
+      const results = await Promise.allSettled([
+        apiService.mtxGlobalGet(),
+        apiService.mtxPathdefaultsGet(),
+        apiService.mtxPathsList(),
+      ])
+      const snapshot: MediaSnapshot = {}
+      if (results[0].status === 'fulfilled') snapshot.global = results[0].value.data?.details ?? results[0].value.data
+      if (results[1].status === 'fulfilled') snapshot.pathdefaults = results[1].value.data?.details ?? results[1].value.data
+      if (results[2].status === 'fulfilled') snapshot.paths = results[2].value.data?.details ?? results[2].value.data
+      if (results.every((result) => result.status === 'rejected')) {
+        throw results[0].status === 'rejected' ? results[0].reason : new Error('Media Server snapshot unavailable')
+      }
+      setMtx(snapshot)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Media Server snapshot unavailable')
+    } finally {
+      setSnapshotRefreshing(false)
+    }
+  }, [])
 
   const supportBundle = useMemo(() => {
     return {
@@ -274,7 +301,7 @@ export function Support() {
         <div className="card">
           <div className="flex items-center justify-between mb-2">
             <h2 className="font-medium">{t('support.snapshot')}</h2>
-            <button className="btn" onClick={runDiagnostics}>{t('support.refresh')}</button>
+            <button className="btn" onClick={refreshMediaSnapshot} disabled={snapshotRefreshing}>{t('support.refresh')}</button>
           </div>
           <div className="text-xs grid grid-cols-1 md:grid-cols-3 gap-2">
             <div className="p-2 bg-[var(--bg)] border border-[var(--border)]">
