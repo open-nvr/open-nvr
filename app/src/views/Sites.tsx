@@ -9,7 +9,7 @@
 
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Check, Copy, Globe, KeyRound, Plus, RefreshCw, Trash2, Unplug, Video } from 'lucide-react'
+import { Check, Copy, Gauge, Globe, KeyRound, Plus, RefreshCw, Trash2, Unplug, Video } from 'lucide-react'
 import { useTranslation } from '../i18n'
 import { useConfirm } from '../components/ui/ConfirmDialog'
 import { useSnackbar } from '../components/Snackbar'
@@ -17,11 +17,11 @@ import { usePermissions } from '../hooks/usePermissions'
 import { extractApiError } from '../lib/apiError'
 import { queryClient } from '../lib/queries'
 import { Badge, Button, EmptyState } from '../components/ui'
-import { Field, Input } from '../components/ui/form'
+import { Field, Input, Select } from '../components/ui/form'
 import { PageTitleBar } from '../components/ui/layout'
 import { Modal } from '../components/Modal'
 import {
-  cameraRelayState, siteService, siteStatus, suggestedRtspUrl,
+  cameraRelayState, siteService, siteStatus, siteUplinkKbps, suggestedRtspUrl,
   type DiscoveredDevice, type EnrolCode, type Site,
 } from '../services/siteService'
 
@@ -150,6 +150,46 @@ function AddCameraDialog({ site, device, onClose }: { site: Site; device: Discov
   )
 }
 
+function UplinkDialog({ site, onClose }: { site: Site; onClose: () => void }) {
+  const { showSuccess, showError } = useSnackbar()
+  const [policy, setPolicy] = useState<'always' | 'sub_only'>(site.live_policy === 'sub_only' ? 'sub_only' : 'always')
+  const [cap, setCap] = useState(site.uplink_cap_kbps ? String(site.uplink_cap_kbps) : '')
+  const noSub = site.cameras.filter((c) => !c.sub_url).length
+  const save = async () => {
+    try {
+      await siteService.update(site.id, { live_policy: policy, uplink_cap_kbps: cap.trim() ? Number(cap) : null })
+      showSuccess('Uplink settings saved; the site follows within seconds')
+      void queryClient.invalidateQueries({ queryKey: SITES_KEY })
+      onClose()
+    } catch (e) {
+      showError(extractApiError(e, 'Could not save'))
+    }
+  }
+  return (
+    <Modal open title={`Uplink for "${site.name}"`} onClose={onClose}
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" disabled={!!cap.trim() && !(Number(cap) >= 0)} onClick={save}>Save</Button>
+        </div>
+      }>
+      <div className="space-y-3 text-sm">
+        <Field label="What the site sends" hint={policy === 'sub_only'
+          ? `Each camera's sub stream only, into its main path: live view and recording at sub-stream quality.${noSub ? ` ${noSub} camera(s) without a sub stream keep sending their main stream.` : ''}`
+          : "Each camera's main stream, and its sub stream when it has one."}>
+          <Select value={policy} onChange={(e) => setPolicy(e.target.value as 'always' | 'sub_only')}>
+            <option value="always">Main and sub streams (full quality)</option>
+            <option value="sub_only">Sub streams only (thin uplink)</option>
+          </Select>
+        </Field>
+        <Field label="Uplink cap (kbps, optional)" hint="Over this, the agent pauses main streams (newest camera first) and brings them back when there is room. Sub streams are never paused. Empty: no cap.">
+          <Input inputMode="numeric" value={cap} onChange={(e) => setCap(e.target.value.replace(/[^0-9]/g, ''))} placeholder="e.g. 8000" />
+        </Field>
+      </div>
+    </Modal>
+  )
+}
+
 function SiteCard({ site, canManage, onCode, onAddCamera }: {
   site: Site
   canManage: boolean
@@ -159,6 +199,8 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
   const confirm = useConfirm()
   const { showSuccess, showError } = useSnackbar()
   const status = siteStatus(site)
+  const [uplinkOpen, setUplinkOpen] = useState(false)
+  const uplink = siteUplinkKbps(site)
   const refresh = () => queryClient.invalidateQueries({ queryKey: SITES_KEY })
 
   const act = async (fn: () => Promise<unknown>, ok: string, fail: string) => {
@@ -180,6 +222,12 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
         {site.enrolled && site.hostname && (
           <span className="text-xs text-[var(--text-dim)]">{site.hostname} · {site.agent_version}</span>
         )}
+        {site.online && (
+          <span className="text-xs text-[var(--text-dim)]" title="What the site sends upstream now">
+            ↑ {Math.round(uplink)} kbps{site.uplink_cap_kbps ? ` / ${site.uplink_cap_kbps} cap` : ''}
+            {site.live_policy === 'sub_only' ? ' · sub streams only' : ''}
+          </span>
+        )}
         <span className="flex-1" />
         {canManage && (
           <>
@@ -192,6 +240,9 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
             </Button>
             <Button size="sm" variant="outline" onClick={() => onAddCamera(site, null)}>
               <Plus size={14} /> Camera
+            </Button>
+            <Button size="sm" variant="outline" title="What the site sends, and an uplink cap" onClick={() => setUplinkOpen(true)}>
+              <Gauge size={14} /> Uplink
             </Button>
             {site.enrolled && (
               <Button size="sm" variant="danger" title="Cut the agent off now; its streams stop, cameras and recordings stay"
@@ -215,6 +266,7 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
         )}
       </div>
 
+      {uplinkOpen && <UplinkDialog site={site} onClose={() => setUplinkOpen(false)} />}
       <div className="px-3 py-2 space-y-2 text-sm">
         {site.cameras.length === 0 ? (
           <p className="text-[var(--text-dim)]">No cameras yet.{site.discovered.length > 0 ? ' The agent found some on the site\'s network:' : ''}</p>
@@ -222,13 +274,15 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
           <ul className="divide-y divide-[var(--border)]">
             {site.cameras.map((c) => {
               const st = cameraRelayState(site, c.id)
-              const variant = st?.state === 'live' ? 'success' : st?.state === 'error' ? 'destructive' : 'neutral'
+              const variant = st?.state === 'live' ? 'success' : st?.state === 'error' ? 'destructive' : st?.state === 'uplink_cap' ? 'warning' : 'neutral'
+              const label = st?.state === 'uplink_cap' ? 'paused (cap)' : st ? st.state : (site.online ? 'waiting' : '—')
               return (
                 <li key={c.id} className="flex items-center gap-2 py-1.5">
                   <Video size={14} className="text-[var(--text-dim)]" />
                   <span className="font-medium">{c.name}</span>
                   <span className="text-xs text-[var(--text-dim)]">{c.lan_host}</span>
-                  <Badge variant={variant} title={st?.detail || undefined}>{st ? st.state : (site.online ? 'waiting' : '—')}</Badge>
+                  <Badge variant={variant} title={st?.detail || undefined}>{label}</Badge>
+                  {st?.kbps ? <span className="text-xs text-[var(--text-dim)]">{Math.round(st.kbps)} kbps</span> : null}
                   <span className="flex-1" />
                   {canManage && (
                     <Button size="sm" variant="ghost" title="Stop relaying this camera from the site (the camera stays)"

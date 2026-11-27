@@ -26,6 +26,8 @@ type Relay struct {
 	tls    *tls.Config
 	logf   func(string, ...any)
 	wg     sync.WaitGroup
+	// Meter, when set, counts what each MediaMTX path sends upstream.
+	Meter *Meter
 }
 
 // StartRelay listens on loopback and relays to host:port with tlsCfg
@@ -66,6 +68,17 @@ func (r *Relay) accept(ctx context.Context) {
 
 func (r *Relay) serve(ctx context.Context, local net.Conn) {
 	defer local.Close()
+	// ffmpeg's first request names the MediaMTX path: read it before
+	// dialling, so the bytes this connection sends can be counted per stream.
+	first := make([]byte, 4096)
+	_ = local.SetReadDeadline(time.Now().Add(10 * time.Second))
+	n, err := local.Read(first)
+	_ = local.SetReadDeadline(time.Time{})
+	if err != nil || n == 0 {
+		return
+	}
+	first = first[:n]
+	path := rtspPath(first)
 	d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}, Config: r.tls}
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	conn, err := d.DialContext(dctx, "tcp", r.target)
@@ -84,7 +97,24 @@ func (r *Relay) serve(ctx context.Context, local net.Conn) {
 			r.target, want[0], remote.ConnectionState().NegotiatedProtocol)
 		return
 	}
-	pipe(local, remote)
+	if _, err := remote.Write(first); err != nil {
+		return
+	}
+	r.Meter.Add(path, n)
+	pipe(&countingConn{Conn: local, meter: r.Meter, path: path}, remote)
+}
+
+// countingConn counts what is read from the local side (ffmpeg's upload).
+type countingConn struct {
+	net.Conn
+	meter *Meter
+	path  string
+}
+
+func (c *countingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	c.meter.Add(c.path, n)
+	return n, err
 }
 
 // pipe copies both ways until either side closes, then closes both.

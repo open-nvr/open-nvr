@@ -41,6 +41,15 @@ The camera then appears on the Cameras page as **Site · \<its LAN address\>** a
 - **Enrol code** gives a new one-time code: to move the agent to another machine, or to let a revoked site back. The old credential keeps working until the new code is used.
 - **Unlink** stops relaying one camera (the camera and its recordings stay). A site with no cameras left can be deleted.
 
+## Uplink
+
+Each site card shows what the site sends upstream now (↑ kbps) and, per camera, what each stream costs. **Uplink** sets two things:
+
+- **What the site sends.** *Main and sub streams* (the default) sends both, at full quality. *Sub streams only* sends each camera's sub stream into its main path: live view, recording and detection all work, at sub-stream quality. Cameras with no sub stream keep sending their main stream.
+- **Uplink cap** in kbps. Over it, the agent pauses main streams, newest camera first, until the total fits; a paused camera shows **paused (cap)** and records nothing meanwhile. With room again (a camera went quiet, the cap was raised), paused streams come back one at a time, each after at least a minute. Sub streams are never paused: they keep every camera visible.
+
+A main stream on demand only while someone watches it is not offered: recording needs the main stream all the time.
+
 ## Limits
 
 - The site's uplink carries every relayed stream all the time (recording needs the main stream). Add a sub stream for each camera where you can.

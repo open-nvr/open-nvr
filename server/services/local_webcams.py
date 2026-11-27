@@ -254,6 +254,9 @@ def provisioning_for(camera: Any) -> dict[str, Any]:
       ffmpeg publishes the main path and ``<path>-sub`` from one capture, so
       both paths must exist; without the sub, MediaMTX refuses that output
       and ffmpeg exits, taking the main stream with it (issue #900).
+    * A camera at a remote site with a sub stream (Sites page):
+      ``{"substream": True}``. Its site's agent publishes the sub stream to
+      ``<path>-sub``; without the path MediaMTX refuses it.
     * Any other camera (a browser webcam publishes the main path only):
       ``{}``."""
     from core.camera_source import is_host_webcam
@@ -263,7 +266,8 @@ def provisioning_for(camera: Any) -> dict[str, Any]:
 
     device = getattr(camera, "source_device", None)
     if not is_local_device(device):
-        return {"substream": True} if is_host_webcam(camera) else {}
+        site_sub = bool(getattr(camera, "site_id", None) and getattr(camera, "site_sub_url", None))
+        return {"substream": True} if is_host_webcam(camera) or site_sub else {}
     name = _build_stream_name(settings.mediamtx_stream_prefix, camera.id, camera.ip_address)
     sub = substream_name(name)
     token = MediaMtxJwtService.create_publish_token(

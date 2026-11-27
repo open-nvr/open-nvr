@@ -14,6 +14,8 @@ export type SitePublisher = {
   state: 'starting' | 'live' | 'error' | 'waiting' | 'uplink_cap'
   detail?: string | null
   since?: number | null
+  /** What the stream sends upstream, last 10 s. */
+  kbps?: number | null
 }
 
 export type SiteCamera = {
@@ -80,6 +82,8 @@ export const siteService = {
   remove: async (id: number): Promise<void> => { await api.delete(`/api/v1/sites/${id}`) },
   link: async (id: number, cameraId: number, body: CameraLink): Promise<Site> =>
     (await api.put(`/api/v1/sites/${id}/cameras/${cameraId}`, body)).data,
+  update: async (id: number, body: { name?: string; live_policy?: 'always' | 'sub_only'; uplink_cap_kbps?: number | null }): Promise<Site> =>
+    (await api.patch(`/api/v1/sites/${id}`, body)).data,
   unlink: async (id: number, cameraId: number): Promise<Site> =>
     (await api.delete(`/api/v1/sites/${id}/cameras/${cameraId}`)).data,
   /** A pushed camera for a site: created like any camera, then linked. A link
@@ -113,6 +117,11 @@ export function siteStatus(s: Site): { label: string; variant: 'success' | 'warn
 /** A camera's relay state at the site (its main stream). */
 export function cameraRelayState(s: Site, cameraId: number): SitePublisher | undefined {
   return s.publishers.find((p) => p.camera_id === cameraId && p.stream === 'main')
+}
+
+/** What the site sends upstream now, in kbps (relayed streams, last 10 s). */
+export function siteUplinkKbps(s: Site): number {
+  return s.publishers.reduce((sum, p) => sum + (p.kbps || 0), 0)
 }
 
 /** An RTSP URL to start from for a discovered device. */

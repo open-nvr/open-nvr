@@ -204,7 +204,8 @@ func (r *recorder) run(name string, args []string) publisher.Process {
 func (r *recorder) count() int { r.mu.Lock(); defer r.mu.Unlock(); return len(r.runs) }
 
 func testAgent(rec *recorder) *Agent {
-	a := &Agent{o: Options{Config: &Config{}, Logf: func(string, ...any) {}}, streams: map[string]*stream{}, rpc: newRPCRunner(func(string, ...any) {})}
+	a := &Agent{o: Options{Config: &Config{}, Logf: func(string, ...any) {}}, streams: map[string]*stream{}, rpc: newRPCRunner(func(string, ...any) {}),
+		meter: NewMeter(), want: map[string]wantStream{}, shed: map[string]shedStream{}}
 	a.d = &deps{
 		ffmpeg:    "ffmpeg",
 		relayPort: func() int { return 40000 },

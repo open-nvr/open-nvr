@@ -43,6 +43,11 @@ type Agent struct {
 	camHosts []string
 	ingest   Ingest
 	scan     *OnvifScan
+	// Uplink: what each stream sends, the cap, what is wanted, what is paused.
+	meter   *Meter
+	capKbps int
+	want    map[string]wantStream
+	shed    map[string]shedStream
 }
 
 const (
@@ -61,6 +66,9 @@ func Run(ctx context.Context, o Options) error {
 		client:  NewClient(c.Server, c.Token, c.Pin, c.Insecure),
 		streams: map[string]*stream{},
 		rpc:     newRPCRunner(o.Logf),
+		meter:   NewMeter(),
+		want:    map[string]wantStream{},
+		shed:    map[string]shedStream{},
 	}
 	a.d = &deps{
 		ffmpeg:    o.FFmpeg,
@@ -79,6 +87,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	// Reports on their own clock, so a long poll never delays one.
 	go a.reportLoop(ctx)
+	go a.capLoop(ctx)
 
 	etag := ""
 	failures := 0
@@ -163,23 +172,32 @@ func (a *Agent) apply(ctx context.Context, ans *Answer) {
 			if a.relay != nil {
 				a.relay.Close()
 			}
+			r.Meter = a.meter
 			a.relay, a.ingest = r, ans.Ingest
 			a.o.Logf("video goes to %s:%d (ALPN %s)", ans.Ingest.Host, port, alpn)
 		} else {
 			a.o.Logf("cannot start the local relay: %v", err)
 		}
 	}
-	type wanted struct {
-		cameraID        int
-		kind, url, path string
-	}
-	want := map[string]wanted{}
+	want := map[string]wantStream{}
 	for _, d := range ans.Desired {
 		if d.MainURL != "" {
-			want[streamKey(d.CameraID, "main")] = wanted{d.CameraID, "main", d.MainURL, d.StreamName}
+			prio := 1
+			if d.MainFromSub {
+				prio = 0 // the camera's only stream: kept like a sub
+			}
+			want[streamKey(d.CameraID, "main")] = wantStream{d.CameraID, "main", d.MainURL, d.StreamName, prio}
 		}
 		if d.SubURL != "" && d.SubStreamName != "" {
-			want[streamKey(d.CameraID, "sub")] = wanted{d.CameraID, "sub", d.SubURL, d.SubStreamName}
+			want[streamKey(d.CameraID, "sub")] = wantStream{d.CameraID, "sub", d.SubURL, d.SubStreamName, 0}
+		}
+	}
+	a.want, a.capKbps = want, ans.UplinkCap
+	// A paused stream that is no longer wanted, or wanted differently, is
+	// forgotten (a changed one starts again below).
+	for k, sh := range a.shed {
+		if w, ok := want[k]; !ok || w != sh.want {
+			delete(a.shed, k)
 		}
 	}
 	a.camHosts = a.camHosts[:0]
@@ -203,6 +221,9 @@ func (a *Agent) apply(ctx context.Context, ans *Answer) {
 		}
 	}
 	for k, w := range want {
+		if _, paused := a.shed[k]; paused {
+			continue // under the uplink cap; enforceCap brings it back
+		}
 		if _, ok := a.streams[k]; !ok {
 			a.streams[k] = newStream(ctx, k, w.cameraID, w.kind, w.url, w.path, a.d)
 		}
@@ -250,8 +271,11 @@ func (a *Agent) report() Report {
 	a.mu.Lock()
 	states := make([]PublisherState, 0, len(a.streams))
 	for _, s := range a.streams {
-		states = append(states, s.state())
+		st := s.state()
+		st.Kbps = a.meter.Rate(s.path)
+		states = append(states, st)
 	}
+	states = append(states, a.shedStatesLocked()...)
 	scan := a.scan
 	a.mu.Unlock()
 	sort.Slice(states, func(i, j int) bool {
