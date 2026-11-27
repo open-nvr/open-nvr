@@ -72,10 +72,22 @@ export const FIRST_FRAME_WAIT_MS = 30000
  *  network changed (browser `online`, the tab shown again). */
 export const RETURN_PROBE_DELAY_MS = 3000
 
+/** A tile that had WebRTC working and then lost it (the reconnect after a
+ *  drop did not connect either) falls back to HLS but probes again this
+ *  soon, not after the full PROBE_INTERVAL_MS: a Wi-Fi hand-over or a VPN
+ *  re-key is a blip, not a network that cannot do WebRTC. */
+export const BLIP_PROBE_MS = 60 * 1000
+
 /** Fired on `window` by a tile whose probe reached WebRTC: every other tile
  *  on HLS by fallback switches back at once instead of waiting for its own
  *  probe. */
 export const WEBRTC_BACK_EVENT = 'opennvr:webrtc-back'
+
+/** Fired on `window` by a tile whose probe could not even start because its
+ *  own camera has no stream (WHEP 404, an error before ICE): that says
+ *  nothing about the network, so another fallen-back tile whose picture is
+ *  playing claims the probe (claimProbe) and runs it at once. */
+export const PROBE_HANDOFF_EVENT = 'opennvr:probe-handoff'
 
 export const MEMORY_KEY = 'opennvr.live.transport'
 
@@ -328,10 +340,21 @@ function writeMemory(storage: StorageLike | null | undefined, m: TransportMemory
   }
 }
 
-/** WebRTC did not connect: later tiles in this session start on HLS. */
-export function rememberHls(storage: StorageLike | null | undefined, reason: string, now: number) {
+/** WebRTC did not connect: later tiles in this session start on HLS.
+ *  `probeAfterMs` brings the next probe forward (BLIP_PROBE_MS after a
+ *  connection that had worked); without it the earlier schedule stands. */
+export function rememberHls(
+  storage: StorageLike | null | undefined,
+  reason: string,
+  now: number,
+  probeAfterMs?: number,
+) {
   const prev = readMemory(storage)
-  writeMemory(storage, { mode: 'hls', reason, at: now, probedAt: prev?.probedAt ?? now })
+  let probedAt = prev?.probedAt ?? now
+  if (probeAfterMs !== undefined) {
+    probedAt = Math.min(probedAt, now - PROBE_INTERVAL_MS + probeAfterMs)
+  }
+  writeMemory(storage, { mode: 'hls', reason, at: now, probedAt })
 }
 
 /** WebRTC connected: forget the fallback. */
@@ -345,11 +368,23 @@ export function forgetProbe(storage: StorageLike | null | undefined) {
   if (m) writeMemory(storage, { ...m, probedAt: 0 })
 }
 
+/** Take a handed-off probe (forgetProbe left it unclaimed): true for the
+ *  first tile that asks, which records the probe; false for the rest. */
+export function claimProbe(storage: StorageLike | null | undefined, now: number): boolean {
+  const m = readMemory(storage)
+  if (!m || m.probedAt !== 0) return false
+  writeMemory(storage, { ...m, probedAt: now })
+  return true
+}
+
 /**
  * What a new tile starts with. `preferred` is the caller's wish (every live
- * surface asks for WebRTC); the session's memory can turn that into HLS,
- * except once per PROBE_INTERVAL_MS, when one tile tries WebRTC again. The
- * probe is recorded here so a wall of tiles mounting together runs one.
+ * surface asks for WebRTC); the session's memory turns that into HLS. Once
+ * per PROBE_INTERVAL_MS one tile is told to probe: it still STARTS on HLS
+ * (a picture at once, never a black tile waiting out ICE) and tries WebRTC
+ * at once in the background; when that connects, every fallen-back tile
+ * switches. The probe is recorded here so a wall of tiles mounting together
+ * runs one.
  */
 export function initialTransport(
   preferred: 'webrtc' | 'hls',
@@ -362,7 +397,7 @@ export function initialTransport(
   if (!m) return { start: 'webrtc', probing: false, fallenBack: false }
   if (m.probedAt === 0 || now - m.probedAt >= PROBE_INTERVAL_MS) {
     writeMemory(storage, { ...m, probedAt: now })
-    return { start: 'webrtc', probing: true, fallenBack: false }
+    return { start: 'hls', probing: true, fallenBack: true }
   }
   return { start: 'hls', probing: false, fallenBack: true }
 }

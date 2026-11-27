@@ -249,3 +249,11 @@ jobs:
       - name: Build
         working-directory: app
         run: npm run build
+      # The pure-module tests in app/tests import src/*.ts directly, which
+      # needs Node's type stripping (22+); the build above stays on 20.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Unit tests (node --test)
+        working-directory: app
+        run: npm test
