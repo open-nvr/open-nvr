@@ -22,6 +22,7 @@ Handles environment variables and application settings.
 import base64
 import binascii
 import ipaddress
+import logging
 import os
 import socket
 from typing import Any, Literal
@@ -33,6 +34,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Owned by core.secret_policy so the Makefile's check-secrets target can import
 # it without instantiating Settings(). Single source of truth. See V-002.
 from core.secret_policy import PLACEHOLDER_FRAGMENTS as _PLACEHOLDER_FRAGMENTS  # noqa: F401
+
+logger = logging.getLogger(__name__)
 
 # Bare hostnames treated as internal (fast path before DNS resolution). IP
 # literals are classified in _host_is_internal. 0.0.0.0 is NOT internal — it's
@@ -57,7 +60,54 @@ _METADATA_ADDRESSES = frozenset({
     ipaddress.ip_address("169.254.169.254"),
     ipaddress.ip_address("169.254.170.2"),      # ECS task metadata
     ipaddress.ip_address("fd00:ec2::254"),
+    # Inside 100.64.0.0/10, which an operator may allow for cameras reached
+    # over a Tailscale-style tunnel (CAMERA_EXTRA_INTERNAL_CIDRS): Alibaba
+    # Cloud's metadata service, and Tailscale's own service address
+    # (MagicDNS, and on some nodes the local web client).
+    ipaddress.ip_address("100.100.100.200"),
+    ipaddress.ip_address("100.100.100.100"),
 })
+
+#: The narrowest prefix an operator-listed camera network may have. Wider
+#: than this (0.0.0.0/0, 64.0.0.0/2, ...) would switch the SSRF guard off
+#: rather than extend it, so such an entry is ignored with a warning.
+_MIN_EXTRA_PREFIX = {4: 8, 6: 16}
+
+#: (raw env value, parsed networks): re-parsed only when the value changes.
+_extra_nets_cache: tuple[str, tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = ("", ())
+
+
+def _extra_internal_networks() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Operator-listed networks that also count as internal for cameras:
+    CAMERA_EXTRA_INTERNAL_CIDRS, comma- or space-separated, e.g.
+    ``100.64.0.0/10`` for cameras reached over Tailscale, or a WireGuard
+    site subnet. Empty by default.
+
+    Read from the process environment, not the Settings object: the boot
+    validator (V-015) calls _ip_is_internal while Settings is being built.
+    Compose passes the variable through to core."""
+    global _extra_nets_cache
+    raw = (os.environ.get("CAMERA_EXTRA_INTERNAL_CIDRS") or "").strip()
+    if raw == _extra_nets_cache[0]:
+        return _extra_nets_cache[1]
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for token in raw.replace(",", " ").split():
+        try:
+            net = ipaddress.ip_network(token, strict=False)
+        except ValueError:
+            logger.warning("CAMERA_EXTRA_INTERNAL_CIDRS: %r is not a network; ignored", token)
+            continue
+        if net.prefixlen < _MIN_EXTRA_PREFIX[net.version]:
+            logger.warning(
+                "CAMERA_EXTRA_INTERNAL_CIDRS: %s is wider than /%d and would "
+                "disable the camera address check; ignored",
+                net,
+                _MIN_EXTRA_PREFIX[net.version],
+            )
+            continue
+        nets.append(net)
+    _extra_nets_cache = (raw, tuple(nets))
+    return _extra_nets_cache[1]
 
 
 def _ip_is_internal(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -76,6 +126,9 @@ def _ip_is_internal(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool
         addr.is_loopback
         or addr.is_private          # covers RFC1918 + IPv6 ULA
         or addr.is_link_local       # covers 169.254.0.0/16 + fe80::/10
+        # Opt-in tunnel networks (Tailscale 100.64/10, a WireGuard subnet):
+        # nothing by default, and never wider than _MIN_EXTRA_PREFIX.
+        or any(addr in net for net in _extra_internal_networks() if net.version == addr.version)
     )
 
 

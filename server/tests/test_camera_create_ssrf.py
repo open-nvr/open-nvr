@@ -120,3 +120,63 @@ def test_the_guard_runs_before_every_branch():
         hit = [i for i, l in enumerate(lines) if marker in l]
         assert hit, f"branch not found, test needs updating: {marker}"
         assert ci < hit[0], f"guard must run before: {marker}"
+
+
+# ---------------------------------------------------------------------------
+# Opt-in tunnel networks (CAMERA_EXTRA_INTERNAL_CIDRS): a cloud-hosted
+# OpenNVR pulling cameras over Tailscale (100.64.0.0/10) or a similar tunnel.
+
+
+@pytest.fixture
+def extra_cidrs(monkeypatch):
+    def _set(value: str):
+        monkeypatch.setenv("CAMERA_EXTRA_INTERNAL_CIDRS", value)
+    monkeypatch.delenv("CAMERA_EXTRA_INTERNAL_CIDRS", raising=False)
+    return _set
+
+
+def test_a_tailscale_address_is_refused_by_default(extra_cidrs):
+    assert _host_is_internal("100.101.102.103") is False
+
+
+def test_a_listed_tunnel_network_is_accepted(extra_cidrs):
+    extra_cidrs("100.64.0.0/10")
+    assert _host_is_internal("100.101.102.103") is True
+    # Only what is listed: the rest of the public internet stays out.
+    assert _host_is_internal("100.128.0.1") is False
+    assert _host_is_internal("8.8.8.8") is False
+
+
+@pytest.mark.parametrize("host", ["100.100.100.100", "100.100.100.200", "169.254.169.254"])
+def test_metadata_and_tailscale_service_stay_refused_under_a_covering_cidr(extra_cidrs, host):
+    extra_cidrs("100.64.0.0/10, 169.254.0.0/16")
+    assert _host_is_internal(host) is False
+
+
+@pytest.mark.parametrize("value", ["0.0.0.0/0", "64.0.0.0/2", "::/0", "not-a-network"])
+def test_a_network_that_would_switch_the_guard_off_is_ignored(extra_cidrs, value):
+    extra_cidrs(value)
+    assert _host_is_internal("8.8.8.8") is False
+    assert _host_is_internal("2001:4860:4860::8888") is False
+
+
+def test_several_networks_comma_or_space_separated(extra_cidrs):
+    # Public ranges on purpose: Python already counts the documentation
+    # ranges (192.0.2.0/24, ...) as private.
+    extra_cidrs("100.64.0.0/10,45.10.20.0/24 46.20.30.0/24")
+    assert _host_is_internal("45.10.20.7") is True
+    assert _host_is_internal("46.20.30.7") is True
+    assert _host_is_internal("47.30.40.7") is False
+
+
+def test_camera_create_accepts_a_listed_tunnel_camera(extra_cidrs):
+    from routers.cameras import _reject_external_camera_hosts
+
+    class _C:
+        ip_address = "100.101.102.103"
+        rtsp_url = "rtsp://100.101.102.103:554/stream"
+
+    with pytest.raises(Exception):
+        _reject_external_camera_hosts(_C())
+    extra_cidrs("100.64.0.0/10")
+    _reject_external_camera_hosts(_C())  # no exception
