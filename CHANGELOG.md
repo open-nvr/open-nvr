@@ -92,6 +92,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The yard Look step ignores a guard only on a sign it can see.** It
+  now reports `guard_sign` beside `who`, and a guard with no sign alerts
+  like a stranger. On the public night-yard cases, strangers let through
+  fell from 25 to 8 of 54 and the pass rate rose from 77% to 87%, the
+  first run that meets the step's bar
+  (`examples/camera-agent/MODELS_AND_LATENCY.md`). No public set has a
+  real guard: check on the site's recording before relying on it.
+
 - **Browser webcam that can't reach the server now says why, on the right side** (#1025).
   The publish page used to blame the viewer's network for a missing port 8189.
   It now names the router or firewall in front of the server, and explains why
