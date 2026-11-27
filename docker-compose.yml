@@ -679,6 +679,10 @@ services:
       # The ICE media port as published on the host (the mediamtx service
       # above): the player adds the page's own address on this port.
       - WEBRTC_ICE_PORT=${WEBRTC_ICE_PORT:-8189}
+      # Extra networks that count as "internal" for camera addresses, e.g.
+      # 100.64.0.0/10 for cameras reached over Tailscale. Empty by default;
+      # see .env.example.
+      - CAMERA_EXTRA_INTERNAL_CIDRS=${CAMERA_EXTRA_INTERNAL_CIDRS:-}
       - KAI_C_URL=http://127.0.0.1:8100
       # Duplicate-sighting dedup for plate reads: a fragmented track
       # (moving camera, occlusion) re-reads the car just read; the same
