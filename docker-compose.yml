@@ -696,6 +696,10 @@ services:
       # WebRTC public address when none is set under Settings → WebRTC, and
       # the name the `acme` service gets a Let's Encrypt certificate for.
       - PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-}
+      # Extra networks that count as "internal" for camera addresses, e.g.
+      # 100.64.0.0/10 for cameras reached over Tailscale. Empty by default;
+      # see .env.example.
+      - CAMERA_EXTRA_INTERNAL_CIDRS=${CAMERA_EXTRA_INTERNAL_CIDRS:-}
       - KAI_C_URL=http://127.0.0.1:8100
       # Duplicate-sighting dedup for plate reads: a fragmented track
       # (moving camera, occlusion) re-reads the car just read; the same

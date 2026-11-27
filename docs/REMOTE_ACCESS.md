@@ -84,3 +84,16 @@ To test the forward itself, send UDP to the public address from outside the site
 # on the server, before and after
 docker exec opennvr_mediamtx cat /proc/net/snmp | awk '/^Udp:/{n++} n==2{print "InDatagrams", $2; exit}'
 ```
+
+## Cameras at another site, over a VPN
+
+An OpenNVR in the cloud (or at head office) can pull cameras from a remote site through a VPN tunnel, with no port forwarded at the site. OpenNVR only dials camera addresses on private networks (RFC1918, loopback, link-local), as a guard against being used to reach arbitrary hosts.
+
+- **WireGuard or IPsec on a 10.x or 192.168.x subnet:** those addresses are already private. Add the cameras by their tunnel address.
+- **Tailscale (100.x addresses):** those are carrier-grade NAT addresses, not private ones, so OpenNVR refuses them until you list the network in `.env`, then run `./start.sh up` (or `.\start.ps1 up`):
+
+  ```
+  CAMERA_EXTRA_INTERNAL_CIDRS=100.64.0.0/10
+  ```
+
+  Several networks can be listed, comma-separated. Anything wider than a /8 is ignored, because it would switch the check off. Cloud metadata addresses (`169.254.169.254`, `100.100.100.200`) and Tailscale's own `100.100.100.100` are refused whatever is listed.
