@@ -40,5 +40,13 @@ for t in windows/amd64 windows/arm64 linux/amd64 linux/arm64 darwin/amd64 darwin
     CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
         -ldflags "$flags -X $PKG.Build=$BUILD" \
         -o "$OUT/$os-$arch/opennvr-host$ext" ./cmd/opennvr-host
+    if [ "$os" = windows ]; then
+        # The same program as a console one, for site agents (docs/SITE_AGENT.md):
+        # run from a terminal, a GUI-subsystem program prints nothing and
+        # PowerShell does not wait for it, so `enrol` seemed to do nothing.
+        CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+            -ldflags "-s -w -X $PKG.Build=$BUILD" \
+            -o "$OUT/$os-$arch/console/opennvr-host$ext" ./cmd/opennvr-host
+    fi
 done
 printf '%s\n' "$BUILD" > "$OUT/BUILD"
