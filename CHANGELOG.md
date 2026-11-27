@@ -100,6 +100,9 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The Media Server snapshot's Refresh button now reloads only that snapshot;
+  it no longer reruns and clears the separate quick diagnostics.
+
 - **The yard Look step ignores a guard only on a sign it can see.** It
   now reports `guard_sign` beside `who`, and a guard with no sign alerts
   like a stranger. On the public night-yard cases, strangers let through
