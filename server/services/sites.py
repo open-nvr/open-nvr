@@ -412,6 +412,117 @@ def ingest_target(request_host: str | None) -> dict[str, Any]:
     return {"host": host, "port": 443, "alpn": INGEST_ALPN}
 
 
+# ── the agent binary, served by this server ──────────────────────────────
+
+#: Where the core image keeps the host agent builds (Dockerfile, stage 1b):
+#: ``<os>-<arch>/opennvr-host[.exe]``, Windows also ``console/`` (see below).
+AGENT_DIR_DEFAULT = "/opt/opennvr-host"
+AGENT_PLATFORMS = tuple(f"{o}-{a}" for o in ("linux", "darwin", "windows") for a in ("amd64", "arm64"))
+_sum_cache: dict[str, tuple[float, int, str]] = {}
+
+
+def agent_binary(platform: str) -> tuple[str, str] | None:
+    """(path, download file name) of the agent build for *platform*, or None.
+
+    Windows gets the console build: the default one is a GUI-subsystem
+    program (no window when the webcam agent starts at logon), and a GUI
+    program run from a terminal prints nothing and is not waited for, so
+    ``enrol`` would look like it did nothing."""
+    import os
+
+    if platform not in AGENT_PLATFORMS:
+        return None
+    root = os.environ.get("OPENNVR_HOST_AGENT_DIR") or AGENT_DIR_DEFAULT
+    if platform.startswith("windows-"):
+        candidates = [os.path.join(root, platform, "console", "opennvr-host.exe"),
+                      os.path.join(root, platform, "opennvr-host.exe")]
+        name = "opennvr-host.exe"
+    else:
+        candidates = [os.path.join(root, platform, "opennvr-host")]
+        name = "opennvr-host"
+    for path in candidates:
+        if os.path.isfile(path):
+            return path, name
+    return None
+
+
+def _sha256_file(path: str) -> str:
+    """The file's SHA-256, cached by (mtime, size): the builds only change
+    with the image, and hashing ~15 MB on every listing is waste."""
+    import os
+
+    st = os.stat(path)
+    hit = _sum_cache.get(path)
+    if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
+        return hit[2]
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    _sum_cache[path] = (st.st_mtime, st.st_size, h.hexdigest())
+    return h.hexdigest()
+
+
+def agent_build() -> str | None:
+    import os
+
+    root = os.environ.get("OPENNVR_HOST_AGENT_DIR") or AGENT_DIR_DEFAULT
+    try:
+        with open(os.path.join(root, "BUILD"), encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def agent_downloads() -> list[dict[str, Any]]:
+    """Every agent build this server has: platform, file name, size, sha256."""
+    import os
+
+    out = []
+    for platform in AGENT_PLATFORMS:
+        found = agent_binary(platform)
+        if found:
+            path, name = found
+            out.append({"platform": platform, "filename": name,
+                        "size": os.path.getsize(path), "sha256": _sha256_file(path)})
+    return out
+
+
+def setup_commands(host: str, code: str, pin: str | None) -> list[dict[str, str]]:
+    """Copy-paste setup per OS, for the enrol dialog: fetch the agent from
+    this server, enrol it, start it.
+
+    The download first trusts the normal certificate chain (a Let's Encrypt
+    certificate, or a front proxy's), and only if that fails the pinned key
+    of this server's own certificate: the agent's enrol does the same. curl's
+    ``--pinnedpubkey`` is checked even with ``-k``, so a self-signed server
+    cannot be swapped on the way."""
+    base = f"https://{host}/api/v1/site-agent/download"
+    pin_arg = f"-pin {pin} " if pin else ""
+    curl_pin = f"sha256//{pin.split('/', 1)[1]}" if pin and "/" in pin else None
+
+    unix_url = f"{base}/$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+    unix_dl = f'curl -fso opennvr-host "{unix_url}"'
+    if curl_pin:
+        unix_dl += f' || curl -fsSko opennvr-host --pinnedpubkey "{curl_pin}" "{unix_url}"'
+    unix_dl = f"({unix_dl}) && chmod +x opennvr-host"
+
+    win_url = f"{base}/windows-$($env:PROCESSOR_ARCHITECTURE.ToLower())"
+    win_dl = f'curl.exe -fso opennvr-host.exe "{win_url}"'
+    if curl_pin:
+        win_dl += (f'; if ($LASTEXITCODE -ne 0) {{ curl.exe -fsSko opennvr-host.exe '
+                   f'--pinnedpubkey "{curl_pin}" "{win_url}" }}')
+
+    return [
+        {"os": "linux", "label": "Linux / macOS / Raspberry Pi", "download": unix_dl,
+         "enrol": f"./opennvr-host enrol {pin_arg}https://{host} {code}",
+         "run": "./opennvr-host site"},
+        {"os": "windows", "label": "Windows (PowerShell)", "download": win_dl,
+         "enrol": f".\\opennvr-host.exe enrol {pin_arg}https://{host} {code}",
+         "run": ".\\opennvr-host.exe site"},
+    ]
+
+
 def public_view(db: Session, site: Site) -> dict[str, Any]:
     last = _aware(site.last_seen_at)
     try:

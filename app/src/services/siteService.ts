@@ -57,11 +57,31 @@ export type Site = {
   server_pin: string | null
 }
 
+/** Copy-paste setup for one OS: fetch the agent from this server, enrol, start. */
+export type SetupCommands = {
+  os: 'linux' | 'windows'
+  label: string
+  download: string
+  enrol: string
+  run: string
+}
+
 export type EnrolCode = {
   enrol_code: string
   enrol_expires_at: string
   enrol_command: string
+  /** Absent from servers older than the download route. */
+  setup?: SetupCommands[]
 }
+
+/** Builds of the agent this server serves at /api/v1/site-agent/download/<platform>. */
+export const AGENT_DOWNLOADS: { platform: string; label: string }[] = [
+  { platform: 'windows-amd64', label: 'Windows (x64)' },
+  { platform: 'linux-amd64', label: 'Linux (x64)' },
+  { platform: 'linux-arm64', label: 'Linux (ARM64, Raspberry Pi 4/5)' },
+  { platform: 'darwin-arm64', label: 'macOS (Apple silicon)' },
+  { platform: 'darwin-amd64', label: 'macOS (Intel)' },
+]
 
 export type CameraLink = {
   main_url: string
