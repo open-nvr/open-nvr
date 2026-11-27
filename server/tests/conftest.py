@@ -59,3 +59,17 @@ def _fresh_enrichment_gates():
     _reset_for_tests(); _reset_gov(); _reset_req()
     yield
     _reset_for_tests(); _reset_gov(); _reset_req()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_camera_auth_guard():
+    """Remembered login refusals are per process; one test's wrong password
+    must not answer for the next test's camera."""
+    try:
+        from services import camera_auth_guard
+    except Exception:  # noqa: BLE001 — a test that never imports services
+        yield
+        return
+    camera_auth_guard.clear()
+    yield
+    camera_auth_guard.clear()
