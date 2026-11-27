@@ -19,8 +19,22 @@
 
 resolver 127.0.0.11 valid=10s ipv6=off;
 
-map $ssl_preread_protocol $opennvr_route {
-    ""      127.0.0.1:8445;
+# Where a connection on 443 goes:
+#   not TLS                          -> MediaMTX's ICE port (WebRTC media)
+#   TLS offering ALPN opennvr-rtsps  -> camera ingest (a site agent pushing
+#                                       RTSP over TLS; see the 8446 hop)
+#   any other TLS                    -> the web server
+map $ssl_preread_protocol $opennvr_is_tls {
+    ""      0;
+    default 1;
+}
+map $ssl_preread_alpn_protocols $opennvr_is_rtsps {
+    "~(^|,)opennvr-rtsps(,|$)" 1;
+    default 0;
+}
+map "$opennvr_is_tls$opennvr_is_rtsps" $opennvr_route {
+    "00"    127.0.0.1:8445;
+    "11"    127.0.0.1:8446;
     default 127.0.0.1:8443;
 }
 
@@ -28,6 +42,7 @@ map $ssl_preread_protocol $opennvr_route {
 # Desktop, IPv6 docker-proxy or a corporate NAT every viewer can share one
 # address, and a 16-tile wall is ~20 connections per viewer already.
 limit_conn_zone $binary_remote_addr zone=opennvr_ice_per_ip:1m;
+limit_conn_zone $binary_remote_addr zone=opennvr_rtsps_per_ip:1m;
 
 server {
     listen 443;
@@ -54,4 +69,29 @@ server {
     proxy_connect_timeout 5s;
     proxy_timeout 1h;
     proxy_pass $opennvr_ice;
+}
+
+# Camera ingest hop: a site agent (cameras behind NAT at a customer site,
+# OpenNVR in the cloud) dials 443 with ALPN "opennvr-rtsps" and pushes each
+# camera as RTSP over TLS. TLS ends here with the site's own certificate
+# (the same one the web UI serves, Let's Encrypt when PUBLIC_HOSTNAME is set),
+# so an agent pins or verifies one certificate; MediaMTX gets plain RTSP on
+# the internal network (rtspEncryption: optional there) and still checks
+# every publish against its JWT (?jwt= in the URL, path-scoped, short-lived).
+# Nothing on the internet reaches MediaMTX's own RTSP ports.
+server {
+    listen 127.0.0.1:8446 ssl proxy_protocol;
+    set_real_ip_from 127.0.0.1;
+    ssl_certificate     /etc/nginx/certs/server.crt;
+    ssl_certificate_key /etc/nginx/certs/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_alpn opennvr-rtsps;
+    ssl_handshake_timeout 10s;
+    # A site pushes main + sub per camera; a few dozen per address is a site.
+    limit_conn opennvr_rtsps_per_ip 64;
+    set $opennvr_rtsp mediamtx:8554;
+    proxy_connect_timeout 5s;
+    # A publisher sends continuously; ten idle minutes is a dead link.
+    proxy_timeout 10m;
+    proxy_pass $opennvr_rtsp;
 }

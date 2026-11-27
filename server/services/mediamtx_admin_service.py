@@ -635,6 +635,63 @@ class MediaMtxAdminService:
         except Exception as e:
             return {"status": "error", "message": f"Request failed: {e!s}"}
 
+    @staticmethod
+    async def kick_path_sessions(path_names: list[str]) -> dict[str, Any]:
+        """End every RTSP and RTSPS session, publishing or reading, on these
+        paths.
+
+        A publish JWT is checked only when a session starts, so taking a
+        publisher's access away (a site agent revoked, issue #925 cloud
+        ingest) needs its running sessions closed as well, or the stream
+        carries on until the link drops. Camera ingest over 443 arrives as
+        plain RTSP behind nginx, so both session kinds are swept.
+
+        Returns ``{"status": "ok" | "partial" | "no_admin_api", "kicked":
+        [...], "errors": [...]}``; a list that fails is reported, and the
+        other kind is still swept."""
+        if not MediaMtxAdminService.is_configured():
+            return {"status": "no_admin_api", "kicked": [], "errors": []}
+        wanted = {p for p in path_names if p}
+        kicked: list[str] = []
+        errors: list[str] = []
+        if not wanted:
+            return {"status": "ok", "kicked": kicked, "errors": errors}
+        base = MediaMtxAdminService._base()
+        headers = MediaMtxAdminService._headers()
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                for kind in ("rtspsessions", "rtspssessions"):
+                    page = 0
+                    while True:
+                        resp = await client.get(
+                            f"{base}/{kind}/list",
+                            params={"page": page, "itemsPerPage": 200},
+                            headers=headers,
+                        )
+                        if resp.status_code != 200:
+                            errors.append(f"{kind}/list: HTTP {resp.status_code}")
+                            break
+                        data = resp.json() or {}
+                        for item in data.get("items") or []:
+                            if item.get("path") not in wanted or not item.get("id"):
+                                continue
+                            kick = await client.post(
+                                f"{base}/{kind}/kick/{item['id']}", headers=headers
+                            )
+                            label = f"{kind}:{item['id']}:{item.get('path')}"
+                            if kick.status_code == 200:
+                                kicked.append(label)
+                            else:
+                                errors.append(f"{label}: HTTP {kick.status_code}")
+                        page += 1
+                        if page >= int(data.get("pageCount") or 0):
+                            break
+        except Exception as e:  # noqa: BLE001 - reported to the caller
+            errors.append(f"request failed: {e!s}")
+        if kicked:
+            mediamtx_logger.info("Kicked MediaMTX sessions: %s", kicked)
+        return {"status": "ok" if not errors else "partial", "kicked": kicked, "errors": errors}
+
     # === PATH DEFAULTS ===
 
     @staticmethod
