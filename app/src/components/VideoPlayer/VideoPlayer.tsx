@@ -33,12 +33,15 @@ import {
   DEFAULT_EXTRAS,
   GATHER_WAIT_MS,
   ICE_GIVE_UP_MS,
+  BLIP_PROBE_MS,
   PROBE_INTERVAL_MS,
   RETURN_PROBE_DELAY_MS,
   SLOW_RETRY_MS,
   STALL_AFTER_MS,
   STALL_CHECK_MS,
+  PROBE_HANDOFF_EVENT,
   WEBRTC_BACK_EVENT,
+  claimProbe,
   addressBarHost,
   candidateLines,
   clearMemory,
@@ -251,6 +254,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // True while this tile plays HLS because WebRTC could not connect (as
     // opposed to the caller or the viewer asking for HLS). Drives the badge.
     const [autoHls, setAutoHls] = useState(initial.fallenBack)
+    // When this tile's next WebRTC probe is due, once it is on HLS by
+    // fallback: at once for the tile the session picked to probe (it starts
+    // on HLS and probes in the background), BLIP_PROBE_MS after WebRTC had
+    // worked and then dropped, PROBE_INTERVAL_MS otherwise.
+    const nextProbeInRef = useRef(initial.probing ? 0 : PROBE_INTERVAL_MS)
+    // WebRTC reached `connected` at least once on this mount.
+    const everConnectedRef = useRef(false)
     const [isPlaying, setIsPlaying] = useState(false)
     const [isMuted, setIsMuted] = useState(muted)
     const [volume, setVolume] = useState(muted ? 0 : 1)
@@ -510,7 +520,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // bounded WebRTC retry applies.
     const giveUpWebRTC = useCallback((reason: string) => {
       if (mode === 'live' && hlsUrl && !manualChoiceRef.current) {
-        rememberHls(transportMemory(), reason, Date.now())
+        if (everConnectedRef.current) {
+          // It worked here minutes ago: a blip (Wi-Fi hand-over, VPN
+          // re-key), not a network without WebRTC. HLS for now, and look
+          // again soon rather than in fifteen minutes.
+          rememberHls(transportMemory(), reason, Date.now(), BLIP_PROBE_MS)
+          nextProbeInRef.current = BLIP_PROBE_MS
+        } else {
+          rememberHls(transportMemory(), reason, Date.now())
+        }
         cleanup()
         setIsReconnecting(false)
         setAutoHls(true)
@@ -688,6 +706,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             setIsReconnecting(false)
             retryCountRef.current = 0
             whepConnectedRef.current = true
+            everConnectedRef.current = true
             if (iceDeadlineRef.current) {
               clearTimeout(iceDeadlineRef.current)
               iceDeadlineRef.current = null
@@ -1302,7 +1321,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       let resource: string | null = null
       let deadline = 0
       let settled = false
-      const finish = (ok: boolean) => {
+      const finish = (ok: boolean, handOff = false) => {
         if (settled) return
         settled = true
         window.clearTimeout(deadline)
@@ -1314,8 +1333,16 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         if (ok) {
           window.dispatchEvent(new Event(WEBRTC_BACK_EVENT))
           backToWebRTC()
-        } else {
-          scheduleProbeRef.current(PROBE_INTERVAL_MS)
+          return
+        }
+        scheduleProbeRef.current(PROBE_INTERVAL_MS)
+        if (handOff) {
+          // This tile's camera has no stream (WHEP refused before any ICE),
+          // which says nothing about the network: let a tile whose picture
+          // is playing run the probe instead of everyone waiting out the
+          // interval on HLS.
+          forgetProbe(transportMemory())
+          window.dispatchEvent(new Event(PROBE_HANDOFF_EVENT))
         }
       }
       // The effect's cleanup ends a probe still in flight through this.
@@ -1334,7 +1361,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         }
         resource = done.resource
       } catch {
-        finish(false)
+        finish(false, true)
       }
     }, [whepUrl, rtcConfig, negotiateWhep, backToWebRTC])
 
@@ -1352,15 +1379,31 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         }, ms)
       }
       scheduleProbeRef.current = schedule
-      schedule(PROBE_INTERVAL_MS)
+      schedule(nextProbeInRef.current)
+      nextProbeInRef.current = PROBE_INTERVAL_MS
       const soon = () => {
         if (document.visibilityState !== 'hidden') schedule(RETURN_PROBE_DELAY_MS)
       }
       const onBack = () => backToWebRTC()
+      // A probe handed off by a tile whose camera had no stream: the first
+      // tile with a picture takes it — now if it is playing, or the moment
+      // its HLS starts (the handoff can come before any HLS has loaded).
+      // Only playing tiles claim, so a wall of offline cameras cannot pass
+      // the probe round for ever.
+      const video = videoRef.current
+      const tryClaim = () => {
+        const v = videoRef.current
+        if (!v || v.paused || v.readyState < 2) return
+        if (claimProbe(transportMemory(), Date.now())) schedule(0)
+      }
       window.addEventListener('online', soon)
       document.addEventListener('visibilitychange', soon)
       window.addEventListener(WEBRTC_BACK_EVENT, onBack)
+      window.addEventListener(PROBE_HANDOFF_EVENT, tryClaim)
+      video?.addEventListener('playing', tryClaim)
       return () => {
+        window.removeEventListener(PROBE_HANDOFF_EVENT, tryClaim)
+        video?.removeEventListener('playing', tryClaim)
         scheduleProbeRef.current = () => {}
         if (probeTimerRef.current) {
           window.clearTimeout(probeTimerRef.current)

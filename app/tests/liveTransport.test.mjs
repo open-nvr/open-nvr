@@ -4,9 +4,11 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   MEDIAMTX_HANDSHAKE_MS,
+  BLIP_PROBE_MS,
   PROBE_INTERVAL_MS,
   addressBarHost,
   candidateLines,
+  claimProbe,
   clearMemory,
   forgetProbe,
   hostCandidates,
@@ -215,13 +217,45 @@ test('a fresh session starts on WebRTC; after a fallback later tiles start on HL
   assert.equal(readMemory(s).reason, 'ice-timeout')
 })
 
-test('one tile probes WebRTC again after the interval, and only one', () => {
+test('one tile probes WebRTC again after the interval, and only one, from HLS', () => {
   const s = new MemStorage()
   const t0 = 1_000_000
   rememberHls(s, 'ice-failed', t0)
   const later = t0 + PROBE_INTERVAL_MS
-  assert.deepEqual(initialTransport('webrtc', true, s, later), { start: 'webrtc', probing: true, fallenBack: false })
+  // The probing tile starts on HLS too: a picture at once, the probe runs
+  // in the background, never a black tile waiting out ICE.
+  assert.deepEqual(initialTransport('webrtc', true, s, later), { start: 'hls', probing: true, fallenBack: true })
   assert.deepEqual(initialTransport('webrtc', true, s, later + 10), { start: 'hls', probing: false, fallenBack: true })
+})
+
+test('a fallback after WebRTC had worked probes again after BLIP_PROBE_MS, not the full interval', () => {
+  const s = new MemStorage()
+  const t0 = 1_000_000
+  rememberHls(s, 'ice-timeout', t0, BLIP_PROBE_MS)
+  assert.equal(initialTransport('webrtc', true, s, t0 + BLIP_PROBE_MS - 1).probing, false)
+  assert.equal(initialTransport('webrtc', true, s, t0 + BLIP_PROBE_MS).probing, true)
+})
+
+test('a handed-off probe is claimed by exactly one tile', () => {
+  const s = new MemStorage()
+  rememberHls(s, 'ice-timeout', 1_000_000)
+  // Nothing to claim while a probe is recorded.
+  assert.equal(claimProbe(s, 1_000_100), false)
+  forgetProbe(s)
+  assert.equal(claimProbe(s, 1_000_200), true)
+  assert.equal(claimProbe(s, 1_000_201), false)
+  assert.equal(readMemory(s).probedAt, 1_000_200)
+  // No fallback remembered: nothing to claim.
+  clearMemory(s)
+  assert.equal(claimProbe(s, 1_000_300), false)
+})
+
+test('a plain fallback never pushes an earlier, sooner probe back', () => {
+  const s = new MemStorage()
+  rememberHls(s, 'ice-timeout', 1_000_000, BLIP_PROBE_MS)
+  const soon = readMemory(s).probedAt
+  rememberHls(s, 'ice-timeout', 1_000_500)
+  assert.equal(readMemory(s).probedAt, soon)
 })
 
 test('coming back online forces a probe; a successful connection clears everything', () => {
