@@ -78,7 +78,7 @@ export const RETURN_PROBE_DELAY_MS = 3000
  *  re-key is a blip, not a network that cannot do WebRTC. */
 export const BLIP_PROBE_MS = 60 * 1000
 
-/** Fired on `window` by a tile whose probe reached WebRTC: every other tile
+/** Fired on `window` by a tile whose WebRTC connected: every other tile
  *  on HLS by fallback runs its own probe at once instead of waiting out the
  *  interval. It does not switch blindly: on a network where WebRTC connects
  *  only some of the time, one tile's luck is no promise for the next. */
@@ -271,13 +271,21 @@ export function insertCandidates(sdp: string, lines: string[]): string {
 export function makeStallTracker(
   afterMs: number = STALL_AFTER_MS,
   firstFrameMs: number = FIRST_FRAME_WAIT_MS,
+  relative: boolean = false,
 ): (frames: number, now: number, bytes?: number) => boolean {
   let last = -1
   let lastMoveAt = 0
   let startedAt = -1
   let lastBytes = -1
   let lastBytesAt = 0
-  return (frames: number, now: number, bytes?: number) => {
+  // `relative`: the connection was adopted (lib/liveStreams) with frames
+  // already counted. Its first sample is the zero, so the next frame waits
+  // with first-frame patience: a browser that stopped decoding while the
+  // connection was parked needs the camera's next keyframe.
+  let base = -1
+  return (rawFrames: number, now: number, bytes?: number) => {
+    if (relative && base < 0) base = rawFrames
+    const frames = relative ? Math.max(0, rawFrames - base) : rawFrames
     if (startedAt < 0) startedAt = now
     if (bytes !== undefined && bytes !== lastBytes) {
       lastBytes = bytes

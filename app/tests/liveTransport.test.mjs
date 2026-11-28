@@ -200,6 +200,25 @@ test('before the first frame, arriving packets wait for a slow keyframe', () => 
   assert.equal(dried(0, 11000, 5000), true, 'bytes stopped 8 s ago')
 })
 
+test('an adopted connection counts frames from adoption and waits for a keyframe like a new one', () => {
+  // Parked with 500 frames decoded; the browser stopped decoding while it
+  // was parked, so nothing new comes until the camera's next keyframe.
+  const adopted = makeStallTracker(8000, 30000, true)
+  assert.equal(adopted(500, 0, 1000), false)
+  assert.equal(adopted(500, 9000, 50_000), false)   // bytes arrive: waiting, not stalled
+  assert.equal(adopted(500, 29_000, 90_000), false)
+  assert.equal(adopted(500, 30_000, 95_000), true)  // first-frame patience runs out
+  // Without `relative`, the same samples trip the plain 8 s rule.
+  const plain = makeStallTracker(8000, 30000)
+  assert.equal(plain(500, 0, 1000), false)
+  assert.equal(plain(500, 9000, 50_000), true)
+  // Decoding carries on (Chromium): plain frame counting from there.
+  const flowing = makeStallTracker(8000, 30000, true)
+  assert.equal(flowing(500, 0, 1000), false)
+  assert.equal(flowing(530, 3000, 9000), false)
+  assert.equal(flowing(530, 11_100, 9000), true)
+})
+
 test('no DELETE for a never-connected session MediaMTX has already dropped', () => {
   assert.equal(shouldDeleteSession(true, MEDIAMTX_HANDSHAKE_MS * 5), true)
   assert.equal(shouldDeleteSession(false, 2000), true)

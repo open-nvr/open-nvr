@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { rebaseToCurrentOrigin } from '../lib/streamUrl'
 import { VideoPlayer, type VideoPlayerHandle } from '../components/VideoPlayer'
@@ -641,7 +642,6 @@ function Tile({
   const { t } = useTranslation()
   const [cameraId, setCameraId] = useState<number | null>(null)
   const [cameraName, setCameraName] = useState<string>('')
-  const [urls, setUrls] = useState<{ whep?: string; hls?: string; token?: string } | null>(null)
   const playerRef = useRef<VideoPlayerHandle>(null)
   const setPtzOpen = (open: boolean) => onPtzOpenChange?.(open)
   const [ptzMoving, setPtzMoving] = useState(false)
@@ -678,53 +678,52 @@ function Tile({
     (availableCameras.find(c => c.id === assignedCameraId)?.live_online === false
       ? 'offline'
       : undefined)
-  // Bumped when the player reports an auth-rejected stream request — the
-  // 60-min token expired mid-session (e.g. a stream hiccup hours in; the
-  // backend never saw the camera go offline, so streamVersion won't bump).
-  // Re-runs the URL fetch below for a fresh token. Throttled so a
+  // The stream URLs and their 60-min token, cached under the same key the
+  // dashboard wall uses (a little under the token's life), so coming back to
+  // Live View mounts the player at once instead of after a request — and
+  // the player can pick up the connection it left warm (lib/liveStreams).
+  // A version bump (camera recovered) is a new key: fresh token.
+  const qc = useQueryClient()
+  const camera = assignedCameraId
+    ? availableCameras.find(c => c.id === assignedCameraId) ?? null
+    : null
+  const info = useQuery({
+    queryKey: ['stream-info', camera?.id ?? null, streamVersion],
+    enabled: !!camera,
+    queryFn: async () => (await apiService.getStreamUrls(camera!.id)).data as {
+      urls?: { webrtc?: string; hls?: string }; token?: string
+    },
+    staleTime: 45 * 60_000,
+    gcTime: 50 * 60_000,
+  })
+  // The player reports an auth-rejected stream request: the 60-min token
+  // expired mid-session (e.g. a stream hiccup hours in; the backend never
+  // saw the camera go offline, so streamVersion won't bump). Throttled so a
   // persistent non-auth 400 can't hammer the token endpoint.
-  const [tokenVersion, setTokenVersion] = useState(0)
   const lastTokenRefreshRef = useRef(0)
   const handleAuthExpired = useCallback(() => {
     const now = Date.now()
     if (now - lastTokenRefreshRef.current < 10000) return
     lastTokenRefreshRef.current = now
-    setTokenVersion((v) => v + 1)
-  }, [])
+    qc.invalidateQueries({ queryKey: ['stream-info', assignedCameraId] })
+  }, [qc, assignedCameraId])
 
   useEffect(() => {
-    let alive = true
-    // Use assigned camera if provided, otherwise no camera
-    const camera = assignedCameraId
-      ? availableCameras.find(c => c.id === assignedCameraId)
-      : null
-    if (camera) {
-      setCameraId(camera.id)
-      setCameraName(camera.name)
-      ;(async () => {
-        try {
-          const { data } = await apiService.getStreamUrls(camera.id)
-          if (!alive) return
-          setUrls({
-            // Rebase onto the origin the UI is being served from — the
-            // backend pins these to the LAN IP, which breaks playback
-            // when browsing via https://localhost (see lib/streamUrl.ts).
-            whep: rebaseToCurrentOrigin(data.urls?.webrtc),
-            hls: rebaseToCurrentOrigin(data.urls?.hls),
-            token: data.token
-          })
-        } catch {
-          // Show NO LINK instead of silently keeping stale URLs/token.
-          if (alive) setUrls(null)
-        }
-      })()
-    } else {
-      setCameraId(null)
-      setCameraName('')
-      setUrls(null)
-    }
-    return () => { alive = false }
-  }, [assignedCameraId, availableCameras, streamVersion, tokenVersion])
+    setCameraId(camera ? camera.id : null)
+    setCameraName(camera ? camera.name : '')
+  }, [camera])
+
+  // Rebase onto the origin the UI is being served from — the backend pins
+  // these to the LAN IP, which breaks playback when browsing via
+  // https://localhost (see lib/streamUrl.ts). A failed request shows NO LINK
+  // rather than stale URLs.
+  const urls = camera && info.data && !info.isError
+    ? {
+        whep: rebaseToCurrentOrigin(info.data.urls?.webrtc),
+        hls: rebaseToCurrentOrigin(info.data.urls?.hls),
+        token: info.data.token,
+      }
+    : null
 
   const hasLink = !!urls?.whep || !!urls?.hls
   const displayName = cameraName || `Camera ${cameraId || index + 1}`
@@ -773,6 +772,8 @@ function Tile({
             key={`${cameraId}-${streamVersion}`}
             ref={playerRef}
             mode="live"
+            keepWarm
+            warmKey={streamVersion}
             chrome="controls"
             whepUrl={urls?.whep}
             hlsUrl={urls?.hls}

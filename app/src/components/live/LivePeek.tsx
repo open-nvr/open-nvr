@@ -8,6 +8,7 @@ import { apiService } from '../../lib/apiService'
 import { rebaseToCurrentOrigin } from '../../lib/streamUrl'
 import { Modal } from '../Modal'
 import { VideoPlayer } from '../VideoPlayer'
+import { useCameraStatus } from '../../hooks/useCameraStatus'
 import { detectionsPreferred } from '../../lib/detectionFeed'
 import { OverlayLayersButton } from './OverlayLayersButton'
 
@@ -31,6 +32,9 @@ export function LivePeek({ cameraId, cam, onClose, footer }: {
   footer?: ReactNode
 }) {
   const { t } = useTranslation()
+  // Same version as every other surface, so peek can pick up a warm
+  // connection (lib/liveStreams) and leave one behind.
+  const { version: streamVersion } = useCameraStatus(cameraId)
   const info = useQuery({
     queryKey: ['tour-stream', cameraId],
     queryFn: async () => (await apiService.getTourStreamInfo(cameraId)).data as { urls?: { webrtc?: string; hls?: string }; token?: string },
@@ -45,6 +49,8 @@ export function LivePeek({ cameraId, cam, onClose, footer }: {
           <VideoPlayer
             mode="live"
             chrome="controls"
+            keepWarm
+            warmKey={streamVersion}
             whepUrl={rebaseToCurrentOrigin(info.data.urls.webrtc)}
             hlsUrl={rebaseToCurrentOrigin(info.data.urls.hls)}
             mediamtxToken={info.data.token}
