@@ -744,6 +744,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       clearMemory(transportMemory(), memoryKey)
       setAutoHls(false)
       startStallWatch(pc, adopted)
+      // Every other tile on HLS by fallback runs its own probe now: WebRTC
+      // works from here at this moment (a port was just forwarded, the
+      // network changed, a camera came online), so waiting out their
+      // probe intervals would only keep them on HLS for nothing.
+      window.dispatchEvent(new CustomEvent(WEBRTC_BACK_EVENT, { detail: tileIdRef.current }))
     }, [memoryKey, startStallWatch])
 
     // The tile's reaction to its connection's state, for a connection it
@@ -1459,8 +1464,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
     // Can WebRTC connect from here now? A throwaway WHEP session, video
     // only, never attached to the element, so the HLS picture keeps playing
-    // while it runs. Success flips this tile back to WebRTC and tells every
-    // other fallen-back tile through WEBRTC_BACK_EVENT to run its own probe;
+    // while it runs. Success flips this tile back to WebRTC (and, through
+    // markConnected, every other fallen-back tile runs its own probe);
     // failure leaves HLS alone and asks again at the next interval.
     const probeWebRTC = useCallback(async () => {
       if (!whepUrl || probePcRef.current || manualChoiceRef.current) return
@@ -1499,7 +1504,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         if (probePcRef.current === pc) probePcRef.current = null
         if (probeFinishRef.current === abandon) probeFinishRef.current = null
         if (ok) {
-          window.dispatchEvent(new CustomEvent(WEBRTC_BACK_EVENT, { detail: tileIdRef.current }))
+          // The tile adopts the probe's connection; markConnected then tells
+          // the other fallen-back tiles.
           backToWebRTC()
           return
         }
