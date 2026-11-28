@@ -7,9 +7,10 @@
  * the site needs no port forwarded; it is enrolled once with a one-time code.
  */
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Check, Copy, Gauge, Globe, KeyRound, Plus, RefreshCw, Trash2, Unplug, Video } from 'lucide-react'
+import { toDataURL } from 'qrcode'
+import { Check, Copy, Gauge, Globe, KeyRound, Link2, Plus, RefreshCw, Share2, ShieldAlert, Trash2, Unplug, Video } from 'lucide-react'
 import { useTranslation } from '../i18n'
 import { useConfirm } from '../components/ui/ConfirmDialog'
 import { useSnackbar } from '../components/Snackbar'
@@ -23,7 +24,7 @@ import { Modal } from '../components/Modal'
 import { SegmentedControl } from '../components/ui/SegmentedControl'
 import {
   AGENT_DOWNLOADS, cameraRelayState, siteService, siteStatus, siteUplinkKbps, suggestedRtspUrl,
-  type DiscoveredDevice, type EnrolCode, type Site,
+  type DiscoveredDevice, type EnrolCode, type SetupLink, type Site,
 } from '../services/siteService'
 
 const SITES_KEY = ['sites']
@@ -50,6 +51,131 @@ function CopyBox({ text, label }: { text: string; label: string }) {
   )
 }
 
+const LINK_HOURS = [
+  { value: 1, label: '1 hour' },
+  { value: 24, label: '1 day' },
+  { value: 72, label: '3 days' },
+  { value: 168, label: '7 days' },
+]
+
+/** The setup link: one link for the person at the site, instead of a code and
+ *  a fingerprint (services/site_setup.py). Made when the dialog opens. */
+function SetupLinkPanel({ site }: { site: Site }) {
+  const { showError } = useSnackbar()
+  const { data: status } = useQuery({ queryKey: ['site-setup-status'], queryFn: () => siteService.setupStatus() })
+  const [hours, setHours] = useState(72)
+  const [link, setLink] = useState<SetupLink | null>(null)
+  const [qr, setQr] = useState<string>('')
+  const made = useRef<string | null>(null)
+  const started = useRef(false)
+
+  const make = async (h: number) => {
+    try {
+      const fresh = await siteService.newSetupLink(site.id, h)
+      // One usable link at a time from this dialog: the previous one goes.
+      if (made.current) await siteService.revokeSetupLink(site.id, made.current).catch(() => {})
+      made.current = fresh.token_id
+      setLink(fresh)
+      void queryClient.invalidateQueries({ queryKey: ['site-setup-links', site.id] })
+    } catch (e) {
+      showError(extractApiError(e, 'Could not make a setup link'))
+    }
+  }
+  useEffect(() => {
+    // Once per dialog (React may run this effect twice in development).
+    if (status?.ready && !started.current) {
+      started.current = true
+      void make(hours)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.ready])
+  useEffect(() => {
+    if (link?.url) void toDataURL(link.url, { margin: 1, width: 180 }).then(setQr).catch(() => setQr(''))
+  }, [link?.url])
+
+  if (!status) return null
+  if (!status.ready) {
+    return (
+      <p className="text-[var(--text-dim)]">
+        <Link2 size={13} className="inline mr-1" />
+        A setup link (one link instead of these commands) needs this server to have a public, trusted
+        certificate: {status.detail}
+      </p>
+    )
+  }
+  if (!link?.url) return <p className="text-[var(--text-dim)]">Making a setup link…</p>
+  const share = typeof navigator.share === 'function'
+  return (
+    <div className="space-y-2 border border-[var(--border)] p-3 bg-[var(--panel-2)]">
+      <p className="font-medium">Send this link to the person at the site</p>
+      <p className="text-[var(--text-dim)]">
+        It opens a page that shows them what to download and run on a machine there. Nothing else to type.
+      </p>
+      <CopyBox text={link.url} label="the setup link" />
+      <div className="flex flex-wrap items-center gap-3">
+        {qr && <img src={qr} alt="QR code of the setup link" width={120} height={120} />}
+        <div className="space-y-2">
+          {share && (
+            <Button size="sm" variant="outline"
+              onClick={() => { void navigator.share({ title: `Set up ${site.name}`, url: link.url }).catch(() => {}) }}>
+              <Share2 size={14} /> Share
+            </Button>
+          )}
+          <div className="flex items-center gap-2 text-xs">
+            <span>Valid for</span>
+            <Select value={String(hours)} onChange={(e) => { const h = Number(e.target.value); setHours(h); void make(h) }}
+              aria-label="How long the link works">
+              {LINK_HOURS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </Select>
+          </div>
+          <p className="text-xs text-[var(--text-dim)]">
+            Works once, until {new Date(link.expires_at).toLocaleString()}. Anyone with the link can set up
+            this site, so send it only to that person.
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Setup links of a site: who used one, and the ones still open. */
+function SetupLinks({ site }: { site: Site }) {
+  const { showError } = useSnackbar()
+  const { data: links = [] } = useQuery({
+    queryKey: ['site-setup-links', site.id],
+    queryFn: () => siteService.setupLinks(site.id),
+    refetchInterval: 15000,
+  })
+  const shown = links.filter((l) => l.state === 'active' || l.state === 'used').slice(0, 4)
+  if (shown.length === 0) return null
+  return (
+    <ul className="text-xs text-[var(--text-dim)] space-y-1">
+      {shown.map((l) => (
+        <li key={l.token_id} className="flex items-center gap-2">
+          <Link2 size={12} />
+          {l.state === 'used' ? (
+            <span>Setup link used {l.used_at ? new Date(l.used_at).toLocaleString() : ''}
+              {l.used_hostname ? ` by ${l.used_hostname}` : ''}{l.used_ip ? ` from ${l.used_ip}` : ''}</span>
+          ) : (
+            <>
+              <span>Setup link open until {new Date(l.expires_at).toLocaleString()}</span>
+              <Button size="sm" variant="ghost" title="This link stops working"
+                onClick={async () => {
+                  try {
+                    await siteService.revokeSetupLink(site.id, l.token_id)
+                    void queryClient.invalidateQueries({ queryKey: ['site-setup-links', site.id] })
+                  } catch (e) { showError(extractApiError(e, 'Could not revoke the link')) }
+                }}>
+                Revoke
+              </Button>
+            </>
+          )}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 function EnrolDialog({ site, code, onClose }: { site: Site; code: EnrolCode; onClose: () => void }) {
   const expires = new Date(code.enrol_expires_at)
   const setups = code.setup ?? []
@@ -59,8 +185,10 @@ function EnrolDialog({ site, code, onClose }: { site: Site; code: EnrolCode; onC
   // Same origin as this page: the SPA is served by the server it talks to.
   const base = '/api/v1/site-agent/download/'
   return (
-    <Modal open title={`Enrol the agent at "${site.name}"`} onClose={onClose}>
+    <Modal open title={`Set up the agent at "${site.name}"`} onClose={onClose}>
       <div className="space-y-3 text-sm">
+        <SetupLinkPanel site={site} />
+        <p className="font-medium">Or set it up yourself</p>
         <p>
           On a machine at the site that can reach its cameras (a small Linux box, a Raspberry Pi, a
           Windows PC), with <b>ffmpeg</b> installed:
@@ -249,6 +377,33 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
 
   return (
     <div className="border border-[var(--border)] bg-[var(--panel)]">
+      {site.approval_pending && (
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[var(--border)] bg-[var(--panel-2)] text-sm">
+          <ShieldAlert size={15} className="text-[var(--warning,orange)]" />
+          <span>
+            A new agent took over this site
+            {site.pending_agent?.hostname ? <> on <b>{site.pending_agent.hostname}</b></> : null}
+            {site.pending_agent?.ip ? <> from {site.pending_agent.ip}</> : null}. It gets no cameras (and none of
+            their passwords) until you approve it.
+          </span>
+          <span className="flex-1" />
+          {canManage && (
+            <>
+              <Button size="sm" variant="primary"
+                onClick={() => act(() => siteService.approveAgent(site.id), 'Agent approved', 'Could not approve the agent')}>
+                Approve
+              </Button>
+              <Button size="sm" variant="danger"
+                onClick={async () => {
+                  if (!(await confirm({ title: `Revoke "${site.name}"?`, message: 'The new agent is cut off. Cameras and recordings stay.', confirmLabel: 'Revoke', danger: true }))) return
+                  await act(() => siteService.revoke(site.id), 'Site revoked', 'Could not revoke the site')
+                }}>
+                Not mine: revoke
+              </Button>
+            </>
+          )}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[var(--border)]">
         <Globe size={15} className="text-[var(--accent)]" />
         <span className="font-semibold">{site.name}</span>
@@ -265,12 +420,12 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
         <span className="flex-1" />
         {canManage && (
           <>
-            <Button size="sm" variant="outline" title="A one-time code to enrol (or re-enrol) this site's agent"
+            <Button size="sm" variant="outline" title="A setup link (or a one-time code) to set up, or replace, this site's agent"
               onClick={async () => {
                 try { onCode(site, await siteService.newCode(site.id)); void refresh() }
                 catch (e) { showError(extractApiError(e, 'Could not make a code')) }
               }}>
-              <KeyRound size={14} /> Enrol code
+              <KeyRound size={14} /> Set up agent
             </Button>
             <Button size="sm" variant="outline" onClick={() => onAddCamera(site, null)}>
               <Plus size={14} /> Camera
@@ -302,6 +457,7 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
 
       {uplinkOpen && <UplinkDialog site={site} onClose={() => setUplinkOpen(false)} />}
       <div className="px-3 py-2 space-y-2 text-sm">
+        {canManage && <SetupLinks site={site} />}
         {site.cameras.length === 0 ? (
           <p className="text-[var(--text-dim)]">No cameras yet.{site.discovered.length > 0 ? ' The agent found some on the site\'s network:' : ''}</p>
         ) : (

@@ -458,6 +458,34 @@ class Site(Base):
     uplink_cap_kbps = Column(Integer, nullable=True)
     live_policy = Column(String(20), nullable=False, default="always", server_default="always")
 
+    # A re-enrolled agent of a site that already has cameras waits here
+    # until an admin approves it: until then it is sent no cameras (and so
+    # none of their passwords). pending_agent: JSON hostname, ip, version.
+    approval_pending_at = Column(DateTime(timezone=True), nullable=True)
+    pending_agent = Column(Text, nullable=True)
+
+
+class SiteSetupToken(Base):
+    """A setup link for a site (https://<server>/site-setup#<id>.<secret>):
+    single use, short-lived, revocable. Only values derived from the secret
+    are kept: a hash to enrol with, and (encrypted) the key the server proves
+    itself to the agent with before the agent sends the secret."""
+
+    __tablename__ = "site_setup_tokens"
+
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("sites.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_id = Column(String(16), nullable=False, unique=True, index=True)
+    enrol_hash = Column(String(64), nullable=False)
+    proof_key_enc = Column(Text, nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    used_ip = Column(String(45), nullable=True)
+    used_hostname = Column(String(200), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
 
 class CameraPermission(Base):
     """Mapping table for user-to-camera permissions."""

@@ -39,6 +39,8 @@ func main() {
 	// and relays its cameras to an OpenNVR on the internet.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "setup":
+			os.Exit(setupCmd(os.Args[2:]))
 		case "enrol":
 			os.Exit(enrolCmd(os.Args[2:]))
 		case "site":

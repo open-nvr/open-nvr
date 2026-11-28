@@ -57,6 +57,38 @@ export type Site = {
   live_policy: string
   uplink_cap_kbps: number | null
   server_pin: string | null
+  /** A replaced agent waiting for an admin's approval: it gets no cameras yet. */
+  approval_pending?: boolean
+  pending_agent?: { hostname: string | null; ip: string | null; version: string | null; credential_prefix: string | null } | null
+}
+
+/** Whether this server can hand out setup links (a public, trusted certificate). */
+export type SetupLinkStatus = {
+  ready: boolean
+  reason: 'no_public_hostname' | 'certificate_not_trusted' | 'front_proxy_ends_tls' | null
+  detail: string
+  host: string | null
+}
+
+export type SetupLink = {
+  token_id: string
+  state: 'active' | 'used' | 'revoked' | 'expired'
+  created_at: string | null
+  expires_at: string
+  used_at: string | null
+  used_ip: string | null
+  used_hostname: string | null
+  /** Only when just made: the link (its secret is in the #fragment) and the code. */
+  url?: string
+  setup_code?: string
+}
+
+/** What the public setup page learns about a link (never its secret). */
+export type SetupInfo = {
+  site_name: string
+  expires_at: string
+  build: string | null
+  files: { platform: string; filename: string; size: number; sha256: string }[]
 }
 
 /** Copy-paste setup for one OS: fetch the agent from this server, enrol, start. */
@@ -106,6 +138,18 @@ export const siteService = {
     (await api.patch(`/api/v1/sites/${id}`, body)).data,
   unlink: async (id: number, cameraId: number): Promise<Site> =>
     (await api.delete(`/api/v1/sites/${id}/cameras/${cameraId}`)).data,
+  setupStatus: async (refresh = false): Promise<SetupLinkStatus> =>
+    (await api.get('/api/v1/sites/setup-links/status', { params: refresh ? { refresh: true } : {} })).data,
+  newSetupLink: async (id: number, hours: number): Promise<SetupLink> =>
+    (await api.post(`/api/v1/sites/${id}/setup-links`, { hours })).data,
+  setupLinks: async (id: number): Promise<SetupLink[]> => (await api.get(`/api/v1/sites/${id}/setup-links`)).data,
+  revokeSetupLink: async (id: number, tokenId: string): Promise<void> => {
+    await api.delete(`/api/v1/sites/${id}/setup-links/${encodeURIComponent(tokenId)}`)
+  },
+  approveAgent: async (id: number): Promise<Site> => (await api.post(`/api/v1/sites/${id}/approve-agent`)).data,
+  /** Public (no login): what a setup link is for. Sends the link's id only. */
+  setupInfo: async (tokenId: string): Promise<SetupInfo> =>
+    (await api.post('/api/v1/site-agent/setup-info', { token_id: tokenId })).data,
   /** A pushed camera for a site: created like any camera, then linked. A link
    *  that fails takes the half-made camera away again. */
   addCamera: async (id: number, name: string, body: CameraLink): Promise<Site> => {
