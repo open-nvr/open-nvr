@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -155,7 +156,7 @@ func TestRelayRefusesAServerThatDidNotTakeTheALPN(t *testing.T) {
 func TestArgsCopyTheCameraAndPublishToTheRelayWithTheToken(t *testing.T) {
 	a := strings.Join(Args("rtsp://u:p@192.168.1.64:554/main", 40123, "cam-7", "TOK"), " ")
 	for _, want := range []string{
-		"-rtsp_transport tcp -timeout 10000000 -i rtsp://u:p@192.168.1.64:554/main",
+		"-rtsp_transport tcp -timeout 10000000 -protocol_whitelist rtsp,rtsps,tcp,tls,rtp,udp -i rtsp://u:p@192.168.1.64:554/main",
 		"-map 0:v:0 -c:v copy -an",
 		"-f rtsp -rtsp_transport tcp rtsp://127.0.0.1:40123/cam-7?jwt=TOK",
 	} {
@@ -332,7 +333,7 @@ func TestClientSendsTheCredentialAndMaps404ToRejected(t *testing.T) {
 
 func TestConfigIsSavedPrivatelyAndLoadedBack(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "sub", "config.json")
-	c := &Config{Server: "https://nvr.example.com", SiteID: 3, Token: "site_3_x", Pin: "sha256/abc"}
+	c := &Config{Server: "https://nvr.example.com", SiteID: 3, Token: "site_3_x", Pins: []string{"sha256/abc"}, AllowSubnets: []string{"192.168.20.0/24"}, AllowPorts: []int{9000}}
 	if err := c.Save(p); err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +343,7 @@ func TestConfigIsSavedPrivatelyAndLoadedBack(t *testing.T) {
 		}
 	}
 	got, err := Load(p)
-	if err != nil || *got != *c {
+	if err != nil || !reflect.DeepEqual(got, c) {
 		t.Fatalf("loaded %+v %v", got, err)
 	}
 	if _, err := os.Stat(p + ".tmp"); !os.IsNotExist(err) {

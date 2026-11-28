@@ -45,8 +45,42 @@ The camera then appears on the Cameras page as **Site · \<its LAN address\>** a
 ## Revoke, re-enrol, remove
 
 - **Revoke** cuts the agent off at once and ends its live streams. The site's cameras and recordings stay.
-- **Enrol code** gives a new one-time code: to move the agent to another machine, or to let a revoked site back. The old credential keeps working until the new code is used.
+- **Enrol code** gives a new one-time code: to move the agent to another machine, or to let a revoked site back. The old credential keeps working until the new code is used; then it stops at once, and the old agent's running streams are ended.
 - **Unlink** stops relaying one camera (the camera and its recordings stay). A site with no cameras left can be deleted.
+
+## Security
+
+The agent sits on the customer's network and takes its instructions from the server, so it is built not to trust the server further than relaying that site's cameras.
+
+- **The agent decides where it connects, not the server.** It only connects to:
+  - addresses on a private network its machine is directly connected to (`10.x`, `172.16-31.x`, `192.168.x`, `100.64.x`, IPv6 ULA)
+  - on usual camera ports (80, 443, 554, 8000, 8080, 8554, 37777, 34567 and a few more), or a port the camera announced itself in ONVIF discovery
+
+  It never connects to:
+  - its own machine
+  - a router (any next hop in the machine's routing table; on Linux and Windows)
+  - another network
+  - the internet
+
+  Camera streams must be `rtsp://` or `rtsps://`, and ffmpeg is held to network protocols only (`-protocol_whitelist`). A compromised server can therefore reach what looks like a camera on that site's camera network, and nothing else.
+- **Cameras on another subnet** (a routed camera VLAN) or on an unusual port are allowed on the site machine itself, never from the server. Add them to the agent's config file (the one `enrol` wrote) and restart the agent:
+
+  ```json
+  "allow_subnets": ["192.168.20.0/24"],
+  "allow_ports": [9000]
+  ```
+
+  A subnet listed there still keeps its router out. A single address listed there (`"192.168.1.1"`) is let through even if it is a router or this machine's own address: for an NVR that is also the camera network's router, or a camera simulator on the box itself. A stream the agent refuses shows **not relayed: …** on the Sites page with the reason.
+- **The server is trusted by its key only.** `enrol` saves the key of the certificate it met, and from then on the agent trusts that key, not the machine's certificate store. When the server's key changes (a renewed certificate with a new key), the server proves to the agent that it holds the site's credential before the agent trusts the new key. The agent sends nothing secret before that proof.
+- **HTTPS-inspecting firewalls.** Some offices replace certificates in their firewall; the machine then trusts that firewall's certificates. The agent refuses such a connection: it logs that the certificate changed and the server could not prove it, and the site goes offline. Ask the site's IT to exempt the OpenNVR server's name from HTTPS inspection.
+- **Behind a front proxy** (a load balancer in front of OpenNVR) that ends TLS, the agent pins the proxy's key, and a renewal of the proxy's certificate with a new key cannot be proven. The site then stops until it is enrolled again. Video ingest needs the TLS connection to reach OpenNVR's own nginx anyway (see [REMOTE_ACCESS.md](REMOTE_ACCESS.md)), so pass TLS through instead. Also add the proxy to `TRUSTED_PROXY_CIDRS`, so per-address rate limits see each site's own address.
+- **Limits on the public routes.**
+  - **Request sizes:** small request bodies (enrol 16 KB, reports 1 MB, camera answers 8 MB).
+  - **Enrolment:** limited per address and in total.
+  - **Per site:** limits for each kind of call.
+  - **Long polls:** at most one held per site, and they hold no database connection while they wait.
+- **Logs.** nginx's access log records paths without query strings, so the short `?jwt=` tokens of playback and HLS URLs are not written to it.
+- **Two agents on one config** are refused: `opennvr-host site` takes a lock for its config file.
 
 ## Uplink
 
@@ -60,5 +94,5 @@ A main stream on demand only while someone watches it is not offered: recording 
 ## Limits
 
 - The site's uplink carries every relayed stream all the time (recording needs the main stream). Add a sub stream for each camera where you can.
-- PTZ and the camera's settings work through the agent, and ONVIF (PullPoint) events take the same path, though they have not been tried against a real camera yet: core sends each HTTP request to the site's agent, which sends it to the camera (only to cameras of that site, never to loopback or link-local addresses, no redirects) and returns the answer. Long-lived vendor event streams (Hikvision alertStream, Dahua eventManager) are not relayed; use the camera's ONVIF events or OpenNVR's own detection. If a camera's control API answers on another address than its stream (an NVR channel, an encoder), set **Control address** when adding it.
+- PTZ and the camera's settings work through the agent, and ONVIF (PullPoint) events take the same path, though they have not been tried against a real camera yet: core sends each HTTP request to the site's agent, which sends it to the camera (only to cameras of that site, within the agent's own rule above, no redirects) and returns the answer. Long-lived vendor event streams (Hikvision alertStream, Dahua eventManager) are not relayed; use the camera's ONVIF events or OpenNVR's own detection. If a camera's control API answers on another address than its stream (an NVR channel, an encoder), set **Control address** when adding it.
 - If the uplink drops, nothing is recorded until it comes back.

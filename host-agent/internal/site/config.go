@@ -31,8 +31,27 @@ type Config struct {
 	// self-signed server works and a later Let's Encrypt one (same key,
 	// --reuse-key) does too.
 	Pin string `json:"pin,omitempty"`
+	// Pins: the server keys this agent trusts, and the only ones once it is
+	// enrolled (PinSet): `enrol` saves the key it met. Pin, if set, is
+	// trusted too (configs written before pins existed).
+	Pins []string `json:"pins,omitempty"`
 	// Insecure skips server verification altogether. For tests only.
 	Insecure bool `json:"insecure_skip_verify,omitempty"`
+
+	// Local limits the server cannot change (TargetPolicy). The agent only
+	// connects to cameras on networks this machine is directly connected
+	// to, on usual camera ports; these widen that, on this machine only.
+	AllowSubnets []string `json:"allow_subnets,omitempty"` // e.g. "192.168.20.0/24" (a routed camera VLAN)
+	AllowPorts   []int    `json:"allow_ports,omitempty"`   // e.g. 9000
+}
+
+// TrustedPins is Pins plus the legacy Pin.
+func (c *Config) TrustedPins() []string {
+	out := append([]string(nil), c.Pins...)
+	if p := strings.TrimSpace(c.Pin); p != "" {
+		out = append([]string{p}, out...)
+	}
+	return out
 }
 
 // DefaultPath is where the config lives unless -config says otherwise.

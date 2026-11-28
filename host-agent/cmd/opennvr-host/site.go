@@ -5,17 +5,21 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/open-nvr/open-nvr/host-agent/internal/buildinfo"
 	"github.com/open-nvr/open-nvr/host-agent/internal/ffmpeg"
 	"github.com/open-nvr/open-nvr/host-agent/internal/logx"
+	"github.com/open-nvr/open-nvr/host-agent/internal/singleton"
 	"github.com/open-nvr/open-nvr/host-agent/internal/site"
 )
 
@@ -58,7 +62,13 @@ func enrolCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "enrolment failed:", err)
 		return 1
 	}
-	cfg := &site.Config{Server: server, SiteID: res.SiteID, Token: res.Token, Pin: *pin, Insecure: *insecure}
+	cfg := &site.Config{Server: server, SiteID: res.SiteID, Token: res.Token, Insecure: *insecure}
+	if !*insecure {
+		// From now on the agent trusts this key only, not the machine's
+		// certificate store (a firewall inspecting HTTPS would otherwise see
+		// the site's credential and its camera passwords).
+		cfg.Pins = []string{c.SeenPin()}
+	}
 	if err := cfg.Save(*cfgPath); err != nil {
 		fmt.Fprintln(os.Stderr, "enrolled, but the config could not be saved:", err)
 		return 1
@@ -84,6 +94,14 @@ func siteCmd(args []string) int {
 		log.Printf("%v", err)
 		return 1
 	}
+	// One agent per config: two would relay every camera twice and fight
+	// over its paths.
+	lock, err := siteLock(*cfgPath)
+	if err != nil {
+		log.Printf("%v", err)
+		return 1
+	}
+	defer lock.Close()
 	ff := ffmpeg.Find(*ffmpegPath)
 	if ff == "" {
 		log.Printf("ffmpeg not found: cameras cannot be relayed until it is installed")
@@ -95,7 +113,29 @@ func siteCmd(args []string) int {
 	log.Printf("OpenNVR site agent %s for site %d at %s", buildinfo.Build, cfg.SiteID, cfg.Server)
 	_ = site.Run(ctx, site.Options{
 		Config: cfg, FFmpeg: ff, Version: buildinfo.Build, Logf: log.Printf, Discover: !*noDiscovery,
+		ConfigPath: *cfgPath,
 	})
 	log.Printf("site agent stopped")
 	return 0
+}
+
+// siteLock takes a lock beside the config, or (a read-only config, as
+// systemd hands it to the service) in the temp folder, keyed by the config's
+// path.
+func siteLock(cfgPath string) (*os.File, error) {
+	abs, err := filepath.Abs(cfgPath)
+	if err != nil {
+		abs = cfgPath
+	}
+	sum := sha256.Sum256([]byte(abs))
+	for _, p := range []string{abs + ".lock", filepath.Join(os.TempDir(), "opennvr-site-"+hex.EncodeToString(sum[:6])+".lock")} {
+		f, err := singleton.Acquire(p)
+		if err == nil {
+			return f, nil
+		}
+		if errors.Is(err, singleton.ErrHeld) {
+			return nil, fmt.Errorf("another site agent is already running with %s", cfgPath)
+		}
+	}
+	return nil, fmt.Errorf("cannot take the site agent's lock for %s", cfgPath)
 }

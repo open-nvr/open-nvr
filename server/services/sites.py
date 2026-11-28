@@ -105,22 +105,37 @@ def create_site(db: Session, name: str, user_id: int | None) -> tuple[Site, str,
     return site, code, expires
 
 
-def enrol(db: Session, code: str | None, *, ip: str | None, version: str | None) -> tuple[Site, str] | None:
+def enrol(db: Session, code: str | None, *, ip: str | None, version: str | None) -> tuple[Site, str, bool] | None:
     """Trade a one-time code for the site's credential. None for a code that
-    is unknown, used or expired (the caller answers all of them alike)."""
+    is unknown, used or expired (the caller answers all of them alike).
+    Returns (site, credential, replaced): ``replaced`` when the site already
+    had an agent, whose running streams the caller then ends."""
+    from sqlalchemy import update
+
     raw = normalise_code(code)
     if len(raw) != CODE_LEN:
         return None
-    site = db.query(Site).filter(Site.enrol_code_hash == _sha256(raw)).first()
+    code_hash = _sha256(raw)
+    site = db.query(Site).filter(Site.enrol_code_hash == code_hash).first()
     if site is None:
         return None
     expires = _aware(site.enrol_expires_at)
-    # Single use whatever happens next.
-    site.enrol_code_hash = None
-    site.enrol_expires_at = None
-    if expires is None or expires < _now():
-        db.commit()
+    # Single use whatever happens next, and atomically: of two agents racing
+    # with one code, only the one whose UPDATE clears it goes on.
+    used = db.execute(
+        update(Site)
+        .where(Site.id == site.id, Site.enrol_code_hash == code_hash)
+        .values(enrol_code_hash=None, enrol_expires_at=None)
+        .execution_options(synchronize_session=False)
+    )
+    if used.rowcount != 1:
+        db.rollback()
         return None
+    db.commit()
+    db.refresh(site)
+    if expires is None or expires < _now():
+        return None
+    replaced = bool(site.credential_hash)
     secret = secrets.token_urlsafe(32)
     site.credential_hash = _sha256(secret)
     site.credential_prefix = secret[:8]
@@ -130,7 +145,7 @@ def enrol(db: Session, code: str | None, *, ip: str | None, version: str | None)
     site.agent_version = (version or "")[:100] or None
     db.commit()
     notify(site.id)
-    return site, f"{TOKEN_PREFIX}{site.id}_{secret}"
+    return site, f"{TOKEN_PREFIX}{site.id}_{secret}", replaced
 
 
 def authenticate(db: Session, token: str | None) -> Site | None:
@@ -162,11 +177,31 @@ def revoke(db: Session, site: Site) -> list[str]:
     site.revoked_at = _now()
     db.commit()
     notify(site.id)
+    return site_paths(db, site)
+
+
+def site_paths(db: Session, site: Site) -> list[str]:
+    """The MediaMTX paths of the site's cameras (main and sub): whose running
+    sessions end when the agent is cut off or replaced. A publish token is
+    checked only when a session starts."""
     paths: list[str] = []
     for cam in site_cameras(db, site.id):
         main, sub = stream_names(cam)
         paths += [main, sub]
     return paths
+
+
+def repin_proof(credential_hash: str | None, nonce: str, pin: str | None) -> str:
+    """The server's proof that it is the server the agent enrolled with, for
+    an agent that meets a new certificate key: HMAC-SHA256 keyed by the
+    site's credential hash over the nonce and THIS server's key. A man in the
+    middle shows the agent its own key and cannot make it. An unknown or
+    revoked site, or no readable certificate, gets random bytes of the same
+    shape, so the answer tells nothing. Mirrors host-agent site.RepinProof."""
+    if not credential_hash or not pin:
+        return secrets.token_hex(32)
+    msg = "\n".join(("opennvr-site-repin", nonce, pin)).encode()
+    return hmac.new(credential_hash.encode(), msg, hashlib.sha256).hexdigest()
 
 
 # ── cameras ──────────────────────────────────────────────────────────────
@@ -580,13 +615,6 @@ def public_view(db: Session, site: Site) -> dict[str, Any]:
 _events: dict[int, asyncio.Event] = {}
 
 
-def _event(site_id: int) -> asyncio.Event:
-    ev = _events.get(site_id)
-    if ev is None:
-        ev = _events[site_id] = asyncio.Event()
-    return ev
-
-
 def notify(site_id: int) -> None:
     """Wake the site's waiting agent (from any thread)."""
     ev = _events.get(site_id)
@@ -611,20 +639,48 @@ def notify(site_id: int) -> None:
             _events.pop(site_id, None)
 
 
+#: Long polls held at once, all sites together. Each costs an open
+#: connection and a coroutine (never a database connection: the route lets
+#: go of its session before it waits). Over this, a poll is answered at once
+#: and the agent polls every few seconds instead.
+WAIT_GLOBAL_MAX = 2000
+_holding = 0
+
+
 def arm(site_id: int) -> asyncio.Event:
-    """Clear and return the site's event. Arm BEFORE reading the state the
-    agent compares against: a change between the read and the wait then
-    still wakes it."""
-    ev = _event(site_id)
+    """A fresh event for the site's next long poll. Arm BEFORE reading the
+    state the agent compares against: a change between the read and the wait
+    then still wakes it.
+
+    A site holds at most one poll: arming wakes the one already held (the
+    agent reconnected after a blip and the old request is still open, or a
+    second agent uses this site's credential), which then answers at once."""
+    old = _events.get(site_id)
+    if old is not None and getattr(old, "_opennvr_held", False):
+        old.set()
+    ev = _events[site_id] = asyncio.Event()
     ev._opennvr_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
-    ev.clear()
     return ev
 
 
+def holding() -> int:
+    """Long polls held right now (all sites)."""
+    return _holding
+
+
 async def wait(ev: asyncio.Event, timeout: float = WAIT_MAX_S) -> bool:
-    """Wait on an armed event. True if woken, False on the timeout."""
+    """Wait on an armed event. True if woken, False on the timeout (or at
+    once, when WAIT_GLOBAL_MAX polls are already held)."""
+    global _holding
+    if _holding >= WAIT_GLOBAL_MAX:
+        return False
+    _holding += 1
+    ev._opennvr_held = True  # type: ignore[attr-defined]
     try:
         await asyncio.wait_for(ev.wait(), timeout)
         return True
     except TimeoutError:
         return False
+    finally:
+        ev._opennvr_held = False  # type: ignore[attr-defined]
+        _holding -= 1

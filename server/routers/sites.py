@@ -55,9 +55,19 @@ def _rate_limited(key: str, per_minute: int) -> bool:
 #: from a 31-letter alphabet and lives 15 minutes, so guessing is hopeless,
 #: and this keeps it that way.
 ENROL_PER_MINUTE = 5
-#: Agent calls per site per minute: a sync every few seconds, a long poll,
-#: and a token per stream (re)connect for main + sub of every camera.
+#: ...and from all addresses together, so many addresses (or a front proxy
+#: that hides them all behind one) cannot make guessing faster.
+ENROL_GLOBAL_PER_MINUTE = 60
+#: Key proofs (repin) per client address per minute: an agent asks once
+#: when the server's certificate key changes.
+REPIN_PER_MINUTE = 10
+#: Agent calls per site per minute, per kind, so one kind cannot starve the
+#: others: control (a sync every few seconds and a long poll), publish
+#: tokens (one per stream (re)connect, main + sub of every camera), and the
+#: answers to camera requests (a camera's ONVIF probe is several each).
 AGENT_PER_MINUTE = 240
+TOKENS_PER_MINUTE = 240
+RPC_RESULTS_PER_MINUTE = 1200
 
 
 def _not_found() -> HTTPException:
@@ -323,15 +333,25 @@ def _require_site(
     authorization: str | None = Header(None),
     db: Session = Depends(get_db),
 ) -> Site:
-    token = None
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
-    site = svc.authenticate(db, token)
+    site = svc.authenticate(db, _bearer(authorization))
     if site is None:
         raise _not_found()
-    if _rate_limited(f"site:{site.id}", AGENT_PER_MINUTE):
+    path = request.url.path
+    if "/rpc/" in path:
+        kind, limit = "rpc", RPC_RESULTS_PER_MINUTE
+    elif "/publish-token/" in path:
+        kind, limit = "token", TOKENS_PER_MINUTE
+    else:
+        kind, limit = "ctl", AGENT_PER_MINUTE
+    if _rate_limited(f"site:{site.id}:{kind}", limit):
         raise HTTPException(status_code=429, detail="Too many requests; slow down")
     return site
+
+
+def _bearer(authorization: str | None) -> str | None:
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return None
 
 
 def _agent_answer(db: Session, site: Site, request: Request) -> dict:
@@ -376,22 +396,49 @@ def download_agent(platform: str, request: Request):
 
 
 @agent_router.post("/enrol")
-def enrol(body: EnrolRequest, request: Request, db: Session = Depends(get_db)):
-    """Trade a one-time code for the site's credential (shown once)."""
+async def enrol(body: EnrolRequest, request: Request, db: Session = Depends(get_db)):
+    """Trade a one-time code for the site's credential (shown once).
+
+    Re-enrolling a site (a new box, a reinstall) ends the streams the old
+    agent is running: its credential stops working at once, but a running
+    publish session is checked only when it starts."""
     from services.audit_service import audit_request
+    from services.mediamtx_admin_service import MediaMtxAdminService
 
     ip = get_client_ip(request)
-    if _rate_limited(f"enrol:{ip}", ENROL_PER_MINUTE):
+    if _rate_limited(f"enrol:{ip}", ENROL_PER_MINUTE) or _rate_limited("enrol:*", ENROL_GLOBAL_PER_MINUTE):
         raise HTTPException(status_code=429, detail="Too many requests; slow down")
     got = svc.enrol(db, body.code, ip=ip, version=body.version)
     if got is None:
         raise _not_found()
-    site, token = got
+    site, token, replaced = got
+    kicked: dict = {}
+    if replaced:
+        kicked = await MediaMtxAdminService.kick_path_sessions(svc.site_paths(db, site))
     audit_request(db, request, action="site.enrolled", entity_type="site", entity_id=site.id,
                   details={"version": body.version, "hostname": body.hostname,
-                           "credential_prefix": site.credential_prefix})
+                           "credential_prefix": site.credential_prefix, "replaced": replaced,
+                           "kicked": len(kicked.get("kicked") or [])})
     return {"site_id": site.id, "name": site.name, "token": token,
             "ingest": svc.ingest_target(request.headers.get("host"))}
+
+
+class RepinRequest(BaseModel):
+    site_id: int = Field(..., ge=1, le=2**31 - 1)
+    nonce: str = Field(..., min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+@agent_router.post("/repin")
+def repin(body: RepinRequest, request: Request, db: Session = Depends(get_db)):
+    """Prove this server's certificate key to an enrolled agent that met a
+    new one (a renewed certificate): see services/sites.py repin_proof. It
+    carries no credential, so a man in the middle learns nothing from the
+    agent; every answer looks the same."""
+    if _rate_limited(f"repin:{get_client_ip(request)}", REPIN_PER_MINUTE):
+        raise HTTPException(status_code=429, detail="Too many requests; slow down")
+    site = db.get(Site, body.site_id)
+    credential = site.credential_hash if site is not None and site.revoked_at is None else None
+    return {"proof": svc.repin_proof(credential, body.nonce, svc.server_pin())}
 
 
 @agent_router.post("/sync")
@@ -406,25 +453,35 @@ def sync(report: SiteReport, request: Request, site: Site = Depends(_require_sit
 async def wait(
     request: Request,
     etag: str = Query("", max_length=64),
+    authorization: str | None = Header(None),
     site: Site = Depends(_require_site),
     db: Session = Depends(get_db),
 ):
     """Long poll: answers as soon as the desired state differs from ``etag``,
-    or after WAIT_MAX_S with the same state."""
+    or after WAIT_MAX_S with the same state.
+
+    It holds NO database connection while it waits: the session is released
+    first and used again after. (Held for the whole wait, ~30 polling sites
+    took every connection of core's pool and the whole NVR stopped.) After
+    the wait the credential is checked again, so an agent revoked or
+    replaced meanwhile gets nothing more."""
+    from core.database import release
     from services import site_relay
 
-    ev = svc.arm(site.id)  # before reading, so no change slips between
+    site_id = site.id
+    ev = svc.arm(site_id)  # before reading, so no change slips between
     answer = _agent_answer(db, site, request)
-    if answer["etag"] == etag and not site_relay.has_pending(site.id):
+    if answer["etag"] == etag and not site_relay.has_pending(site_id):
+        release(db)
         await svc.wait(ev)
-        db.expire_all()
-        site = db.get(Site, site.id)
-        if site is None or not site.credential_hash:
-            raise _not_found()  # deleted or revoked while waiting
+        site = svc.authenticate(db, _bearer(authorization))
+        if site is None or site.id != site_id:
+            raise _not_found()  # deleted, revoked or replaced while waiting
         answer = _agent_answer(db, site, request)
+    release(db)
     # HTTP requests core needs sent to this site's cameras (ONVIF, PTZ,
     # settings): the agent sends each and posts the answer to /rpc/{id}.
-    answer["rpc"] = site_relay.take_pending(site.id)
+    answer["rpc"] = site_relay.take_pending(site_id)
     return answer
 
 
