@@ -78,7 +78,7 @@ export const RETURN_PROBE_DELAY_MS = 3000
  *  re-key is a blip, not a network that cannot do WebRTC. */
 export const BLIP_PROBE_MS = 60 * 1000
 
-/** Fired on `window` by a tile whose probe reached WebRTC: every other tile
+/** Fired on `window` by a tile whose WebRTC connected: every other tile
  *  on HLS by fallback runs its own probe at once instead of waiting out the
  *  interval. It does not switch blindly: on a network where WebRTC connects
  *  only some of the time, one tile's luck is no promise for the next. */
