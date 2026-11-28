@@ -45,6 +45,8 @@ func main() {
 			os.Exit(installServiceCmd(os.Args[2:]))
 		case "uninstall":
 			os.Exit(uninstallCmd(os.Args[2:]))
+		case "apply-update":
+			os.Exit(applyUpdateCmd(os.Args[2:]))
 		case "enrol":
 			os.Exit(enrolCmd(os.Args[2:]))
 		case "site":

@@ -92,6 +92,50 @@ Running setup again (a new link, a replaced box) replaces the agent, the credent
 - **Remove everything** (service, agent, credential, state): `sudo ./opennvr-host uninstall`. Revoke the site on the server too if it isn't going to be used again.
 - **One agent per site** runs on a machine. A second one, for example started by hand next to the service, refuses to start, and `setup` warns about any it finds.
 
+## Updates
+
+On Linux, the installed agent keeps itself up to date with the builds its server ships, **only to builds the OpenNVR release signed.** A compromised server can't use updates to run its own code on the site's machine.
+
+1. **The release signs.** The workflow that builds the core image signs a manifest of the agent builds: version, build time, a hash of the agent's sources, and the SHA-256 of each file. It uses an ed25519 key that only that workflow holds (`AGENT_SIGNING_KEY`). The server relays the manifest and its signature (`GET /api/v1/site-agent/update`); it can't sign one.
+2. **The agent checks, about every 6 hours** (the first time 2 minutes after it starts). It takes a build only if all of these hold:
+   - the signature verifies with a key compiled into the agent;
+   - it is newer than itself: built later, its version not lower, and not below the manifest's own minimum. This means an old signed build can't be pushed back onto it;
+   - its agent sources differ, so a core release that didn't change the agent downloads nothing;
+   - the downloaded file's SHA-256 is the one listed for this machine.
+
+   The agent runs unprivileged and can't replace itself. It leaves the checked build in its state folder.
+3. **A root updater installs it.** `opennvr-site-update.path` sees the staged build and starts `opennvr-site-update.service`, which runs `opennvr-host apply-update`. The updater trusts nothing the agent staged:
+   - it checks the signature again, with the keys of the installed agent;
+   - it checks the rules again, and the hash of the exact bytes it installs;
+   - it reads no file through a link.
+
+   It then keeps the previous agent as `opennvr-host.prev`, installs the new one and restarts the service.
+4. **A broken update is undone.** If the new agent hasn't reached the server within 2 minutes, the updater puts the previous one back. It notes the build in `/var/lib/opennvr-site-update/failed`, so the agent doesn't fetch that build again.
+
+Logs: `journalctl -u opennvr-site-update`. Builds from a fork or a local build are unsigned, and agents never update themselves to them. A fork can build its agents with its own key (`-ldflags "-X github.com/open-nvr/open-nvr/host-agent/internal/update.buildKeysB64=<public key>"`).
+
+### The signing keys (for whoever releases OpenNVR)
+
+There are two key pairs:
+- **The release key.** The workflow signs with it.
+- **A standby key.** It stays offline and replaces the release key if that is lost or leaks.
+
+Both public keys are compiled into every agent. While none are (`internal/update/keys.go` is empty), agents don't update themselves at all.
+
+1. **On a trusted machine,** run `go run ./cmd/opennvr-sign keygen` (in `host-agent/`) twice. Each run prints a private key and its public key.
+2. **Store the private keys.**
+   - Put the release private key in the repository's Actions secrets as `AGENT_SIGNING_KEY`. A GitHub environment with required reviewers, if you use one, also works.
+   - Keep both private keys offline: an encrypted file, and a password manager entry. Don't keep them anywhere else.
+3. **Commit both public keys** to `trustedKeysB64` in `host-agent/internal/update/keys.go`.
+
+**If the release key leaks:**
+1. Make a new pair.
+2. List the new public key and the standby key in `keys.go`, and drop the leaked one.
+3. Sign that one release with the standby key, by setting `AGENT_SIGNING_KEY` to the standby key for it.
+4. Agents take it and trust the new key from then on.
+
+Agents that never got that release still trust the leaked key, so ship the release quickly.
+
 ## Revoke, re-enrol, remove
 
 - **Revoke** cuts the agent off at once and ends its live streams. The site's cameras and recordings stay.

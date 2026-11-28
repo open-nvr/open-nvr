@@ -62,7 +62,7 @@ func TestInstallPutsEverythingInPlaceAndStartsTheService(t *testing.T) {
 	for _, c := range sd.calls {
 		got = append(got, strings.Join(c, " "))
 	}
-	if strings.Join(got, "; ") != "daemon-reload; enable opennvr-site.service; restart opennvr-site.service" {
+	if strings.Join(got, "; ") != "daemon-reload; enable opennvr-site.service; enable --now opennvr-site-update.path; restart opennvr-site.service" {
 		t.Fatalf("systemctl calls %q", got)
 	}
 	if !in.Active() {
@@ -118,12 +118,13 @@ func TestUninstallLeavesNothingBehind(t *testing.T) {
 	if err := in.Uninstall(); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{BinPath, ConfigPath, UnitPath, "opt/opennvr-site", "etc/opennvr-site", StateDir} {
+	for _, p := range []string{BinPath, ConfigPath, UnitPath, "opt/opennvr-site", "etc/opennvr-site", StateDir, UpdateStateDir,
+		"etc/systemd/system/" + UpdatePathName, "etc/systemd/system/" + UpdateServiceName} {
 		if _, err := os.Stat(in.path(p)); !os.IsNotExist(err) {
 			t.Errorf("%s still there", p)
 		}
 	}
-	if strings.Join(sd.calls[0], " ") != "disable --now opennvr-site.service" {
+	if strings.Join(sd.calls[0], " ") != "disable --now opennvr-site-update.path" {
 		t.Fatalf("calls %q", sd.calls)
 	}
 	// Twice is fine (nothing to remove).
@@ -155,6 +156,20 @@ func TestTheUnitStaysLeastPrivilegedAndCanListNetworks(t *testing.T) {
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("unit lacks %q", want)
+		}
+	}
+}
+
+func TestTheUpdaterUnitsWatchTheAgentsStagingAndRunTheInstalledAgent(t *testing.T) {
+	path, svc := UpdateUnits()[UpdatePathName], UpdateUnits()[UpdateServiceName]
+	if !strings.Contains(path, "PathExists=/var/lib/private/opennvr-site/staging/ready") {
+		t.Fatal("the path unit does not watch the staging ready file")
+	}
+	for _, want := range []string{"Type=oneshot", "ExecStart=/opt/opennvr-site/bin/opennvr-host apply-update",
+		"StateDirectory=opennvr-site-update", "ProtectSystem=strict",
+		"ReadWritePaths=/opt/opennvr-site /var/lib/private/opennvr-site"} {
+		if !strings.Contains(svc, want) {
+			t.Errorf("updater unit lacks %q", want)
 		}
 	}
 }

@@ -30,8 +30,22 @@ import (
 //go:embed opennvr-site.service
 var unitFile string
 
+// The updater: a path unit that starts a root oneshot when the agent has
+// staged a signed update (internal/update).
+//
+//go:embed opennvr-site-update.path
+var updatePathUnit string
+
+//go:embed opennvr-site-update.service
+var updateServiceUnit string
+
 // Unit is the systemd unit installed (also host-agent/packaging/).
 func Unit() string { return unitFile }
+
+// UpdateUnits are the updater's units, by file name.
+func UpdateUnits() map[string]string {
+	return map[string]string{UpdatePathName: updatePathUnit, UpdateServiceName: updateServiceUnit}
+}
 
 // Paths of an install, relative to Root ("/" for real, a temp dir in tests).
 const (
@@ -43,6 +57,12 @@ const (
 	// links /var/lib/opennvr-site to it.
 	StateLink = "var/lib/opennvr-site"
 	StateDir  = "var/lib/private/opennvr-site"
+
+	UpdatePathName    = "opennvr-site-update.path"
+	UpdateServiceName = "opennvr-site-update.service"
+	// The updater's own state (root): the build it last rolled back.
+	UpdateStateDir = "var/lib/opennvr-site-update"
+	UpdateFailed   = "var/lib/opennvr-site-update/failed"
 )
 
 // Installer does the work; System runs systemctl (replaced in tests).
@@ -97,7 +117,13 @@ func (in *Installer) Install(exe string, config []byte) error {
 	if err := writeFile(in.path(UnitPath), []byte(unitFile), 0o644, 0o755); err != nil {
 		return fmt.Errorf("installing the service: %w", err)
 	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", UnitName}, {"restart", UnitName}} {
+	for name, body := range UpdateUnits() {
+		if err := writeFile(in.path("etc/systemd/system/"+name), []byte(body), 0o644, 0o755); err != nil {
+			return fmt.Errorf("installing the updater: %w", err)
+		}
+	}
+	for _, args := range [][]string{{"daemon-reload"}, {"enable", UnitName}, {"enable", "--now", UpdatePathName},
+		{"restart", UnitName}} {
 		if out, err := in.System(args...); err != nil {
 			return fmt.Errorf("systemctl %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
@@ -115,14 +141,16 @@ func (in *Installer) Active() bool {
 // Uninstall stops the service and removes everything Install put there,
 // the site's credential and the agent's state included.
 func (in *Installer) Uninstall() error {
+	_, _ = in.System("disable", "--now", UpdatePathName)
 	_, _ = in.System("disable", "--now", UnitName)
 	var errs []error
-	for _, rel := range []string{UnitPath, BinPath, ConfigPath, StateLink} {
+	for _, rel := range []string{UnitPath, "etc/systemd/system/" + UpdatePathName, "etc/systemd/system/" + UpdateServiceName,
+		BinPath, BinPath + ".prev", ConfigPath, StateLink} {
 		if err := os.Remove(in.path(rel)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
 	}
-	for _, rel := range []string{"opt/opennvr-site", "etc/opennvr-site", StateDir} {
+	for _, rel := range []string{"opt/opennvr-site", "etc/opennvr-site", StateDir, UpdateStateDir} {
 		if err := os.RemoveAll(in.path(rel)); err != nil {
 			errs = append(errs, err)
 		}

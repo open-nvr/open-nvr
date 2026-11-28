@@ -50,9 +50,19 @@ COPY server/main.py /tmp/core-main.py
 ARG GIT_COMMIT=""
 # The Go build cache persists between builds (BuildKit cache mount), so a
 # rebuild compiles only what changed: six targets from scratch take minutes.
+# The release workflow passes the agent signing key as a BuildKit secret: the
+# builds then come with a signed manifest (build.sh), which site agents check
+# before they update themselves. Without the secret (a fork, a local build)
+# they are unsigned. A secret mount is never part of an image layer.
+# AGENT_SIGNING=on says the key must be there (build.sh fails without it),
+# and, being a build argument, puts this step in its own cache entry: a
+# secret does not change the cache key, so without it a signed build could
+# reuse an unsigned layer cached by a pull request build.
+ARG AGENT_SIGNING=off
 RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=secret,id=agent_signing_key \
     VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' /tmp/core-main.py) && \
-    sh ./build.sh "$VERSION" "$GIT_COMMIT"
+    AGENT_SIGNING="$AGENT_SIGNING" sh ./build.sh "$VERSION" "$GIT_COMMIT"
 
 
 # ==========================================

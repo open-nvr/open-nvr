@@ -1,0 +1,31 @@
+# Installs a site agent update the agent staged (docs/SITE_AGENT.md
+# "Updates"). Started by opennvr-site-update.path.
+#
+# It runs as root, because it replaces /opt/opennvr-site/bin/opennvr-host
+# and restarts the agent, which itself runs unprivileged. It trusts nothing
+# the agent staged: it checks the release signature again with the keys of
+# the installed agent, refuses an older build, checks the hash of the bytes
+# it installs, and puts the previous agent back if the new one does not
+# reach the server within two minutes.
+
+[Unit]
+Description=Install a staged OpenNVR site agent update (signature checked, rolled back on failure)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/opennvr-site/bin/opennvr-host apply-update
+# Its own state: the build it last rolled back, so the agent does not stage
+# it again (readable by the agent).
+StateDirectory=opennvr-site-update
+StateDirectoryMode=0755
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/opennvr-site /var/lib/private/opennvr-site
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes

@@ -580,6 +580,25 @@ def agent_build() -> str | None:
         return None
 
 
+def agent_update() -> tuple[bytes, bytes] | None:
+    """The signed manifest of the agent builds this server ships, and its
+    signature (manifest.json, manifest.sig, made by the release workflow;
+    host-agent/internal/update). None for unsigned builds (a fork, a local
+    build): site agents then do not update themselves. Relayed as they are:
+    this server cannot sign one."""
+    import os
+
+    root = os.environ.get("OPENNVR_HOST_AGENT_DIR") or AGENT_DIR_DEFAULT
+    try:
+        with open(os.path.join(root, "manifest.json"), "rb") as fh:
+            manifest = fh.read(1 << 20)
+        with open(os.path.join(root, "manifest.sig"), "rb") as fh:
+            sig = fh.read(1 << 16)
+    except OSError:
+        return None
+    return (manifest, sig) if manifest and sig else None
+
+
 def agent_downloads() -> list[dict[str, Any]]:
     """Every agent build this server has: platform, file name, size, sha256."""
     import os

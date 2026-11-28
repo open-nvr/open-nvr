@@ -155,6 +155,13 @@ jobs:
           # Reported by /health and system info (Dockerfile, last lines).
           build-args: |
             GIT_COMMIT=${{ github.sha }}
+            AGENT_SIGNING=${{ (github.event_name != 'pull_request' && secrets.AGENT_SIGNING_KEY != '') && 'on' || 'off' }}
+          # Signs the site agent builds (host-agent/build.sh, internal/update):
+          # site agents update themselves only to builds signed with this
+          # key. Never for a pull request; a fork has no such secret, so its
+          # builds are unsigned and no agent takes them.
+          secrets: |
+            ${{ github.event_name != 'pull_request' && format('agent_signing_key={0}', secrets.AGENT_SIGNING_KEY) || '' }}
           tags: |
             ${{ steps.meta.outputs.tags }}
             ${{ github.event_name == 'pull_request' && 'ghcr.io/open-nvr/core:local-smoke' || '' }}
