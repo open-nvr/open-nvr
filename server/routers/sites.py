@@ -634,6 +634,21 @@ def rpc_result(rpc_id: str, body: RpcResult, site: Site = Depends(_require_site)
     return {"ok": True}
 
 
+@agent_router.get("/update")
+def agent_update(site: Site = Depends(_require_site)):
+    """The signed manifest of the agent builds this server ships, for the
+    site's agent to check before it updates itself (it verifies the release
+    signature itself: this server only relays it). 404 when the builds are
+    unsigned."""
+    import base64
+
+    got = svc.agent_update()
+    if got is None:
+        raise _not_found()
+    manifest, sig = got
+    return {"manifest": base64.b64encode(manifest).decode(), "signature": base64.b64encode(sig).decode()}
+
+
 @agent_router.post("/publish-token/{camera_id}")
 def publish_token(camera_id: int, site: Site = Depends(_require_site), db: Session = Depends(get_db)):
     """A short publish token for one of this site's cameras, and nothing else."""

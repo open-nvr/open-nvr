@@ -1,0 +1,12 @@
+# Starts opennvr-site-update.service when the site agent has staged a
+# signed update (docs/SITE_AGENT.md "Updates"). Installed with the agent by
+# `sudo opennvr-host setup` / `install-service`.
+
+[Unit]
+Description=Watch for a staged OpenNVR site agent update
+
+[Path]
+PathExists=/var/lib/private/opennvr-site/staging/ready
+
+[Install]
+WantedBy=multi-user.target

@@ -982,3 +982,20 @@ def test_32_bit_raspberry_pi_os_gets_its_own_build(env, agent_dir):
     linux = next(s for s in setup if s["os"] == "linux")
     assert "s/armv7l/arm/" in linux["download"]
     assert linux["run"] == "sudo ./opennvr-host install-service"
+
+
+def test_the_signed_update_manifest_is_relayed_to_enrolled_agents_only(env, agent_dir):
+    import base64
+
+    site = _create(env)
+    token = _enrol(env, site["enrol_code"]).json()["token"]
+    # Unsigned builds (no manifest): nothing to offer.
+    assert env.tc.get("/api/v1/site-agent/update", headers=_auth(token)).status_code == 404
+    (agent_dir / "manifest.json").write_bytes(b"{\"format\": 1}")
+    (agent_dir / "manifest.sig").write_bytes(b"{\"key_id\": \"k\", \"sig\": \"s\"}")
+    r = env.tc.get("/api/v1/site-agent/update", headers=_auth(token))
+    assert r.status_code == 200
+    assert base64.b64decode(r.json()["manifest"]) == b"{\"format\": 1}"
+    assert base64.b64decode(r.json()["signature"]) == b"{\"key_id\": \"k\", \"sig\": \"s\"}"
+    # Not for anyone without the site credential.
+    assert env.tc.get("/api/v1/site-agent/update").status_code == 404

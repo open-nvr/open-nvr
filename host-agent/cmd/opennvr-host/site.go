@@ -120,6 +120,7 @@ func siteCmd(args []string) int {
 		Config: cfg, FFmpeg: ff, Version: buildinfo.Build, Logf: log.Printf, Discover: !*noDiscovery,
 		ConfigPath: *cfgPath,
 		StatePath:  statePath(),
+		Updates:    siteUpdates(statePath()),
 	})
 	log.Printf("site agent stopped")
 	return 0

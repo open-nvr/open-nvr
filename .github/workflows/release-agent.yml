@@ -102,6 +102,15 @@ jobs:
               *) cp "agent/$p/opennvr-host" "assets/opennvr-host-$p" ;;
             esac
           done
+          # The signed update manifest (host-agent/internal/update), when
+          # the image's builds are signed: what a site agent checks before
+          # it updates itself.
+          if [ -f agent/manifest.json ] && [ -f agent/manifest.sig ]; then
+            cp agent/manifest.json assets/opennvr-host-manifest.json
+            cp agent/manifest.sig assets/opennvr-host-manifest.sig
+          else
+            echo "::warning::the agent builds in $IMAGE are unsigned (no AGENT_SIGNING_KEY): site agents will not update themselves to them"
+          fi
           (cd assets && sha256sum opennvr-host-* > SHA256SUMS)
           cat assets/SHA256SUMS
           {

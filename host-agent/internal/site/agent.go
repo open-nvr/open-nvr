@@ -18,6 +18,7 @@ import (
 
 	"github.com/open-nvr/open-nvr/host-agent/internal/onvifdisc"
 	"github.com/open-nvr/open-nvr/host-agent/internal/publisher"
+	"github.com/open-nvr/open-nvr/host-agent/internal/update"
 )
 
 // Options are the site agent's settings (flags in cmd/opennvr-host).
@@ -34,6 +35,9 @@ type Options struct {
 	// StatePath: a state file (State) for what the agent learns, used
 	// instead of the config when set (the service's config is read-only).
 	StatePath string
+	// Updates, when set, checks for signed agent updates and stages them
+	// for the root updater (internal/update). Only the Linux service.
+	Updates *update.Stager
 }
 
 // Agent is the running site mode.
@@ -54,6 +58,8 @@ type Agent struct {
 	// where on the LAN the agent may connect, whatever the server says.
 	pins   *PinSet
 	policy *TargetPolicy
+	// lastTouch: when the last-sync file was touched (touchSync).
+	lastTouch time.Time
 	// Uplink: what each stream sends, the cap, what is wanted, what is paused.
 	meter   *Meter
 	capKbps int
@@ -118,6 +124,9 @@ func Run(ctx context.Context, o Options) error {
 	// Reports on their own clock, so a long poll never delays one.
 	go a.reportLoop(ctx)
 	go a.capLoop(ctx)
+	if o.Updates != nil {
+		go a.updateLoop(ctx)
+	}
 
 	etag := ""
 	failures := 0
@@ -153,6 +162,7 @@ func Run(ctx context.Context, o Options) error {
 			o.Logf("connected to OpenNVR at %s (site %d)", c.Server, ans.SiteID)
 		}
 		failures = 0
+		a.touchSync()
 		if ans.ETag != etag {
 			a.apply(ctx, ans)
 			etag = ans.ETag
