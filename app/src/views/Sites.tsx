@@ -189,10 +189,10 @@ function EnrolDialog({ site, code, onClose }: { site: Site; code: EnrolCode; onC
     <Modal open title={`Set up the agent at "${site.name}"`} onClose={onClose}>
       <div className="space-y-3 text-sm">
         <SetupLinkPanel site={site} />
-        <p className="font-medium">Or set it up yourself</p>
+        <p className="font-medium">Or set it up yourself, with a code</p>
         <p>
-          On a machine at the site that can reach its cameras (a small Linux box, a Raspberry Pi, a
-          Windows PC):
+          On a computer at the site, on the cameras' network, that stays switched on (a Raspberry Pi, a
+          small Linux box, a Windows PC):
         </p>
         {setup ? (
           <>
@@ -204,18 +204,17 @@ function EnrolDialog({ site, code, onClose }: { site: Site; code: EnrolCode; onC
             />
             <p className="font-medium">1. Download the agent from this server</p>
             <CopyBox text={setup.download} label="the download command" />
-            <p className="font-medium">2. Enrol it</p>
-            <CopyBox text={setup.enrol} label="the enrol command" />
-            <p className="font-medium">3. Start it</p>
+            <p className="font-medium">2. Connect it to this server</p>
+            <CopyBox text={setup.enrol} label="the connect command" />
+            <p className="font-medium">3. {setup.os === 'linux' ? 'Install it as a service (it starts again after a reboot)' : 'Start it'}</p>
             <CopyBox text={setup.run} label="the start command" />
           </>
         ) : (
-          <CopyBox text={code.enrol_command} label="the enrol command" />
+          <CopyBox text={code.enrol_command} label="the connect command" />
         )}
         <p className="text-[var(--text-dim)]">
-          The code <b>{code.enrol_code}</b> works once, until {expires.toLocaleTimeString()}. To keep the
-          agent running after a reboot, install it as a service (see the docs). It only dials out, on
-          port 443: the site needs no port forwarded.
+          The code <b>{code.enrol_code}</b> works once, until {expires.toLocaleTimeString()}. The agent only
+          connects out, on port 443: nothing needs opening on the site's router.
         </p>
         <p className="text-[var(--text-dim)]">
           Or download it here and copy it over:{' '}
@@ -229,8 +228,8 @@ function EnrolDialog({ site, code, onClose }: { site: Site; code: EnrolCode; onC
         </p>
         {site.server_pin && (
           <p className="text-[var(--text-dim)]">
-            The pin ({site.server_pin.slice(0, 18)}…) is this server's certificate fingerprint. It lets
-            the download and the agent trust this server even with its self-signed certificate.
+            The <code>-pin</code> ({site.server_pin.slice(0, 18)}…) is this server's certificate fingerprint:
+            with it, the download and the agent trust this server even though its certificate is self-signed.
           </p>
         )}
       </div>
@@ -602,7 +601,7 @@ function SiteCard({ site, canManage, onCode, onAddCameras }: {
             {site.enrolled && (
               <Button size="sm" variant="danger" title="Cut the agent off now; its streams stop, cameras and recordings stay"
                 onClick={async () => {
-                  if (!(await confirm({ title: `Revoke "${site.name}"?`, message: 'Its agent is cut off at once and its live streams stop. Cameras and recordings stay; a new enrol code lets the agent back.', confirmLabel: 'Revoke', danger: true }))) return
+                  if (!(await confirm({ title: `Revoke "${site.name}"?`, message: 'Its agent is cut off at once and its live streams stop. Cameras and recordings stay; "Set up agent" lets an agent back.', confirmLabel: 'Revoke', danger: true }))) return
                   await act(() => siteService.revoke(site.id), 'Site revoked', 'Could not revoke the site')
                 }}>
                 <Unplug size={14} /> Revoke
@@ -611,7 +610,7 @@ function SiteCard({ site, canManage, onCode, onAddCameras }: {
             {site.cameras.length === 0 && (
               <Button size="sm" variant="ghost" title="Delete the site"
                 onClick={async () => {
-                  if (!(await confirm({ title: `Delete "${site.name}"?`, message: 'The site and its agent credential are removed.', confirmLabel: 'Delete', danger: true }))) return
+                  if (!(await confirm({ title: `Delete "${site.name}"?`, message: 'The site is removed, and its agent can no longer connect.', confirmLabel: 'Delete', danger: true }))) return
                   await act(() => siteService.remove(site.id), 'Site deleted', 'Could not delete the site')
                 }}>
                 <Trash2 size={14} />
@@ -739,7 +738,7 @@ export function Sites() {
         <EmptyState
           icon={<Globe size={28} />}
           title="No sites yet"
-          description="A site is a place with cameras behind its own router: a shop, a branch, a warehouse. A small agent there relays its cameras here over port 443; nothing needs forwarding at the site."
+          description="A site is another place with cameras: a shop, a branch, a warehouse. A small program on a computer there sends its cameras here. You send one link to the person at the site; nothing needs opening on their router."
           action={canManage ? <Button variant="primary" onClick={() => setCreating(true)}><Plus size={14} /> Add site</Button> : undefined}
         />
       ) : (
@@ -757,7 +756,7 @@ export function Sites() {
           footer={
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setCreating(false)}>Cancel</Button>
-              <Button variant="primary" disabled={!newName.trim()} onClick={create}>Create and get the enrol code</Button>
+              <Button variant="primary" disabled={!newName.trim()} onClick={create}>Create and get the setup link</Button>
             </div>
           }>
           <Field label="Site name" required>

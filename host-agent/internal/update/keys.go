@@ -9,7 +9,7 @@ import "strings"
 // (base64 ed25519). Two: the release key CI signs with, and a standby key
 // kept offline only. If the release key is lost or leaks, a build signed with
 // the standby key that lists a new pair here replaces it on every site, and
-// nothing has to be reinstalled. docs/SITE_AGENT.md "Updates" has the steps
+// nothing has to be reinstalled. docs/SITE_AGENT.md "The signing keys" has the steps
 // (`go run ./cmd/opennvr-sign keygen`).
 //
 // While this is empty, site agents do not update themselves at all.
