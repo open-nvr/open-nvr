@@ -105,7 +105,8 @@ def create_site(db: Session, name: str, user_id: int | None) -> tuple[Site, str,
     return site, code, expires
 
 
-def enrol(db: Session, code: str | None, *, ip: str | None, version: str | None) -> tuple[Site, str, bool] | None:
+def enrol(db: Session, code: str | None, *, ip: str | None, version: str | None,
+          hostname: str | None = None) -> tuple[Site, str, bool] | None:
     """Trade a one-time code for the site's credential. None for a code that
     is unknown, used or expired (the caller answers all of them alike).
     Returns (site, credential, replaced): ``replaced`` when the site already
@@ -135,6 +136,31 @@ def enrol(db: Session, code: str | None, *, ip: str | None, version: str | None)
     db.refresh(site)
     if expires is None or expires < _now():
         return None
+    token, replaced = issue_credential(db, site, ip=ip, version=version, hostname=hostname)
+    return site, token, replaced
+
+
+def enrol_with_link(db: Session, token: str | None, *, ip: str | None, version: str | None,
+                    hostname: str | None) -> tuple[Site, str, bool] | None:
+    """Trade a setup link's ``<id>.<secret>`` for the site's credential
+    (services/site_setup.py). Same answer as enrol()."""
+    from services import site_setup
+
+    site = site_setup.consume(db, token, ip=ip, hostname=hostname)
+    if site is None:
+        return None
+    cred, replaced = issue_credential(db, site, ip=ip, version=version, hostname=hostname)
+    return site, cred, replaced
+
+
+def issue_credential(db: Session, site: Site, *, ip: str | None, version: str | None,
+                     hostname: str | None) -> tuple[str, bool]:
+    """A new credential for the site's agent (the old one stops working).
+    Returns (credential, replaced).
+
+    Replacing the agent of a site that already has cameras needs an admin's
+    approval before the new agent is sent any camera (and so any camera
+    password): a leaked code or link must not hand them over by itself."""
     replaced = bool(site.credential_hash)
     secret = secrets.token_urlsafe(32)
     site.credential_hash = _sha256(secret)
@@ -143,9 +169,29 @@ def enrol(db: Session, code: str | None, *, ip: str | None, version: str | None)
     site.enrolled_at = _now()
     site.last_ip = (ip or "")[:45] or None
     site.agent_version = (version or "")[:100] or None
+    if replaced and site_cameras(db, site.id):
+        site.approval_pending_at = _now()
+        site.pending_agent = json.dumps({
+            "hostname": (hostname or "")[:200] or None, "ip": site.last_ip,
+            "version": site.agent_version, "credential_prefix": site.credential_prefix,
+        })
+    else:
+        site.approval_pending_at = None
+        site.pending_agent = None
     db.commit()
     notify(site.id)
-    return site, f"{TOKEN_PREFIX}{site.id}_{secret}", replaced
+    return f"{TOKEN_PREFIX}{site.id}_{secret}", replaced
+
+
+def approve_agent(db: Session, site: Site) -> bool:
+    """Let a replaced agent have the site's cameras. False if none waits."""
+    if not site.approval_pending_at or not site.credential_hash:
+        return False
+    site.approval_pending_at = None
+    site.pending_agent = None
+    db.commit()
+    notify(site.id)
+    return True
 
 
 def authenticate(db: Session, token: str | None) -> Site | None:
@@ -170,11 +216,20 @@ def revoke(db: Session, site: Site) -> list[str]:
     """Clear the site's credential (and any unused code). Returns the
     MediaMTX paths of its cameras, whose running sessions the caller ends:
     a publish token is checked only when a session starts."""
+    from models import SiteSetupToken
+
     site.credential_hash = None
     site.credential_prefix = None
     site.enrol_code_hash = None
     site.enrol_expires_at = None
     site.revoked_at = _now()
+    site.approval_pending_at = None
+    site.pending_agent = None
+    # Unused setup links go too: revoking means nobody gets in by them.
+    for link in db.query(SiteSetupToken).filter(SiteSetupToken.site_id == site.id,
+                                                SiteSetupToken.used_at.is_(None),
+                                                SiteSetupToken.revoked_at.is_(None)):
+        link.revoked_at = _now()
     db.commit()
     notify(site.id)
     return site_paths(db, site)
@@ -332,6 +387,8 @@ def desired_state(db: Session, site: Site) -> list[dict[str, Any]]:
     from utils.encryption import decrypt_value
 
     out: list[dict[str, Any]] = []
+    if site.approval_pending_at:
+        return out  # a replaced agent the admin has not approved yet
     for cam in site_cameras(db, site.id):
         if not cam.is_active or not cam.site_main_url:
             continue
@@ -605,7 +662,17 @@ def public_view(db: Session, site: Site) -> dict[str, Any]:
         "uplink_cap_kbps": site.uplink_cap_kbps,
         # What the agent's enrol checks the server's certificate against.
         "server_pin": server_pin(),
+        # A replaced agent waiting for an admin's approval (no cameras yet).
+        "approval_pending": bool(site.approval_pending_at),
+        "pending_agent": _json_or_none(site.pending_agent),
     }
+
+
+def _json_or_none(text: str | None) -> Any:
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return None
 
 
 # ── long polling ─────────────────────────────────────────────────────────

@@ -748,3 +748,211 @@ def test_repin_proves_only_for_a_live_site(env, monkeypatch):
     for p in (unknown, revoked):
         assert len(p) == 64 and p != want
     assert env.tc.post("/api/v1/site-agent/repin", json={"site_id": a["id"], "nonce": "short"}).status_code == 422
+
+
+# ── setup links (S1) ───────────────────────────────────────────────────
+
+
+@pytest.fixture
+def links(env, monkeypatch):
+    """A server that can offer links: a public name, a trusted certificate,
+    no front proxy (the TLS checks are faked)."""
+    from services import site_setup
+
+    monkeypatch.setattr(svc.settings, "public_hostname", "nvr.example.com", raising=False)
+    monkeypatch.setattr(svc, "server_pin", lambda: "sha256/AAA=")
+    monkeypatch.setattr(site_setup, "_tls_pin", lambda host, port, name, timeout: "sha256/AAA=")
+    site_setup._ready_cache = None
+    yield site_setup
+    site_setup._ready_cache = None
+
+
+def _link(env, site_id, **body):
+    r = env.tc.post(f"/api/v1/sites/{site_id}/setup-links", json=body or None)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def _token_of(link):
+    return link["url"].split("#", 1)[1]
+
+
+def test_setup_link_derivations_match_the_agents():
+    """The same vectors are in host-agent/internal/site/setup_test.go."""
+    from services import site_setup
+
+    secret = "abcdefghijklmnopqrstuvwxyz"
+    assert site_setup.proof_key(secret) == "0073dced0b2b7dc0c88e80f5805becf5783a9ba8ec488629ff2a169b30ec7b50"
+    assert site_setup.hello_proof(site_setup.proof_key(secret), "nonce-0123456789ab", "sha256/AAA=") == (
+        "57ab763d66a28479da86d02d3ff73be1064196cf37bd22dfc256a204735aadf4")
+    assert site_setup.enrol_hash(secret) == "e4bd37be8329db8fa590f0ed7003033677635065b20e7be542932739c0d9108d"
+
+
+@pytest.mark.parametrize("case", ["no_name", "untrusted", "front_proxy"])
+def test_no_links_without_a_trusted_certificate_of_our_own(env, monkeypatch, case):
+    from services import site_setup
+
+    monkeypatch.setattr(svc, "server_pin", lambda: "sha256/AAA=")
+    monkeypatch.setattr(svc.settings, "public_hostname", "" if case == "no_name" else "nvr.example.com",
+                        raising=False)
+
+    def tls(host, port, name, timeout):
+        if case == "untrusted":
+            raise OSError("certificate verify failed: self-signed certificate")
+        return "sha256/PROXY=" if host == "nvr.example.com" else "sha256/AAA="
+
+    monkeypatch.setattr(site_setup, "_tls_pin", tls)
+    site_setup._ready_cache = None
+    want = {"no_name": "no_public_hostname", "untrusted": "certificate_not_trusted",
+            "front_proxy": "front_proxy_ends_tls"}[case]
+    status = env.tc.get("/api/v1/sites/setup-links/status").json()
+    assert status["ready"] is False and status["reason"] == want
+    site = _create(env)
+    r = env.tc.post(f"/api/v1/sites/{site['id']}/setup-links")
+    assert r.status_code == 409 and r.json()["detail"]["reason"] == want
+    site_setup._ready_cache = None
+
+
+def test_a_link_keeps_its_secret_in_the_fragment_and_out_of_the_database(env, links):
+    from models import SiteSetupToken
+
+    site = _create(env)
+    link = _link(env, site["id"])
+    assert link["url"].startswith("https://nvr.example.com/site-setup#")
+    tid, secret = _token_of(link).split(".")
+    assert link["setup_code"] == f"nvr.example.com#{tid}.{secret}"
+    assert len(secret) == 26 and tid not in secret
+    with env.SessionLocal() as s:
+        row = s.query(SiteSetupToken).filter_by(token_id=tid).one()
+        for col in (row.enrol_hash, row.proof_key_enc):
+            assert secret not in col
+    listed = env.tc.get(f"/api/v1/sites/{site['id']}/setup-links").json()
+    assert [x["state"] for x in listed] == ["active"] and "url" not in listed[0]
+
+
+def test_the_setup_page_lookup_never_uses_a_link_up(env, links):
+    site = _create(env, "Shop 7")
+    tid = _token_of(_link(env, site["id"])).split(".")[0]
+    for _ in range(3):
+        r = env.tc.post("/api/v1/site-agent/setup-info", json={"token_id": tid})
+        assert r.status_code == 200 and r.json()["site_name"] == "Shop 7" and "files" in r.json()
+    assert env.tc.post("/api/v1/site-agent/setup-info", json={"token_id": "nosuchid"}).status_code == 404
+
+
+def test_hello_proves_only_an_active_link(env, links):
+    site = _create(env)
+    token = _token_of(_link(env, site["id"]))
+    tid, secret = token.split(".")
+    nonce = "nonce-0123456789ab"
+    want = links.hello_proof(links.proof_key(secret), nonce, "sha256/AAA=")
+    r = env.tc.post("/api/v1/site-agent/hello", json={"token_id": tid, "nonce": nonce})
+    assert r.status_code == 200 and r.json()["proof"] == want
+    other = env.tc.post("/api/v1/site-agent/hello", json={"token_id": "nosuchid", "nonce": nonce}).json()["proof"]
+    assert len(other) == 64 and other != want
+    assert env.tc.post("/api/v1/site-agent/enrol", json={"token": token}).status_code == 200
+    used = env.tc.post("/api/v1/site-agent/hello", json={"token_id": tid, "nonce": nonce}).json()["proof"]
+    assert used != want
+
+
+def test_a_link_enrols_once_and_voids_the_sites_other_ways_in(env, links):
+    site = _create(env)
+    first, second = _token_of(_link(env, site["id"])), _token_of(_link(env, site["id"]))
+    r = env.tc.post("/api/v1/site-agent/enrol", json={"token": first, "hostname": "shop-pi"})
+    assert r.status_code == 200 and r.json()["token"].startswith("site_")
+    assert env.tc.post("/api/v1/site-agent/enrol", json={"token": first}).status_code == 404
+    assert env.tc.post("/api/v1/site-agent/enrol", json={"token": second}).status_code == 404
+    assert _enrol(env, site["enrol_code"]).status_code == 404  # the short code too
+    listed = env.tc.get(f"/api/v1/sites/{site['id']}/setup-links").json()
+    assert {x["state"] for x in listed} == {"used", "revoked"}
+    used = next(x for x in listed if x["state"] == "used")
+    assert used["used_hostname"] == "shop-pi"
+
+
+def test_a_wrong_secret_a_revoked_or_an_expired_link_enrol_nothing(env, links):
+    import datetime as dt
+
+    from models import SiteSetupToken
+
+    site = _create(env)
+    token = _token_of(_link(env, site["id"]))
+    tid = token.split(".")[0]
+    wrong = tid + "." + "x" * 26
+    assert env.tc.post("/api/v1/site-agent/enrol", json={"token": wrong}).status_code == 404
+    revoked = _token_of(_link(env, site["id"]))
+    assert env.tc.delete(f"/api/v1/sites/{site['id']}/setup-links/{revoked.split('.')[0]}").status_code == 204
+    assert env.tc.post("/api/v1/site-agent/enrol", json={"token": revoked}).status_code == 404
+    with env.SessionLocal() as s:
+        row = s.query(SiteSetupToken).filter_by(token_id=tid).one()
+        row.expires_at = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1)
+        s.commit()
+    assert env.tc.post("/api/v1/site-agent/enrol", json={"token": token}).status_code == 404
+
+
+def test_one_link_enrols_once_even_when_two_agents_race(env, links):
+    from sqlalchemy.orm import Session as _Session
+
+    site = _create(env)
+    token = _token_of(_link(env, site["id"]))
+    engine = env.SessionLocal.kw["bind"]
+    raced = {"done": False}
+
+    class Racing(_Session):
+        def execute(self, statement, *args, **kwargs):
+            if not raced["done"] and getattr(statement, "is_dml", False):
+                raced["done"] = True
+                with env.SessionLocal() as other:
+                    assert links.consume(other, token, ip=None, hostname=None) is not None
+            return super().execute(statement, *args, **kwargs)
+
+    with Racing(bind=engine, expire_on_commit=False) as s:
+        assert links.consume(s, token, ip=None, hostname=None) is None
+    assert raced["done"]
+
+
+def test_links_are_bounded_in_lifetime_and_number(env, links):
+    site = _create(env)
+    assert env.tc.post(f"/api/v1/sites/{site['id']}/setup-links", json={"hours": 0}).status_code == 422
+    assert env.tc.post(f"/api/v1/sites/{site['id']}/setup-links", json={"hours": 24 * 8}).status_code == 422
+    for _ in range(links.LINKS_PER_SITE_MAX + 2):
+        _link(env, site["id"], hours=1)
+    listed = env.tc.get(f"/api/v1/sites/{site['id']}/setup-links").json()
+    assert len([x for x in listed if x["state"] == "active"]) == links.LINKS_PER_SITE_MAX
+
+
+def test_revoking_the_site_voids_its_unused_links(env, links):
+    site = _create(env)
+    token = _token_of(_link(env, site["id"]))
+    env.tc.delete(f"/api/v1/sites/{site['id']}/credential")
+    assert env.tc.post("/api/v1/site-agent/enrol", json={"token": token}).status_code == 404
+
+
+def test_a_replaced_agent_gets_no_cameras_until_approved(env, links):
+    site = _create(env)
+    _enrol(env, site["enrol_code"])
+    env.tc.put(f"/api/v1/sites/{site['id']}/cameras/{env.ids['pushed']}",
+               json={"main_url": "rtsp://192.168.1.64:554/main", "username": "admin", "password": "pw"})
+    body = {"token": _token_of(_link(env, site["id"])), "hostname": "new-box"}
+    new = env.tc.post("/api/v1/site-agent/enrol", json=body).json()["token"]
+    ans = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(new)).json()
+    assert ans["desired"] == []
+    view = env.tc.get(f"/api/v1/sites/{site['id']}").json()
+    assert view["approval_pending"] is True and view["pending_agent"]["hostname"] == "new-box"
+    assert env.tc.post(f"/api/v1/sites/{site['id']}/approve-agent").status_code == 200
+    ans = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(new)).json()
+    assert [d["camera_id"] for d in ans["desired"]] == [env.ids["pushed"]]
+    assert env.tc.post(f"/api/v1/sites/{site['id']}/approve-agent").status_code == 409
+
+
+def test_a_first_agent_needs_no_approval(env, links):
+    site = _create(env)
+    r = env.tc.post("/api/v1/site-agent/enrol", json={"token": _token_of(_link(env, site["id"]))})
+    assert r.status_code == 200
+    assert env.tc.get(f"/api/v1/sites/{site['id']}").json()["approval_pending"] is False
+
+
+def test_enrol_takes_a_code_or_a_token_not_both(env, links):
+    site = _create(env)
+    token = _token_of(_link(env, site["id"]))
+    r = env.tc.post("/api/v1/site-agent/enrol", json={"code": site["enrol_code"], "token": token})
+    assert r.status_code == 422
+    assert env.tc.post("/api/v1/site-agent/enrol", json={}).status_code == 404

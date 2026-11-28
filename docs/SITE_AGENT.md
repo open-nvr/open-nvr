@@ -18,7 +18,32 @@ camera ──RTSP──▶ opennvr-host site ──TLS 443 (ALPN opennvr-rtsps)�
 - Reachable on **443** from the sites, at a DNS name (`PUBLIC_HOSTNAME` in `.env` gives it a Let's Encrypt certificate, see [REMOTE_ACCESS.md](REMOTE_ACCESS.md)). A self-signed certificate works too: the agent pins it.
 - The default `NGINX_SINGLE_PORT_WEBRTC=on` (the 443 stream layer carries the ingest route).
 
-## Add a site
+## Add a site with a setup link (servers with a public certificate)
+
+When `PUBLIC_HOSTNAME` is set and this server has a publicly trusted certificate for it (Let's Encrypt, or the company's own public certificate), **Add site** also makes a **setup link**. Send it to the person at the site, by WhatsApp or e-mail, or show its QR code.
+
+1. **They open the link.** The page needs no login. It shows what to download for their computer (Windows, Linux / Raspberry Pi, macOS) and a **setup code**.
+2. **They run `opennvr-host setup`** and paste the setup code when it asks.
+3. **They run `opennvr-host site`.** The site turns **Online**, and you add its cameras as below.
+
+Nobody types a code against the clock or compares a fingerprint. In detail:
+
+- **Lifetime.** A link works once, for 3 days by default (1 hour to 7 days, chosen in the dialog). It can be revoked from the site's card, and the card shows when a link was used, and from which machine and address.
+- **One way in.** Using a link voids the site's other links and its short code.
+- **The secret is in the part of the link after `#`.** Browsers never send that part to the server, so it is in no log. The page reads it, asks the server about the link by its id only, and removes it from the address bar.
+- **The agent checks the server first.** Before it sends the secret, `setup` makes the server prove it made this link. The server answers with an HMAC over the agent's nonce and the certificate key the agent sees, keyed by a key derived from the secret. A firewall that inspects HTTPS, or anything else in the path, cannot make that proof. The agent then stops and sends nothing, and from then on it trusts that key only.
+- **The code is never on the command line.** `setup` reads it from the terminal, so it stays out of shell history and process lists.
+- **Only derived values are stored.** The server keeps a hash to enrol with, and the proof key encrypted with its vault key. The remaining risk: someone who has both read the database with that key *and* sits between an agent and the server could pose as the server to an agent that has not enrolled yet.
+
+When the server cannot offer links, the dialog says why, and you use the code below:
+
+- **No `PUBLIC_HOSTNAME`.**
+- **A self-signed certificate.** The person at the site would have to click through a browser warning, and anyone in the path could read the link.
+- **A front proxy that ends TLS.** The server can't prove the proxy's key.
+
+**Replacing a site's agent** (a new box, a reinstall) with a link or a code, while the site has cameras: the new agent gets **no cameras, and none of their passwords**, until you click **Approve** on the site's card. The card shows the new agent's machine and address. If it is not yours, **Not mine: revoke**. A first agent on a new site needs no approval.
+
+## Add a site with a code
 
 1. **Administration → Sites → Add site.** Name it; you get a one-time code (15 minutes, single use) and the command to run at the site.
 2. **At the site**, on any machine that can reach the cameras (a Linux box, a Raspberry Pi, a Windows PC, a Mac), install `ffmpeg`, then run the three commands the dialog shows for that machine's OS: download the agent, enrol it, start it. On Linux or macOS they look like:

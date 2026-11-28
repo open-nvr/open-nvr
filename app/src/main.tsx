@@ -33,6 +33,7 @@ import { Login } from './views/Login'
 import { MFASetup } from './views/MFASetup'
 import { MFAVerify } from './views/MFAVerify'
 import { ResetPassword } from './views/ResetPassword'
+import { SiteSetup } from './views/SiteSetup'
 import { I18nProvider } from './i18n'
 
 // Views are lazy-loaded so each route becomes its own chunk instead of one
@@ -244,6 +245,8 @@ const router = createBrowserRouter([
   { path: '/mfa-setup', element: <MFASetup /> },
   { path: '/mfa-verify', element: <MFAVerify /> },
   { path: '/reset-password', element: lazyRoute(<ResetPassword />) },
+  // A remote site's setup link (no login): views/SiteSetup.tsx.
+  { path: '/site-setup', element: lazyRoute(<SiteSetup />) },
 ])
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

@@ -26,6 +26,7 @@ from core.database import get_db
 from core.permissions import RequirePermission
 from models import Camera, Site, User
 from services import host_agent
+from services import site_setup
 from services import sites as svc
 
 router = APIRouter(prefix="/sites", tags=["sites"])
@@ -61,6 +62,10 @@ ENROL_GLOBAL_PER_MINUTE = 60
 #: Key proofs (repin) per client address per minute: an agent asks once
 #: when the server's certificate key changes.
 REPIN_PER_MINUTE = 10
+#: Setup-link lookups (the public page, and the agent's hello) per client
+#: address per minute. A link's id is 48 random bits: not guessable, and
+#: unknown ids get answers that look like real ones.
+SETUP_PER_MINUTE = 30
 #: Agent calls per site per minute, per kind, so one kind cannot starve the
 #: others: control (a sync every few seconds and a long poll), publish
 #: tokens (one per stream (re)connect, main + sub of every camera), and the
@@ -184,6 +189,83 @@ def new_enrol_code(
     return _enrol_answer(request, code, expires)
 
 
+class SetupLinkCreate(BaseModel):
+    hours: int = Field(site_setup.LINK_HOURS_DEFAULT, ge=site_setup.LINK_HOURS_MIN, le=site_setup.LINK_HOURS_MAX)
+
+
+@router.get("/setup-links/status")
+def setup_link_status(refresh: bool = Query(False), user: User = Depends(_require_cameras_manage)):
+    """Whether this server can hand out setup links, and if not why
+    (services/site_setup.py readiness)."""
+    return site_setup.readiness(force=refresh)
+
+
+@router.post("/{site_id}/setup-links", status_code=201)
+def create_setup_link(
+    site_id: int,
+    request: Request,
+    body: SetupLinkCreate | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(_require_cameras_manage),
+):
+    """A setup link for the site (shown once: its secret is only in the
+    returned URL). 409 when this server cannot offer links; the site then
+    uses its enrolment code."""
+    from services.audit_service import audit_request
+
+    site = _site_or_404(db, site_id)
+    ready = site_setup.readiness()
+    if not ready["ready"]:
+        raise HTTPException(status_code=409, detail={"reason": ready["reason"], "message": ready["detail"]})
+    link = site_setup.create_link(db, site, user_id=user.id, hours=(body or SetupLinkCreate()).hours,
+                                  host=ready["host"])
+    audit_request(db, request, action="site.setup_link", user_id=user.id, entity_type="site",
+                  entity_id=site.id, details={"token_id": link["token_id"], "expires_at": str(link["expires_at"])})
+    return link
+
+
+@router.get("/{site_id}/setup-links")
+def list_setup_links(site_id: int, db: Session = Depends(get_db), user: User = Depends(_require_cameras_manage)):
+    return site_setup.list_links(db, _site_or_404(db, site_id))
+
+
+@router.delete("/{site_id}/setup-links/{token_id}", status_code=204)
+def revoke_setup_link(
+    site_id: int,
+    token_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(_require_cameras_manage),
+):
+    from services.audit_service import audit_request
+
+    site = _site_or_404(db, site_id)
+    if not site_setup.revoke_link(db, site, token_id[:16]):
+        raise HTTPException(status_code=404, detail="No usable link with that id")
+    audit_request(db, request, action="site.setup_link_revoke", user_id=user.id, entity_type="site",
+                  entity_id=site.id, details={"token_id": token_id[:16]})
+
+
+@router.post("/{site_id}/approve-agent")
+def approve_agent(
+    site_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(_require_cameras_manage),
+):
+    """Let a replaced agent (re-enrolled while the site had cameras) have
+    the site's cameras and their passwords."""
+    from services.audit_service import audit_request
+
+    site = _site_or_404(db, site_id)
+    pending = site.pending_agent
+    if not svc.approve_agent(db, site):
+        raise HTTPException(status_code=409, detail="No agent is waiting for approval")
+    audit_request(db, request, action="site.agent_approved", user_id=user.id, entity_type="site",
+                  entity_id=site.id, details={"agent": pending})
+    return svc.public_view(db, site)
+
+
 @router.delete("/{site_id}/credential")
 async def revoke_site(
     site_id: int,
@@ -294,9 +376,18 @@ async def unlink_camera(
 
 
 class EnrolRequest(BaseModel):
-    code: str = Field(..., min_length=4, max_length=32)
+    # Either the short code (typed) or a setup link's "<id>.<secret>".
+    code: str | None = Field(None, min_length=4, max_length=32)
+    token: str | None = Field(None, min_length=20, max_length=90)
     version: str | None = Field(None, max_length=100)
     hostname: str | None = Field(None, max_length=200)
+
+    @field_validator("token")
+    @classmethod
+    def _one_of(cls, v, info):
+        if v is not None and info.data.get("code") is not None:
+            raise ValueError("send a code or a token, not both")
+        return v
 
 
 class PublisherState(BaseModel):
@@ -408,7 +499,10 @@ async def enrol(body: EnrolRequest, request: Request, db: Session = Depends(get_
     ip = get_client_ip(request)
     if _rate_limited(f"enrol:{ip}", ENROL_PER_MINUTE) or _rate_limited("enrol:*", ENROL_GLOBAL_PER_MINUTE):
         raise HTTPException(status_code=429, detail="Too many requests; slow down")
-    got = svc.enrol(db, body.code, ip=ip, version=body.version)
+    if body.token is not None:
+        got = svc.enrol_with_link(db, body.token, ip=ip, version=body.version, hostname=body.hostname)
+    else:
+        got = svc.enrol(db, body.code, ip=ip, version=body.version, hostname=body.hostname)
     if got is None:
         raise _not_found()
     site, token, replaced = got
@@ -418,9 +512,44 @@ async def enrol(body: EnrolRequest, request: Request, db: Session = Depends(get_
     audit_request(db, request, action="site.enrolled", entity_type="site", entity_id=site.id,
                   details={"version": body.version, "hostname": body.hostname,
                            "credential_prefix": site.credential_prefix, "replaced": replaced,
+                           "by": "setup_link" if body.token is not None else "code",
+                           "approval_pending": bool(site.approval_pending_at),
                            "kicked": len(kicked.get("kicked") or [])})
     return {"site_id": site.id, "name": site.name, "token": token,
             "ingest": svc.ingest_target(request.headers.get("host"))}
+
+
+class SetupInfoRequest(BaseModel):
+    token_id: str = Field(..., min_length=4, max_length=16, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+@agent_router.post("/setup-info")
+def setup_info(body: SetupInfoRequest, request: Request, db: Session = Depends(get_db)):
+    """What the public setup page shows for a link: the site's name, the
+    downloads. POST, with only the link's id (its secret never leaves the
+    browser), and it never uses the link up: mail and chat apps open links
+    to preview them."""
+    if _rate_limited(f"setup:{get_client_ip(request)}", SETUP_PER_MINUTE):
+        raise HTTPException(status_code=429, detail="Too many requests; slow down")
+    info = site_setup.setup_info(db, body.token_id)
+    if info is None:
+        raise _not_found()
+    return {**info, "build": svc.agent_build(), "files": svc.agent_downloads()}
+
+
+class HelloRequest(BaseModel):
+    token_id: str = Field(..., min_length=4, max_length=16, pattern=r"^[A-Za-z0-9_-]+$")
+    nonce: str = Field(..., min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+@agent_router.post("/hello")
+def hello(body: HelloRequest, request: Request, db: Session = Depends(get_db)):
+    """The server proves to an agent with a setup link that it is the
+    server that made the link, before the agent sends the link's secret
+    (services/site_setup.py). Every answer looks the same."""
+    if _rate_limited(f"setup:{get_client_ip(request)}", SETUP_PER_MINUTE):
+        raise HTTPException(status_code=429, detail="Too many requests; slow down")
+    return {"proof": site_setup.prove(db, body.token_id, body.nonce, svc.server_pin())}
 
 
 class RepinRequest(BaseModel):

@@ -72,8 +72,9 @@ _OPEN_API_PREFIXES = (
     "/api/v1/media/s/",
     # A site agent at another site (issue #925, cloud ingest) is a service,
     # not a browser to approve: its site credential (or, to enrol, a
-    # one-time code) is checked on every route, which answers 404 to
-    # anything else.
+    # one-time code or a setup link) is checked on every route, which
+    # answers 404 to anything else. The setup page (/site-setup, the SPA)
+    # is a non-API path and so never gated.
     "/api/v1/site-agent/",
 )
 
