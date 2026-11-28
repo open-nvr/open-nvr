@@ -318,6 +318,15 @@ function UplinkDialog({ site, onClose }: { site: Site; onClose: () => void }) {
   const [policy, setPolicy] = useState<'always' | 'sub_only'>(site.live_policy === 'sub_only' ? 'sub_only' : 'always')
   const [cap, setCap] = useState(site.uplink_cap_kbps ? String(site.uplink_cap_kbps) : '')
   const noSub = site.cameras.filter((c) => !c.sub_url).length
+  const test = site.uplink_test
+  const testUplink = async () => {
+    try {
+      await siteService.uplinkTest(site.id)
+      void queryClient.invalidateQueries({ queryKey: SITES_KEY })
+    } catch (e) {
+      showError(extractApiError(e, 'Could not start the test'))
+    }
+  }
   const save = async () => {
     try {
       await siteService.update(site.id, { live_policy: policy, uplink_cap_kbps: cap.trim() ? Number(cap) : null })
@@ -337,6 +346,18 @@ function UplinkDialog({ site, onClose }: { site: Site; onClose: () => void }) {
         </div>
       }>
       <div className="space-y-3 text-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <span>
+            Free upload: {test?.pending ? 'testing…' : test?.kbps != null
+              ? <b>{(test.kbps / 1000).toFixed(1)} Mbit/s</b> : 'not tested yet'}
+            {test?.at && !test.pending ? <span className="text-[var(--text-dim)]"> ({new Date(test.at).toLocaleString()})</span> : null}
+          </span>
+          <span className="flex-1" />
+          <Button size="sm" variant="outline" disabled={!site.online || !!test?.pending} onClick={testUplink}
+            title="The site's agent uploads throwaway data for 5 seconds (at most 10 MB, once an hour)">
+            Test the uplink
+          </Button>
+        </div>
         <Field label="What the site sends" hint={policy === 'sub_only'
           ? `Each camera's sub stream only, into its main path: live view and recording at sub-stream quality.${noSub ? ` ${noSub} camera(s) without a sub stream keep sending their main stream.` : ''}`
           : "Each camera's main stream, and its sub stream when it has one."}>
@@ -353,6 +374,59 @@ function UplinkDialog({ site, onClose }: { site: Site; onClose: () => void }) {
   )
 }
 
+/** A new user/password for the site's cameras, after it was changed on them. */
+function CameraPasswordDialog({ site, onClose }: { site: Site; onClose: () => void }) {
+  const { showSuccess, showError } = useSnackbar()
+  const [picked, setPicked] = useState<Record<number, boolean>>(() => Object.fromEntries(site.cameras.map((c) => [c.id, true])))
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const ids = site.cameras.filter((c) => picked[c.id]).map((c) => c.id)
+  const save = async () => {
+    try {
+      const res = await siteService.setCameraCredentials(site.id, {
+        camera_ids: ids, username: username.trim() || null, password: password || null,
+      })
+      showSuccess(`${res.changed.length} camera(s) updated; the site's agent reconnects them with the new password`)
+      void queryClient.invalidateQueries({ queryKey: SITES_KEY })
+      onClose()
+    } catch (e) {
+      showError(extractApiError(e, 'Could not save'))
+    }
+  }
+  return (
+    <Modal open title={`Camera password at "${site.name}"`} onClose={onClose}
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" disabled={ids.length === 0 || (!username.trim() && !password)} onClick={save}>
+            Save for {ids.length} camera{ids.length === 1 ? '' : 's'}
+          </Button>
+        </div>
+      }>
+      <div className="space-y-3 text-sm">
+        <p className="text-[var(--text-dim)]">
+          For after the password was changed on the cameras themselves: OpenNVR uses the new one from now on.
+          Leave the user empty to keep each camera's.
+        </p>
+        <ul className="border border-[var(--border)] divide-y divide-[var(--border)] max-h-48 overflow-auto">
+          {site.cameras.map((c) => (
+            <li key={c.id} className="flex items-center gap-2 px-2 py-1">
+              <input type="checkbox" checked={!!picked[c.id]} aria-label={c.name}
+                onChange={(e) => setPicked({ ...picked, [c.id]: e.target.checked })} />
+              <span>{c.name}</span>
+              <span className="text-xs text-[var(--text-dim)]">{c.lan_host}</span>
+            </li>
+          ))}
+        </ul>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="User (optional)"><Input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" /></Field>
+          <Field label="New password"><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" /></Field>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 function SiteCard({ site, canManage, onCode, onAddCameras }: {
   site: Site
   canManage: boolean
@@ -363,6 +437,7 @@ function SiteCard({ site, canManage, onCode, onAddCameras }: {
   const { showSuccess, showError } = useSnackbar()
   const status = siteStatus(site)
   const [uplinkOpen, setUplinkOpen] = useState(false)
+  const [passwordOpen, setPasswordOpen] = useState(false)
   const uplink = siteUplinkKbps(site)
   const refresh = () => queryClient.invalidateQueries({ queryKey: SITES_KEY })
 
@@ -433,9 +508,14 @@ function SiteCard({ site, canManage, onCode, onAddCameras }: {
               onClick={() => onAddCameras(site)}>
               <Plus size={14} /> Add cameras
             </Button>
-            <Button size="sm" variant="outline" title="What the site sends, and an uplink cap" onClick={() => setUplinkOpen(true)}>
+            <Button size="sm" variant="outline" title="What the site sends, an uplink cap, and an uplink test" onClick={() => setUplinkOpen(true)}>
               <Gauge size={14} /> Uplink
             </Button>
+            {site.cameras.length > 0 && (
+              <Button size="sm" variant="outline" title="A new user/password for the site's cameras" onClick={() => setPasswordOpen(true)}>
+                <KeyRound size={14} /> Camera password
+              </Button>
+            )}
             {site.enrolled && (
               <Button size="sm" variant="danger" title="Cut the agent off now; its streams stop, cameras and recordings stay"
                 onClick={async () => {
@@ -459,6 +539,7 @@ function SiteCard({ site, canManage, onCode, onAddCameras }: {
       </div>
 
       {uplinkOpen && <UplinkDialog site={site} onClose={() => setUplinkOpen(false)} />}
+      {passwordOpen && <CameraPasswordDialog site={site} onClose={() => setPasswordOpen(false)} />}
       <div className="px-3 py-2 space-y-2 text-sm">
         {canManage && <SetupLinks site={site} />}
         {site.cameras.length === 0 ? (

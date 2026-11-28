@@ -284,6 +284,47 @@ def scan_site(site_id: int, request: Request, db: Session = Depends(get_db),
     return {"requested": rid}
 
 
+@router.post("/{site_id}/uplink-test")
+def uplink_test(site_id: int, request: Request, db: Session = Depends(get_db),
+                user: User = Depends(_require_cameras_manage)):
+    """Ask the site's agent to measure its free upload: it uploads throwaway
+    bytes for a few seconds (at most 10 MB, at most once an hour). The
+    result arrives in ``uplink_test`` on the site."""
+    from services.audit_service import audit_request
+
+    site = _site_or_404(db, site_id)
+    if not site.credential_hash:
+        raise HTTPException(status_code=409, detail="The site has no agent yet")
+    rid = svc.request_uplink_test(site.id)
+    if rid is None:
+        raise HTTPException(status_code=429, detail="The uplink was tested less than an hour ago")
+    audit_request(db, request, action="site.uplink_test", user_id=user.id, entity_type="site", entity_id=site.id)
+    return {"requested": rid}
+
+
+class CameraCredentials(BaseModel):
+    camera_ids: list[int] | None = Field(None, max_length=512)
+    username: str | None = Field(None, max_length=50)
+    password: str | None = Field(None, max_length=200)
+
+
+@router.post("/{site_id}/cameras/credentials")
+def set_site_camera_credentials(site_id: int, body: CameraCredentials, request: Request,
+                                db: Session = Depends(get_db), user: User = Depends(_require_cameras_manage)):
+    """A new user and password for the site's cameras (all of them, or those
+    listed): after the cameras' own password was changed, say."""
+    from services.audit_service import audit_request
+
+    site = _site_or_404(db, site_id)
+    if body.username is None and body.password is None:
+        raise HTTPException(status_code=422, detail="Give a user, a password, or both")
+    changed = svc.set_camera_credentials(db, site, body.camera_ids, body.username, body.password)
+    audit_request(db, request, action="site.camera_credentials", user_id=user.id, entity_type="site",
+                  entity_id=site.id, details={"cameras": changed, "username_changed": body.username is not None,
+                                               "password_changed": body.password is not None})
+    return {**svc.public_view(db, site), "changed": changed}
+
+
 class ProbeRequest(BaseModel):
     ips: list[str] = Field(..., min_length=1, max_length=64)
     username: str = Field("", max_length=50)
@@ -604,6 +645,7 @@ def _agent_answer(db: Session, site: Site, request: Request) -> dict:
         "poll_after_s": 5,
         "wait_max_s": svc.WAIT_MAX_S,
         "scan_request": svc.scan_request(site.id),
+        "uplink_test": svc.uplink_test_request(site.id),
     }
 
 
@@ -792,6 +834,34 @@ def agent_update(site: Site = Depends(_require_site)):
         raise _not_found()
     manifest, sig = got
     return {"manifest": base64.b64encode(manifest).decode(), "signature": base64.b64encode(sig).decode()}
+
+
+@agent_router.post("/speedtest/{test_id}")
+async def speedtest(test_id: int, request: Request, site: Site = Depends(_require_site),
+                    db: Session = Depends(get_db)):
+    """The agent's upload for an uplink test an admin asked for (once): the
+    bytes are counted and thrown away, and the rate is measured HERE, from
+    the first byte to the last, not taken from the agent."""
+    import time
+
+    from core.database import release
+
+    if not svc.uplink_test_wanted(site.id, test_id):
+        raise _not_found()
+    site_id = site.id
+    release(db)
+    n = 0
+    started = None
+    async for chunk in request.stream():
+        if started is None:
+            started = time.monotonic()
+        n += len(chunk)
+        if n > svc.UPLINK_TEST_MAX_BYTES + (1 << 20):
+            break
+    seconds = (time.monotonic() - started) if started else 0.0
+    site = db.get(Site, site_id)
+    result = svc.record_uplink_test(db, site, test_id, n, seconds)
+    return result
 
 
 @agent_router.post("/publish-token/{camera_id}")

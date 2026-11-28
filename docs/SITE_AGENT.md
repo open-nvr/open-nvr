@@ -207,6 +207,15 @@ Each site card shows what the site sends upstream now (↑ kbps) and, per camera
 
 A main stream on demand only while someone watches it is not offered: recording needs the main stream all the time.
 
+**Test the uplink** (in **Uplink**, and in **Add cameras** before you add) measures how much upload the site has left beside what it already sends:
+- **How it works:** the agent uploads throwaway data to this server for 5 seconds (at most 10 MB), and the server measures the rate itself.
+- **Limits:** at most once an hour per site; the agent can't start one on its own.
+- **In Add cameras:** the dialog adds up what the ticked cameras would need, estimated from their resolution, and compares it with that. When it won't fit, **Use sub streams only** switches the site to sub streams in one click.
+
+## Camera passwords
+
+After a password was changed on the cameras themselves, click **Camera password** on the site's card. Enter the new password, and the user if that changed too, for all the site's cameras or only the ones you tick. The site's agent reconnects them with it within seconds. The change is in the audit log, without the password.
+
 ## Limits
 
 - The site's uplink carries every relayed stream all the time (recording needs the main stream). Add a sub stream for each camera where you can.
