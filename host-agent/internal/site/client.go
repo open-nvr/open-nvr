@@ -65,6 +65,8 @@ type Answer struct {
 	// ScanRequest: an admin asked for a camera scan (scan.go); a new value
 	// starts one.
 	ScanRequest int64 `json:"scan_request,omitempty"`
+	// UplinkTest: an admin asked for an uplink test (speedtest.go).
+	UplinkTest int64 `json:"uplink_test,omitempty"`
 }
 
 // PublisherState is one relayed stream, as reported.

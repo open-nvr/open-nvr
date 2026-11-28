@@ -17,7 +17,7 @@ import { queryClient } from '../lib/queries'
 import { Badge, Button } from '../components/ui'
 import { Field, Input } from '../components/ui/form'
 import { Modal } from '../components/Modal'
-import { siteService, type BulkCamera, type ProbeResult, type Site } from '../services/siteService'
+import { estimateKbps, siteService, siteUplinkKbps, type BulkCamera, type ProbeResult, type Site } from '../services/siteService'
 
 const SITES_KEY = ['sites']
 
@@ -32,7 +32,10 @@ function lastOctet(ip: string): string {
   return ip.split('.').pop() || ip
 }
 
-type Pick = { key: string; ip: string; name: string; main_url: string; sub_url: string | null; add: boolean }
+type Pick = {
+  key: string; ip: string; name: string; main_url: string; sub_url: string | null; add: boolean
+  width: number | null; height: number | null
+}
 
 export function AddCamerasDialog({ siteId, onClose, onAddByUrl }: { siteId: number; onClose: () => void; onAddByUrl: () => void }) {
   const { showSuccess, showError } = useSnackbar()
@@ -88,6 +91,8 @@ export function AddCamerasDialog({ siteId, onClose, onAddByUrl }: { siteId: numb
             main_url: c.main_url,
             sub_url: c.sub_url,
             add: true,
+            width: c.width,
+            height: c.height,
           })
         })
       }
@@ -101,6 +106,30 @@ export function AddCamerasDialog({ siteId, onClose, onAddByUrl }: { siteId: numb
   }
 
   const toAdd = picks.filter((p) => p.add && p.name.trim())
+  // What the ticked cameras would send, against the upload left free beside
+  // what the site sends already (the last uplink test).
+  const subOnly = site.live_policy === 'sub_only'
+  const needKbps = toAdd.reduce((sum, p) => sum + (subOnly && p.sub_url
+    ? estimateKbps(null, null, true)
+    : estimateKbps(p.width, p.height) + (p.sub_url ? estimateKbps(null, null, true) : 0)), 0)
+  const freeKbps = site.uplink_test?.kbps ?? null
+  const tight = freeKbps != null && needKbps > freeKbps * 0.8
+  const testUplink = async () => {
+    try {
+      await siteService.uplinkTest(site.id)
+      void queryClient.invalidateQueries({ queryKey: SITES_KEY })
+    } catch (e) {
+      showError(extractApiError(e, 'Could not start the uplink test'))
+    }
+  }
+  const useSubOnly = async () => {
+    try {
+      await siteService.update(site.id, { live_policy: 'sub_only' })
+      void queryClient.invalidateQueries({ queryKey: SITES_KEY })
+    } catch (e) {
+      showError(extractApiError(e, 'Could not switch to sub streams'))
+    }
+  }
   const add = async () => {
     setAdding(true)
     try {
@@ -184,6 +213,26 @@ export function AddCamerasDialog({ siteId, onClose, onAddByUrl }: { siteId: numb
           </span>
         </div>
 
+        {toAdd.length > 0 && (
+          <div className={`flex flex-wrap items-center gap-2 border p-2 ${tight ? 'border-[var(--warn)]' : 'border-[var(--border)]'}`}>
+            <span>
+              These {toAdd.length} camera{toAdd.length === 1 ? '' : 's'} need about <b>{(needKbps / 1000).toFixed(1)} Mbit/s</b> of upload
+              {subOnly ? ' (sub streams only)' : ''}
+              {freeKbps != null
+                ? <>; the site has <b>{(freeKbps / 1000).toFixed(1)} Mbit/s</b> free beside the {Math.round(siteUplinkKbps(site) / 100) / 10} Mbit/s it sends now.</>
+                : '.'}
+              {tight && !subOnly ? ' That is too much for full quality: sub streams only would fit far more.' : ''}
+              {tight && subOnly ? ' Even sub streams may not fit: add fewer, or raise the site\'s upload.' : ''}
+            </span>
+            <span className="flex-1" />
+            {freeKbps == null && (
+              <Button size="sm" variant="outline" disabled={!!site.uplink_test?.pending || !site.online} onClick={testUplink}>
+                {site.uplink_test?.pending ? 'Testing…' : 'Test the uplink'}
+              </Button>
+            )}
+            {tight && !subOnly && <Button size="sm" variant="primary" onClick={useSubOnly}>Use sub streams only</Button>}
+          </div>
+        )}
         {picks.length > 0 && (
           <ul className="space-y-2">
             {picks.map((p) => {

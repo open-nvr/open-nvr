@@ -63,6 +63,8 @@ export type Site = {
   found?: FoundDevice[]
   /** The camera scan: asked for, still running, what it covered. */
   scan?: ScanState
+  /** The last uplink test: the upload left free beside the relayed cameras. */
+  uplink_test?: { requested: number | null; pending: boolean; kbps: number | null; at: string | null }
   /** A replaced agent waiting for an admin's approval: it gets no cameras yet. */
   approval_pending?: boolean
   pending_agent?: { hostname: string | null; ip: string | null; version: string | null; credential_prefix: string | null } | null
@@ -197,6 +199,11 @@ export const siteService = {
     await api.delete(`/api/v1/sites/${id}/setup-links/${encodeURIComponent(tokenId)}`)
   },
   approveAgent: async (id: number): Promise<Site> => (await api.post(`/api/v1/sites/${id}/approve-agent`)).data,
+  /** Ask the site's agent to measure its free upload (at most once an hour). */
+  uplinkTest: async (id: number): Promise<{ requested: number }> => (await api.post(`/api/v1/sites/${id}/uplink-test`)).data,
+  /** A new user and/or password for the site's cameras (all, or those listed). */
+  setCameraCredentials: async (id: number, body: { camera_ids?: number[] | null; username?: string | null; password?: string | null }): Promise<Site & { changed: number[] }> =>
+    (await api.post(`/api/v1/sites/${id}/cameras/credentials`, body)).data,
   /** Ask the site's agent to look for cameras on its networks. */
   scan: async (id: number): Promise<{ requested: number }> => (await api.post(`/api/v1/sites/${id}/scan`)).data,
   /** Try found devices with one user and password, through the site's agent. */
@@ -244,6 +251,20 @@ export function cameraRelayState(s: Site, cameraId: number): SitePublisher | und
 /** What the site sends upstream now, in kbps (relayed streams, last 10 s). */
 export function siteUplinkKbps(s: Site): number {
   return s.publishers.reduce((sum, p) => sum + (p.kbps || 0), 0)
+}
+
+/** A rough bitrate for a stream, from its resolution (cameras rarely say
+ *  theirs): what the uplink check in Add cameras adds up. kbps. */
+export function estimateKbps(width: number | null | undefined, height: number | null | undefined, sub = false): number {
+  if (sub) return 500
+  const px = (width || 0) * (height || 0)
+  if (!px) return 4000
+  if (px <= 500_000) return 1000
+  if (px <= 1_000_000) return 2000
+  if (px <= 2_100_000) return 4000
+  if (px <= 4_200_000) return 6000
+  if (px <= 8_300_000) return 10000
+  return 12000
 }
 
 /** An RTSP URL to start from for a discovered device. */

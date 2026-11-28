@@ -423,7 +423,8 @@ def desired_state(db: Session, site: Site) -> list[dict[str, Any]]:
 def etag(desired: list[dict[str, Any]], site: Site) -> str:
     """Changes whenever anything the agent acts on changes."""
     blob = json.dumps(
-        {"d": desired, "p": site.live_policy, "c": site.uplink_cap_kbps, "s": scan_request(site.id)},
+        {"d": desired, "p": site.live_policy, "c": site.uplink_cap_kbps, "s": scan_request(site.id),
+         "u": uplink_test_request(site.id)},
         sort_keys=True, separators=(",", ":"),
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:32]
@@ -448,6 +449,84 @@ def request_scan(site_id: int) -> int:
 
 def scan_request(site_id: int) -> int | None:
     return _scan_requests.get(site_id)
+
+
+# ── uplink test (the agent's speedtest) ──────────────────────────────────
+
+#: An uplink test an admin asked for, per site, and when: the agent then
+#: uploads throwaway bytes to POST /site-agent/speedtest for a few seconds.
+_uplink_requests: dict[int, int] = {}
+#: At most one test per site this often: it costs the site's upload.
+UPLINK_TEST_EVERY_S = 3600
+#: The most a test uploads, and for how long (the agent stops at either).
+UPLINK_TEST_MAX_BYTES = 10 << 20
+UPLINK_TEST_SECONDS = 5
+
+
+def request_uplink_test(site_id: int) -> int | None:
+    """Ask the site's agent for an uplink test; None if one was asked for
+    within UPLINK_TEST_EVERY_S."""
+    import time
+
+    now_ms = int(time.time() * 1000)
+    last = _uplink_requests.get(site_id)
+    if last and now_ms - last < UPLINK_TEST_EVERY_S * 1000:
+        return None
+    _uplink_requests[site_id] = now_ms
+    notify(site_id)
+    return now_ms
+
+
+def uplink_test_request(site_id: int) -> int | None:
+    return _uplink_requests.get(site_id)
+
+
+#: Tests already run (one upload per request).
+_uplink_done: dict[int, int] = {}
+
+
+def uplink_test_wanted(site_id: int, test_id: int) -> bool:
+    """The agent may upload only for the test an admin asked for, once:
+    asking marks it used."""
+    if not test_id or _uplink_requests.get(site_id) != test_id or _uplink_done.get(site_id) == test_id:
+        return False
+    _uplink_done[site_id] = test_id
+    return True
+
+
+def record_uplink_test(db: Session, site: Site, test_id: int, nbytes: int, seconds: float) -> dict[str, Any]:
+    """Keep the result (in the report, beside what the agent reports)."""
+    kbps = (nbytes * 8 / 1000) / seconds if seconds > 0 else 0.0
+    result = {"id": test_id, "kbps": round(kbps, 1), "bytes": nbytes, "seconds": round(seconds, 2),
+              "at": _now().isoformat()}
+    try:
+        report = json.loads(site.report) if site.report else {}
+    except ValueError:
+        report = {}
+    report["uplink_test"] = result
+    site.report = json.dumps(report, separators=(",", ":"), default=str)[:200_000]
+    db.commit()
+    return result
+
+
+def set_camera_credentials(db: Session, site: Site, camera_ids: list[int] | None,
+                           username: str | None, password: str | None) -> list[int]:
+    """New user/password for the site's cameras (all, or those listed); the
+    agent restarts their streams with them on its next poll."""
+    from utils.encryption import encrypt_value
+
+    changed = []
+    for cam in site_cameras(db, site.id):
+        if camera_ids is not None and cam.id not in camera_ids:
+            continue
+        if username is not None:
+            cam.username = username.strip()[:50] or None
+        if password is not None:
+            cam.encrypted_password = encrypt_value(password) if password else None
+        changed.append(cam.id)
+    db.commit()
+    notify(site.id)
+    return changed
 
 
 def camera_for_site(db: Session, site: Site, camera_id: int) -> Camera | None:
@@ -482,6 +561,12 @@ def publish_token(camera: Camera) -> dict[str, Any]:
 
 
 def record_report(db: Session, site: Site, report: dict[str, Any], ip: str | None) -> None:
+    try:
+        before = json.loads(site.report) if site.report else {}
+    except ValueError:
+        before = {}
+    if before.get("uplink_test") and "uplink_test" not in report:
+        report = {**report, "uplink_test": before["uplink_test"]}
     site.last_seen_at = _now()
     site.last_ip = (ip or "")[:45] or None
     site.agent_version = str(report.get("version") or "")[:100] or None
@@ -707,6 +792,7 @@ def public_view(db: Session, site: Site) -> dict[str, Any]:
         # one entry per address (the Add cameras dialog's list).
         "found": found_devices(report, linked_hosts),
         "scan": _scan_view(site.id, report),
+        "uplink_test": _uplink_view(site.id, report),
         "live_policy": site.live_policy,
         "uplink_cap_kbps": site.uplink_cap_kbps,
         # What the agent's enrol checks the server's certificate against.
@@ -733,6 +819,17 @@ def found_devices(report: dict[str, Any], linked_hosts: set[str]) -> list[dict[s
         entry["rtsp"] = bool(d.get("rtsp"))
         entry["ports"] = [p for p in (d.get("ports") or []) if isinstance(p, int)][:8]
     return sorted(out.values(), key=lambda e: tuple(int(x) if x.isdigit() else 0 for x in e["ip"].split(".")))
+
+
+def _uplink_view(site_id: int, report: dict[str, Any]) -> dict[str, Any]:
+    last = report.get("uplink_test") or {}
+    asked = uplink_test_request(site_id)
+    return {
+        "requested": asked,
+        "pending": bool(asked) and last.get("id") != asked,
+        "kbps": last.get("kbps"),
+        "at": last.get("at"),
+    }
 
 
 def _scan_view(site_id: int, report: dict[str, Any]) -> dict[str, Any]:

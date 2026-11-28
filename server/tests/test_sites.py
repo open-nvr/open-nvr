@@ -1174,3 +1174,60 @@ def test_cameras_are_added_in_one_go_or_not_at_all(env):
     assert len(added) == 2 and env.provisioned[-2:] == added  # one after another
     names = sorted(c["name"] for c in r.json()["cameras"])
     assert names == ["Gate", "Yard"]
+
+
+# ── uplink test and camera passwords (S5b) ─────────────────────────────
+
+
+@pytest.fixture
+def fresh_uplink():
+    svc._uplink_requests.clear()
+    svc._uplink_done.clear()
+    yield
+    svc._uplink_requests.clear()
+    svc._uplink_done.clear()
+
+
+def test_the_uplink_is_tested_only_when_asked_and_once(env, fresh_uplink):
+    site = _create(env)
+    token = _enrol(env, site["enrol_code"]).json()["token"]
+    # Not asked for: the agent cannot upload.
+    assert env.tc.post("/api/v1/site-agent/speedtest/1", content=b"x" * 1000, headers=_auth(token)).status_code == 404
+    rid = env.tc.post(f"/api/v1/sites/{site['id']}/uplink-test").json()["requested"]
+    assert env.tc.post(f"/api/v1/sites/{site['id']}/uplink-test").status_code == 429  # once an hour
+    ans = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()
+    assert ans["uplink_test"] == rid
+    assert env.tc.get(f"/api/v1/sites/{site['id']}").json()["uplink_test"]["pending"] is True
+    r = env.tc.post(f"/api/v1/site-agent/speedtest/{rid}", content=b"x" * 250_000, headers=_auth(token))
+    assert r.status_code == 200 and r.json()["bytes"] == 250_000 and r.json()["kbps"] > 0
+    # Used up: a second upload for the same test is refused.
+    assert env.tc.post(f"/api/v1/site-agent/speedtest/{rid}", content=b"x", headers=_auth(token)).status_code == 404
+    # The agent's next report does not wipe the result.
+    env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token))
+    view = env.tc.get(f"/api/v1/sites/{site['id']}").json()["uplink_test"]
+    assert view["pending"] is False and view["kbps"] == r.json()["kbps"]
+    # Another site's credential gets nothing.
+    other = _create(env, "Other")
+    other_token = _enrol(env, other["enrol_code"]).json()["token"]
+    assert env.tc.post(f"/api/v1/site-agent/speedtest/{rid}", content=b"x", headers=_auth(other_token)).status_code == 404
+
+
+def test_a_new_camera_password_reaches_the_agent(env):
+    site = _create(env)
+    token = _enrol(env, site["enrol_code"]).json()["token"]
+    for key in ("pushed", "pushed2"):
+        env.tc.put(f"/api/v1/sites/{site['id']}/cameras/{env.ids[key]}",
+                   json={"main_url": "rtsp://192.168.1.64:554/main", "username": "admin", "password": "old"})
+    assert env.tc.post(f"/api/v1/sites/{site['id']}/cameras/credentials", json={}).status_code == 422
+    r = env.tc.post(f"/api/v1/sites/{site['id']}/cameras/credentials",
+                    json={"camera_ids": [env.ids["pushed"]], "password": "n3w"})
+    assert r.status_code == 200 and r.json()["changed"] == [env.ids["pushed"]]
+    urls = {d["camera_id"]: d["main_url"] for d in
+            env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()["desired"]}
+    assert urls[env.ids["pushed"]] == "rtsp://admin:n3w@192.168.1.64:554/main"
+    assert urls[env.ids["pushed2"]] == "rtsp://admin:old@192.168.1.64:554/main"
+    # All of them, user too.
+    env.tc.post(f"/api/v1/sites/{site['id']}/cameras/credentials", json={"username": "ops", "password": "p2"})
+    urls = [d["main_url"] for d in
+            env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()["desired"]]
+    assert urls == ["rtsp://ops:p2@192.168.1.64:554/main"] * 2

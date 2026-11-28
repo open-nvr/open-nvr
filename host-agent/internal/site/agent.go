@@ -57,6 +57,8 @@ type Agent struct {
 	// The last camera scan (scan.go), and the request it answers.
 	camScan  *CameraScan
 	scanning bool
+	// The last uplink test started (speedtest.go).
+	uplinkTest int64
 	// pins: the server keys trusted (control and video alike); policy:
 	// where on the LAN the agent may connect, whatever the server says.
 	pins   *PinSet
@@ -294,6 +296,10 @@ func (a *Agent) apply(ctx context.Context, ans *Answer) {
 		}
 	}
 	a.refreshAllowedLocked()
+	if ans.UplinkTest != 0 && ans.UplinkTest != a.uplinkTest {
+		a.uplinkTest = ans.UplinkTest
+		go a.runUplinkTest(ctx, ans.UplinkTest)
+	}
 	if ans.ScanRequest != 0 && !a.scanning && (a.camScan == nil || a.camScan.ID != ans.ScanRequest) {
 		a.scanning = true
 		go a.runScan(ctx, ans.ScanRequest)
