@@ -59,10 +59,57 @@ export type Site = {
   live_policy: string
   uplink_cap_kbps: number | null
   server_pin: string | null
+  /** Everything the agent found, ONVIF and the camera scan together (not added yet). */
+  found?: FoundDevice[]
+  /** The camera scan: asked for, still running, what it covered. */
+  scan?: ScanState
   /** A replaced agent waiting for an admin's approval: it gets no cameras yet. */
   approval_pending?: boolean
   pending_agent?: { hostname: string | null; ip: string | null; version: string | null; credential_prefix: string | null } | null
 }
+
+/** A device the site's agent found: by ONVIF discovery, the camera scan, or both. */
+export type FoundDevice = {
+  ip: string
+  name: string | null
+  hardware: string | null
+  onvif: boolean
+  /** It answered RTSP in the camera scan. */
+  rtsp: boolean
+  ports: number[]
+}
+
+export type ScanState = {
+  requested: number | null
+  pending: boolean
+  scanned_at: number | null
+  subnets: string[]
+  note: string | null
+  count: number
+}
+
+export type ProbeChannel = {
+  index: number | null
+  name: string | null
+  main_url: string
+  sub_url: string | null
+  width: number | null
+  height: number | null
+  /** A JPEG from the camera, base64 (ONVIF cameras only). */
+  snapshot_b64: string | null
+}
+
+export type ProbeResult = {
+  ip: string
+  status: 'ok' | 'wrong_password' | 'no_stream_found' | 'unreachable'
+  detail?: string
+  via?: 'onvif' | 'rtsp'
+  manufacturer?: string | null
+  model?: string | null
+  channels?: ProbeChannel[]
+}
+
+export type BulkCamera = { name: string; main_url: string; sub_url?: string | null; control_host?: string | null }
 
 /** Whether this server can hand out setup links (a public, trusted certificate). */
 export type SetupLinkStatus = {
@@ -150,6 +197,14 @@ export const siteService = {
     await api.delete(`/api/v1/sites/${id}/setup-links/${encodeURIComponent(tokenId)}`)
   },
   approveAgent: async (id: number): Promise<Site> => (await api.post(`/api/v1/sites/${id}/approve-agent`)).data,
+  /** Ask the site's agent to look for cameras on its networks. */
+  scan: async (id: number): Promise<{ requested: number }> => (await api.post(`/api/v1/sites/${id}/scan`)).data,
+  /** Try found devices with one user and password, through the site's agent. */
+  probe: async (id: number, ips: string[], username: string, password: string): Promise<{ results: ProbeResult[] }> =>
+    (await api.post(`/api/v1/sites/${id}/probe`, { ips, username, password })).data,
+  /** Add several cameras of the site at once. */
+  bulkAdd: async (id: number, cameras: BulkCamera[], username: string, password: string): Promise<Site & { added: number[] }> =>
+    (await api.post(`/api/v1/sites/${id}/cameras/bulk`, { cameras, username: username || null, password: password || null })).data,
   /** Public (no login): what a setup link is for. Sends the link's id only. */
   setupInfo: async (tokenId: string): Promise<SetupInfo> =>
     (await api.post('/api/v1/site-agent/setup-info', { token_id: tokenId })).data,

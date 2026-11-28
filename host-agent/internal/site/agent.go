@@ -54,6 +54,9 @@ type Agent struct {
 	camHosts []string
 	ingest   Ingest
 	scan     *OnvifScan
+	// The last camera scan (scan.go), and the request it answers.
+	camScan  *CameraScan
+	scanning bool
 	// pins: the server keys trusted (control and video alike); policy:
 	// where on the LAN the agent may connect, whatever the server says.
 	pins   *PinSet
@@ -291,6 +294,10 @@ func (a *Agent) apply(ctx context.Context, ans *Answer) {
 		}
 	}
 	a.refreshAllowedLocked()
+	if ans.ScanRequest != 0 && !a.scanning && (a.camScan == nil || a.camScan.ID != ans.ScanRequest) {
+		a.scanning = true
+		go a.runScan(ctx, ans.ScanRequest)
+	}
 	var stopping []*stream
 	for k, s := range a.streams {
 		w, ok := want[k]
@@ -326,6 +333,11 @@ func (a *Agent) refreshAllowedLocked() {
 			hosts = append(hosts, d.IP)
 		}
 	}
+	if a.camScan != nil {
+		for _, d := range a.camScan.Devices {
+			hosts = append(hosts, d.IP)
+		}
+	}
 	a.rpc.setAllowed(hosts)
 }
 
@@ -356,6 +368,7 @@ func (a *Agent) report() Report {
 	}
 	states = append(states, a.shedStatesLocked()...)
 	scan := a.scan
+	camScan := a.camScan
 	a.mu.Unlock()
 	sort.Slice(states, func(i, j int) bool {
 		if states[i].CameraID != states[j].CameraID {
@@ -365,7 +378,7 @@ func (a *Agent) report() Report {
 	})
 	return Report{
 		Version: a.o.Version, OS: runtime.GOOS, Arch: runtime.GOARCH, Hostname: host,
-		Publishers: states, Onvif: scan,
+		Publishers: states, Onvif: scan, Scan: camScan,
 	}
 }
 
@@ -381,12 +394,10 @@ func (a *Agent) reportLoop(ctx context.Context) {
 func (a *Agent) discoverLoop(ctx context.Context) {
 	for {
 		devs := onvifdisc.Probe(ctx, 3*time.Second)
-		if a.policy != nil {
-			a.policy.SetObserved(announcedPorts(devs))
-		}
 		a.mu.Lock()
 		a.scan = &OnvifScan{ScannedAt: nowF(), Devices: devs}
 		a.refreshAllowedLocked()
+		a.updateObservedLocked()
 		a.mu.Unlock()
 		if !sleepCtx(ctx, discoverEvery) {
 			return
@@ -424,4 +435,39 @@ func announcedPorts(devs []onvifdisc.Device) map[string][]int {
 		}
 	}
 	return out
+}
+
+// runScan does one camera scan an admin asked for and reports it at once.
+func (a *Agent) runScan(ctx context.Context, id int64) {
+	a.o.Logf("scanning this site's networks for cameras")
+	res := ScanCameras(ctx, a.policy, id)
+	a.mu.Lock()
+	a.camScan, a.scanning = res, false
+	a.refreshAllowedLocked()
+	a.updateObservedLocked()
+	a.mu.Unlock()
+	a.o.Logf("camera scan: %d camera-like device(s) on %v", len(res.Devices), res.Subnets)
+	if _, err := a.client.Sync(ctx, a.report()); err != nil && ctx.Err() == nil {
+		a.o.Logf("reporting the scan: %v", err)
+	}
+}
+
+// updateObservedLocked: the ports cameras announced (ONVIF) or answered on
+// (the camera scan) are allowed for those cameras (TargetPolicy).
+func (a *Agent) updateObservedLocked() {
+	if a.policy == nil {
+		return
+	}
+	ports := map[string][]int{}
+	if a.scan != nil {
+		for ip, p := range announcedPorts(a.scan.Devices) {
+			ports[ip] = append(ports[ip], p...)
+		}
+	}
+	if a.camScan != nil {
+		for _, d := range a.camScan.Devices {
+			ports[d.IP] = append(ports[d.IP], d.Ports...)
+		}
+	}
+	a.policy.SetObserved(ports)
 }

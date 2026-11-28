@@ -266,6 +266,117 @@ def approve_agent(
     return svc.public_view(db, site)
 
 
+@router.post("/{site_id}/scan")
+def scan_site(site_id: int, request: Request, db: Session = Depends(get_db),
+              user: User = Depends(_require_cameras_manage)):
+    """Ask the site's agent to look for cameras on its networks (camera
+    ports only; services/site_probe.py, the agent's scan.go). The result
+    arrives with its next report, in ``found``."""
+    from services.audit_service import audit_request
+
+    site = _site_or_404(db, site_id)
+    if not site.credential_hash:
+        raise HTTPException(status_code=409, detail="The site has no agent yet")
+    if _rate_limited(f"scan:{site.id}", 6):
+        raise HTTPException(status_code=429, detail="A scan was just asked for; wait a minute")
+    rid = svc.request_scan(site.id)
+    audit_request(db, request, action="site.camera_scan", user_id=user.id, entity_type="site", entity_id=site.id)
+    return {"requested": rid}
+
+
+class ProbeRequest(BaseModel):
+    ips: list[str] = Field(..., min_length=1, max_length=64)
+    username: str = Field("", max_length=50)
+    password: str = Field("", max_length=200)
+
+
+@router.post("/{site_id}/probe")
+async def probe_site_devices(site_id: int, body: ProbeRequest, request: Request,
+                             db: Session = Depends(get_db), user: User = Depends(_require_cameras_manage)):
+    """Try the ticked devices with one user and password, through the
+    site's agent: their channels, streams and a preview (services/site_probe.py).
+    Only devices the agent reported; nothing is saved."""
+    import ipaddress
+
+    from core.database import release
+    from services import site_probe, site_relay
+    from services.audit_service import audit_request
+
+    site = _site_or_404(db, site_id)
+    site_key = site.id
+    if not site.credential_hash:
+        raise HTTPException(status_code=409, detail="The site has no agent yet")
+    ips = []
+    for ip in dict.fromkeys(body.ips):
+        try:
+            ips.append(str(ipaddress.IPv4Address(ip)))
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"{ip!r} is not an IPv4 address") from None
+    known = site_relay.reported_devices(site_key)
+    unknown = [ip for ip in ips if ip not in known]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Not found at this site: {', '.join(unknown)}")
+    if _rate_limited(f"probe:{site_key}", 10):
+        raise HTTPException(status_code=429, detail="Too many probes; wait a minute")
+    # The password goes to these devices (through the agent): on the record.
+    audit_request(db, request, action="site.camera_probe", user_id=user.id, entity_type="site",
+                  entity_id=site_key, details={"devices": ips, "count": len(ips),
+                                               "username": body.username or None})
+    release(db)  # probing takes seconds per device: no pooled connection meanwhile
+    results = await site_probe.probe_devices(site_key, ips, body.username, body.password)
+    return {"results": results}
+
+
+class BulkCamera(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    main_url: str = Field(..., min_length=8, max_length=500)
+    sub_url: str | None = Field(None, max_length=500)
+    control_host: str | None = Field(None, max_length=255)
+
+
+class BulkAdd(BaseModel):
+    cameras: list[BulkCamera] = Field(..., min_length=1, max_length=64)
+    username: str | None = Field(None, max_length=50)
+    password: str | None = Field(None, max_length=200)
+
+
+@router.post("/{site_id}/cameras/bulk", status_code=201)
+async def bulk_add_cameras(site_id: int, body: BulkAdd, request: Request,
+                           db: Session = Depends(get_db), user: User = Depends(_require_cameras_manage)):
+    """Add several of the site's cameras at once (what a probe found, or
+    typed in). Each is created like any camera (POST /cameras/) and linked to
+    the site; MediaMTX paths are set up one camera after another, not all at
+    once. All or nothing on a bad URL: nothing is created then."""
+    from routers.cameras import create_camera_checked
+    from schemas import CameraCreate
+    from services.audit_service import audit_request
+
+    site = _site_or_404(db, site_id)
+    for i, c in enumerate(body.cameras):
+        try:
+            svc.validate_lan_url(c.main_url, field=f"cameras[{i}].main_url")
+            svc.validate_lan_url(c.sub_url, field=f"cameras[{i}].sub_url")
+            svc.validate_lan_host(c.control_host)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+    made: list[int] = []
+    for c in body.cameras:
+        cam = await create_camera_checked(
+            CameraCreate(name=c.name.strip(), source_type="publisher"),
+            force=True, db=db, current_user=user, request=request, probe=False, duplicate_check=False,
+        )
+        row = db.get(Camera, cam.id)
+        svc.link_camera(db, site, row, main_url=c.main_url, sub_url=c.sub_url,
+                        username=body.username, password=body.password, control_host=c.control_host)
+        made.append(cam.id)
+    audit_request(db, request, action="site.cameras_bulk_add", user_id=user.id, entity_type="site",
+                  entity_id=site.id, details={"cameras": made})
+    view = svc.public_view(db, site)
+    for camera_id in made:  # one at a time: never a burst of MediaMTX changes
+        await _reprovision(camera_id)
+    return {**view, "added": made}
+
+
 @router.delete("/{site_id}/credential")
 async def revoke_site(
     site_id: int,
@@ -413,6 +524,37 @@ class OnvifScan(BaseModel):
         return host_agent.clean_onvif_devices(v)
 
 
+class ScannedDevice(BaseModel):
+    ip: str = Field(..., max_length=15)
+    ports: list[int] = Field(default_factory=list, max_length=16)
+    rtsp: bool = False
+
+    @field_validator("ip")
+    @classmethod
+    def _private_v4(cls, v):
+        # What the agent's camera scan found on its own networks: only a
+        # private IPv4 address makes sense (and is routed, site_relay).
+        import ipaddress
+
+        ip = ipaddress.IPv4Address(v)
+        if not ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise ValueError("not a private IPv4 address")
+        return str(ip)
+
+    @field_validator("ports")
+    @classmethod
+    def _ports(cls, v):
+        return [p for p in v if 0 < p < 65536]
+
+
+class CameraScanReport(BaseModel):
+    id: int
+    scanned_at: float | None = None
+    devices: list[ScannedDevice] = Field(default_factory=list, max_length=1024)
+    subnets: list[str] = Field(default_factory=list, max_length=16)
+    note: str | None = Field(None, max_length=300)
+
+
 class SiteReport(BaseModel):
     version: str = Field(..., max_length=100)
     os: str = Field(..., max_length=40)
@@ -420,6 +562,8 @@ class SiteReport(BaseModel):
     hostname: str | None = Field(None, max_length=200)
     publishers: list[PublisherState] = Field(default_factory=list, max_length=512)
     onvif: OnvifScan | None = None
+    # The camera scan an admin asked for (the agent's scan.go).
+    scan: CameraScanReport | None = None
 
 
 def _require_site(
@@ -459,6 +603,7 @@ def _agent_answer(db: Session, site: Site, request: Request) -> dict:
         "ingest": svc.ingest_target(request.headers.get("host")),
         "poll_after_s": 5,
         "wait_max_s": svc.WAIT_MAX_S,
+        "scan_request": svc.scan_request(site.id),
     }
 
 

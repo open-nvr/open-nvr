@@ -423,10 +423,31 @@ def desired_state(db: Session, site: Site) -> list[dict[str, Any]]:
 def etag(desired: list[dict[str, Any]], site: Site) -> str:
     """Changes whenever anything the agent acts on changes."""
     blob = json.dumps(
-        {"d": desired, "p": site.live_policy, "c": site.uplink_cap_kbps},
+        {"d": desired, "p": site.live_policy, "c": site.uplink_cap_kbps, "s": scan_request(site.id)},
         sort_keys=True, separators=(",", ":"),
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:32]
+
+
+# ── camera scan (the agent's scan.go) ───────────────────────────────────
+
+#: The latest scan an admin asked for, per site (milliseconds; in memory:
+#: a restart just forgets a request the agent had not picked up).
+_scan_requests: dict[int, int] = {}
+
+
+def request_scan(site_id: int) -> int:
+    """Ask the site's agent for a camera scan; it starts on its next poll."""
+    import time
+
+    rid = int(time.time() * 1000)
+    _scan_requests[site_id] = rid
+    notify(site_id)
+    return rid
+
+
+def scan_request(site_id: int) -> int | None:
+    return _scan_requests.get(site_id)
 
 
 def camera_for_site(db: Session, site: Site, camera_id: int) -> Camera | None:
@@ -682,6 +703,10 @@ def public_view(db: Session, site: Site) -> dict[str, Any]:
         ],
         # ONVIF devices the agent found on the site's LAN, not yet linked.
         "discovered": [d for d in onvif if d.get("ip") not in linked_hosts],
+        # Everything found, ONVIF discovery and the camera scan together,
+        # one entry per address (the Add cameras dialog's list).
+        "found": found_devices(report, linked_hosts),
+        "scan": _scan_view(site.id, report),
         "live_policy": site.live_policy,
         "uplink_cap_kbps": site.uplink_cap_kbps,
         # What the agent's enrol checks the server's certificate against.
@@ -689,6 +714,38 @@ def public_view(db: Session, site: Site) -> dict[str, Any]:
         # A replaced agent waiting for an admin's approval (no cameras yet).
         "approval_pending": bool(site.approval_pending_at),
         "pending_agent": _json_or_none(site.pending_agent),
+    }
+
+
+def found_devices(report: dict[str, Any], linked_hosts: set[str]) -> list[dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for d in ((report.get("onvif") or {}).get("devices") or []):
+        ip = d.get("ip") if isinstance(d, dict) else None
+        if isinstance(ip, str) and ip not in linked_hosts:
+            out[ip] = {"ip": ip, "name": d.get("name"), "hardware": d.get("hardware"), "onvif": True,
+                       "rtsp": False, "ports": []}
+    for d in ((report.get("scan") or {}).get("devices") or []):
+        ip = d.get("ip") if isinstance(d, dict) else None
+        if not isinstance(ip, str) or ip in linked_hosts:
+            continue
+        entry = out.setdefault(ip, {"ip": ip, "name": None, "hardware": None, "onvif": False,
+                                    "rtsp": False, "ports": []})
+        entry["rtsp"] = bool(d.get("rtsp"))
+        entry["ports"] = [p for p in (d.get("ports") or []) if isinstance(p, int)][:8]
+    return sorted(out.values(), key=lambda e: tuple(int(x) if x.isdigit() else 0 for x in e["ip"].split(".")))
+
+
+def _scan_view(site_id: int, report: dict[str, Any]) -> dict[str, Any]:
+    scan = report.get("scan") or {}
+    asked = scan_request(site_id)
+    return {
+        "requested": asked,
+        # Asked for, and the agent has not answered that request yet.
+        "pending": bool(asked) and scan.get("id") != asked,
+        "scanned_at": scan.get("scanned_at"),
+        "subnets": scan.get("subnets") or [],
+        "note": scan.get("note"),
+        "count": len(scan.get("devices") or []),
     }
 
 

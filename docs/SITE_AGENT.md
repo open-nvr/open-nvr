@@ -66,9 +66,31 @@ When the server cannot offer links, the dialog says why, and you use the code be
 
    **Enrolling.** The `-pin` is the server certificate's fingerprint, as the Sites page shows it. If you leave it out and the server's certificate is self-signed, `enrol` refuses and prints the fingerprint it saw: compare it with the Sites page before using it.
 3. **Keep it running** as a service, so it starts again after a reboot (see [Keep it running](#keep-it-running)): on Linux, `sudo ./opennvr-host install-service` after `enrol`. On Windows, a scheduled task that runs `opennvr-host site` at startup as SYSTEM, with the config under `C:\ProgramData\opennvr-site\config.json` (`enrol -config` and `site -config`).
-4. Back on the Sites page the site turns **Online**. Cameras the agent finds by ONVIF on the site's network are listed: click one, enter its stream URL (as the camera serves it on the site's LAN, without credentials) and its user and password. Or add one by hand with **Camera**.
+4. Back on the Sites page the site turns **Online**. Add its cameras as described below.
 
-The camera then appears on the Cameras page as **Site · \<its LAN address\>** and is recorded, shown and analysed like any other camera.
+## Add the site's cameras
+
+On the site's card, click **Add cameras**:
+
+1. **The cameras found are listed.**
+   - **Already listed:** what the agent found by ONVIF discovery.
+   - **Scan the network** looks for more, such as cameras with ONVIF switched off and NVRs. The agent tries camera ports only (RTSP 554 and 8554, and the Dahua, Xiongmai and Hikvision ports) on the networks its machine is on, at most a /24 each.
+   - **What stays out:** only devices that answer like a camera are listed. Routers, NAS boxes and printers are not.
+2. **Type the cameras' user and password once and click Check.** Each ticked device is tried through the agent:
+   - **By ONVIF** (Digest or WS-Security). This gives its model, its channels (one for a camera, one per channel for an NVR), each channel's main and sub stream, and a picture.
+   - **Otherwise by the usual RTSP stream paths** (Hikvision/Uniview, Dahua/CP Plus).
+
+   Each device ends up as **found**, **wrong password**, **no stream found** or **not reachable**.
+3. **Untick or rename what you don't want, then click Add N cameras.** They are added one after another and the agent starts relaying them within seconds.
+
+**Add one by its stream URL**, at the bottom of the dialog, is for a camera that no check finds. You enter the stream URL (as the camera serves it on the site's network, without credentials), plus its user and password.
+
+**Where the password goes:**
+- Only to the devices you tick, never to everything on the network.
+- Only to devices the agent itself found.
+- Each check is in the audit log, with the devices it went to.
+
+A camera then appears on the Cameras page as **Site · \<its LAN address\>** and is recorded, shown and analysed like any other camera.
 
 ## Keep it running
 

@@ -24,7 +24,11 @@ import (
 // (ONVIF, PTZ, a vendor settings API). Core keeps all the protocol logic;
 // the agent only sends the bytes and returns the answer.
 type RPC struct {
-	ID       string              `json:"id"`
+	ID string `json:"id"`
+	// Kind: "" (HTTP) or "rtsp" (rpc_rtsp.go: BodyB64 is the request,
+	// Target its address).
+	Kind     string              `json:"kind,omitempty"`
+	Target   string              `json:"target,omitempty"`
 	Method   string              `json:"method"`
 	URL      string              `json:"url"`
 	Headers  map[string][]string `json:"headers"`
@@ -139,6 +143,12 @@ func (r *rpcRunner) isAllowed(host string) bool {
 // run sends one request and returns the camera's answer; it never panics
 // and always returns a result to post back.
 func (r *rpcRunner) run(ctx context.Context, rpc RPC) RPCResult {
+	if rpc.Kind == "rtsp" {
+		return r.runRTSP(ctx, rpc)
+	}
+	if rpc.Kind != "" {
+		return RPCResult{Error: "unknown request kind"}
+	}
 	u, err := url.Parse(rpc.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return RPCResult{Error: "not an http(s) URL"}
