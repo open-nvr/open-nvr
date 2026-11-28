@@ -230,7 +230,30 @@ def _build_rtsp_auth(method: str, uri: str, user: str, pw: str, www: str) -> str
     return None
 
 
+def _parse_rtsp_head(raw: bytes) -> tuple[int | None, dict[str, str]]:
+    lines = raw.decode("latin-1", "replace").split("\n")
+    parts = (lines[0] if lines else "").split()
+    code = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        line = line.rstrip("\r")
+        if not line:
+            break
+        k, _, v = line.partition(":")
+        headers[k.strip().lower()] = v.strip()
+    return code, headers
+
+
 async def _describe(host: str, port: int, uri: str, auth: str | None, timeout: float):
+    from services import site_relay
+
+    if site_relay.is_site_host(host):
+        # A camera at a remote site: the agent there sends the request.
+        lines = [f"DESCRIBE {uri} RTSP/1.0", "CSeq: 1", "Accept: application/sdp", "User-Agent: OpenNVR"]
+        if auth:
+            lines.append(f"Authorization: {auth}")
+        raw = await site_relay.rtsp_exchange(host, port, ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"), timeout)
+        return _parse_rtsp_head(raw) if raw else (None, {})
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout
@@ -266,7 +289,11 @@ async def _describe(host: str, port: int, uri: str, auth: str | None, timeout: f
 async def _rtsp_path_works(host: str, port: int, path: str, user: str, pw: str,
                            timeout: float = 3.0) -> bool:
     """True if a DESCRIBE of ``path`` answers 200 (after one auth challenge)."""
-    uri = f"rtsp://{host}:{port}{path}"
+    from services import site_relay
+
+    # A site route is not a name the camera knows: the request names the
+    # camera by its own LAN address (the agent's target).
+    uri = f"rtsp://{site_relay.lan_address(host) or host}:{port}{path}"
     code, headers = await _describe(host, port, uri, None, timeout)
     if code == 401 and user:
         auth = _build_rtsp_auth("DESCRIBE", uri, user, pw or "",

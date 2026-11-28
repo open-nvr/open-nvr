@@ -34,6 +34,11 @@ import httpx
 
 SITE_HOST_SUFFIX = ".opennvr-site.invalid"
 _HOST_RE = re.compile(r"^c(\d+)\.s(\d+)" + re.escape(SITE_HOST_SUFFIX) + r"$")
+#: A device the site's agent found (ONVIF discovery or the camera scan) but
+#: that is no camera yet: ``d<a>-<b>-<c>-<d>.s<site>...``, for probing it
+#: before it is added (services/site_probe.py). Only an address the agent
+#: itself reported is reached; the agent checks again with its own rule.
+_DEVICE_RE = re.compile(r"^d(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})\.s(\d+)" + re.escape(SITE_HOST_SUFFIX) + r"$")
 
 REQUEST_BODY_MAX = 1 << 20  # 1 MiB
 RESPONSE_MAX = 4 << 20  # 4 MiB
@@ -63,6 +68,61 @@ def parse_host(host: str | None) -> tuple[int, int] | None:
     """``(camera_id, site_id)`` for a synthetic site host, else None."""
     m = _HOST_RE.match((host or "").lower())
     return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def device_host(site_id: int, ip: str) -> str:
+    """The route to a device a site's agent reported, by its LAN address."""
+    return f"d{ip.replace('.', '-')}.s{site_id}{SITE_HOST_SUFFIX}"
+
+
+def parse_device_host(host: str | None) -> tuple[str, int] | None:
+    """``(lan_ip, site_id)`` for a device route, else None."""
+    m = _DEVICE_RE.match((host or "").lower())
+    if not m:
+        return None
+    parts = [int(m.group(i)) for i in range(1, 5)]
+    if any(p > 255 for p in parts):
+        return None
+    return ".".join(map(str, parts)), int(m.group(5))
+
+
+def reported_devices(site_id: int) -> set[str]:
+    """The addresses the site's agent last reported: ONVIF discovery and the
+    camera scan."""
+    import json
+
+    from core.database import SessionLocal
+    from models import Site
+
+    with SessionLocal() as db:
+        site = db.get(Site, site_id)
+        if site is None or not site.credential_hash or not site.report:
+            return set()
+        try:
+            report = json.loads(site.report)
+        except ValueError:
+            return set()
+    out = set()
+    for key in ("onvif", "scan"):
+        for d in ((report.get(key) or {}).get("devices") or []):
+            if isinstance(d, dict) and isinstance(d.get("ip"), str):
+                out.add(d["ip"])
+    return out
+
+
+def resolve_route(host: str | None) -> tuple[int, str] | None:
+    """``(site_id, lan_host)`` for a site route (a camera or a reported
+    device), None for anything else, or for a route that leads nowhere."""
+    cam = parse_host(host)
+    if cam is not None:
+        camera_id, site_id = cam
+        lan = _lan_host(camera_id, site_id)
+        return (site_id, lan) if lan else None
+    dev = parse_device_host(host)
+    if dev is not None:
+        ip, site_id = dev
+        return (site_id, ip) if ip in reported_devices(site_id) else None
+    return None
 
 
 # ── routes: synthetic host -> the camera's address on the site LAN ──────
@@ -165,13 +225,12 @@ class SiteAwareTransport(httpx.AsyncBaseTransport):
         self._direct = httpx.AsyncHTTPTransport(verify=verify)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        route = parse_host(request.url.host)
-        if route is None:
+        if not is_site_host(request.url.host):
             return await self._direct.handle_async_request(request)
-        camera_id, site_id = route
-        lan_host = _lan_host(camera_id, site_id)
-        if lan_host is None:
+        route = resolve_route(request.url.host)
+        if route is None:
             raise httpx.ConnectError("not a camera of an enrolled site", request=request)
+        site_id, lan_host = route
         body = await request.aread()
         if len(body) > REQUEST_BODY_MAX:
             raise httpx.RequestError("request too large for the site relay", request=request)
@@ -207,6 +266,38 @@ class SiteAwareTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         await self._direct.aclose()
+
+
+RTSP_REQUEST_MAX = 8 << 10
+
+
+async def rtsp_exchange(host: str, port: int, request: bytes, timeout: float = 6.0) -> bytes | None:
+    """Send one RTSP request (DESCRIBE, ...) to a site route's device through
+    the site's agent and return the answer's head (and SDP), or None when
+    there is no answer. ``host`` is a site route; the agent sends to its LAN
+    address only."""
+    route = resolve_route(host)
+    if route is None or len(request) > RTSP_REQUEST_MAX:
+        return None
+    site_id, lan = route
+    try:
+        res = await call(site_id, {
+            "kind": "rtsp",
+            "target": f"{lan}:{int(port)}",
+            "body_b64": base64.b64encode(request).decode(),
+            "timeout_s": timeout,
+        }, timeout)
+    except TimeoutError:
+        return None
+    if res.get("error"):
+        return None
+    return base64.b64decode(res.get("body_b64") or "")
+
+
+def lan_address(host: str | None) -> str | None:
+    """The LAN address behind a site route, for URLs the agent will use."""
+    route = resolve_route(host)
+    return route[1] if route else None
 
 
 def camera_http_client(**kwargs: Any) -> httpx.AsyncClient:

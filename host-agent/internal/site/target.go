@@ -53,7 +53,7 @@ type TargetPolicy struct {
 // their HTTP APIs on.
 var cameraPorts = map[int]bool{
 	80: true, 81: true, 88: true, 443: true, 554: true, 322: true, 1554: true, 2020: true,
-	5000: true, 7447: true, 8000: true, 8080: true, 8081: true, 8443: true, 8554: true,
+	5000: true, 7447: true, 8000: true, 8080: true, 8081: true, 8088: true, 8443: true, 8554: true,
 	8899: true, 10080: true, 10554: true, 34567: true, 37777: true,
 }
 

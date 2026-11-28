@@ -26,6 +26,7 @@ import {
   AGENT_DOWNLOADS, cameraRelayState, siteService, siteStatus, siteUplinkKbps, suggestedRtspUrl,
   type DiscoveredDevice, type EnrolCode, type SetupLink, type Site,
 } from '../services/siteService'
+import { AddCamerasDialog } from './SiteAddCameras'
 
 const SITES_KEY = ['sites']
 
@@ -352,11 +353,11 @@ function UplinkDialog({ site, onClose }: { site: Site; onClose: () => void }) {
   )
 }
 
-function SiteCard({ site, canManage, onCode, onAddCamera }: {
+function SiteCard({ site, canManage, onCode, onAddCameras }: {
   site: Site
   canManage: boolean
   onCode: (site: Site, code: EnrolCode) => void
-  onAddCamera: (site: Site, device: DiscoveredDevice | null) => void
+  onAddCameras: (site: Site) => void
 }) {
   const confirm = useConfirm()
   const { showSuccess, showError } = useSnackbar()
@@ -427,8 +428,10 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
               }}>
               <KeyRound size={14} /> Set up agent
             </Button>
-            <Button size="sm" variant="outline" onClick={() => onAddCamera(site, null)}>
-              <Plus size={14} /> Camera
+            <Button size="sm" variant="outline" disabled={!site.enrolled}
+              title="Find the site's cameras, check them with one password, add them in one go"
+              onClick={() => onAddCameras(site)}>
+              <Plus size={14} /> Add cameras
             </Button>
             <Button size="sm" variant="outline" title="What the site sends, and an uplink cap" onClick={() => setUplinkOpen(true)}>
               <Gauge size={14} /> Uplink
@@ -459,7 +462,7 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
       <div className="px-3 py-2 space-y-2 text-sm">
         {canManage && <SetupLinks site={site} />}
         {site.cameras.length === 0 ? (
-          <p className="text-[var(--text-dim)]">No cameras yet.{site.discovered.length > 0 ? ' The agent found some on the site\'s network:' : ''}</p>
+          <p className="text-[var(--text-dim)]">No cameras yet.</p>
         ) : (
           <ul className="divide-y divide-[var(--border)]">
             {site.cameras.map((c) => {
@@ -489,19 +492,16 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
             })}
           </ul>
         )}
-        {site.discovered.length > 0 && (
-          <div>
-            {site.cameras.length > 0 && <div className="text-xs text-[var(--text-dim)] mt-1">Found on the site's network, not added yet:</div>}
-            <ul className="flex flex-wrap gap-2 mt-1">
-              {site.discovered.map((d) => (
-                <li key={d.ip}>
-                  <Button size="sm" variant="outline" disabled={!canManage} onClick={() => onAddCamera(site, d)}
-                    title={[d.hardware, d.location].filter(Boolean).join(' · ') || undefined}>
-                    <Plus size={13} /> {d.name || d.ip}
-                  </Button>
-                </li>
-              ))}
-            </ul>
+        {(site.found?.length ?? site.discovered.length) > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-[var(--text-dim)]">
+              {site.found?.length ?? site.discovered.length} found on the site's network, not added yet.
+            </span>
+            {canManage && (
+              <Button size="sm" variant="outline" onClick={() => onAddCameras(site)}>
+                <Plus size={13} /> Add them
+              </Button>
+            )}
           </div>
         )}
       </div>
@@ -523,6 +523,7 @@ export function Sites() {
   const [newName, setNewName] = useState('')
   const [enrol, setEnrol] = useState<{ site: Site; code: EnrolCode } | null>(null)
   const [adding, setAdding] = useState<{ site: Site; device: DiscoveredDevice | null } | null>(null)
+  const [bulk, setBulk] = useState<Site | null>(null)
 
   const create = async () => {
     try {
@@ -570,7 +571,7 @@ export function Sites() {
           {sites.map((s) => (
             <SiteCard key={s.id} site={s} canManage={canManage}
               onCode={(site, code) => setEnrol({ site, code })}
-              onAddCamera={(site, device) => setAdding({ site, device })} />
+              onAddCameras={(site) => setBulk(site)} />
           ))}
         </div>
       )}
@@ -591,6 +592,10 @@ export function Sites() {
       )}
       {enrol && <EnrolDialog site={enrol.site} code={enrol.code} onClose={() => setEnrol(null)} />}
       {adding && <AddCameraDialog site={adding.site} device={adding.device} onClose={() => setAdding(null)} />}
+      {bulk && (
+        <AddCamerasDialog siteId={bulk.id} onClose={() => setBulk(null)}
+          onAddByUrl={() => { const s = bulk; setBulk(null); setAdding({ site: s, device: null }) }} />
+      )}
     </div>
   )
 }

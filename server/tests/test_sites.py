@@ -999,3 +999,178 @@ def test_the_signed_update_manifest_is_relayed_to_enrolled_agents_only(env, agen
     assert base64.b64decode(r.json()["signature"]) == b"{\"key_id\": \"k\", \"sig\": \"s\"}"
     # Not for anyone without the site credential.
     assert env.tc.get("/api/v1/site-agent/update").status_code == 404
+
+
+# ── finding and adding a site's cameras (S5) ───────────────────────────
+
+
+def _with_report(env, site_id, report):
+    with env.SessionLocal() as s:
+        site = s.get(Site, site_id)
+        site.report = json.dumps(report)
+        s.commit()
+
+
+def _enrolled_with_devices(env, monkeypatch):
+    from services import site_relay
+
+    monkeypatch.setattr(site_relay, "SessionLocal", env.SessionLocal, raising=False)
+    import core.database as database
+
+    monkeypatch.setattr(database, "SessionLocal", env.SessionLocal)
+    site = _create(env)
+    token = _enrol(env, site["enrol_code"]).json()["token"]
+    _with_report(env, site["id"], {
+        "onvif": {"devices": [{"ip": "192.168.1.64", "name": "Gate cam"}]},
+        "scan": {"id": 1, "devices": [{"ip": "192.168.1.70", "ports": [554, 37777], "rtsp": True}]},
+    })
+    return site, token
+
+
+def test_onvif_service_addresses_stay_on_the_site_route():
+    from services import onvif_digest_service as ods
+
+    route = "d192-168-1-64.s3.opennvr-site.invalid"
+    assert ods.route_xaddr("http://192.168.1.64/onvif/Media", route) == f"http://{route}/onvif/Media"
+    assert ods.route_xaddr("https://192.168.1.64:8443/onvif/ptz", route) == f"https://{route}:8443/onvif/ptz"
+    # A camera on this server's own network: unchanged.
+    assert ods.route_xaddr("http://10.0.0.7/onvif/Media", "10.0.0.7") == "http://10.0.0.7/onvif/Media"
+
+
+def test_a_device_route_reaches_only_what_the_agent_reported(env, monkeypatch):
+    from services import site_relay
+
+    site, _ = _enrolled_with_devices(env, monkeypatch)
+    sid = site["id"]
+    assert site_relay.parse_device_host(site_relay.device_host(sid, "192.168.1.64")) == ("192.168.1.64", sid)
+    assert site_relay.resolve_route(site_relay.device_host(sid, "192.168.1.64")) == (sid, "192.168.1.64")
+    assert site_relay.resolve_route(site_relay.device_host(sid, "192.168.1.70")) == (sid, "192.168.1.70")
+    for ip in ("192.168.1.1", "10.0.0.5"):  # the router, anything not reported
+        assert site_relay.resolve_route(site_relay.device_host(sid, ip)) is None
+    assert site_relay.parse_device_host("d300-1-1-1.s1.opennvr-site.invalid") is None
+
+
+def _fake_camera(monkeypatch, *, password="pw", path="/Streaming/Channels/101"):
+    """rtsp_exchange answering like a Hikvision camera: Digest, one path."""
+    from services import site_relay
+
+    sent: list[bytes] = []
+
+    async def exchange(host, port, request, timeout=6.0):
+        sent.append(request)
+        line = request.split(b"\r\n", 1)[0].decode()
+        if port != 554:
+            return None
+        if path.encode() not in line.encode():
+            return b"RTSP/1.0 404 Not Found\r\nCSeq: 1\r\n\r\n"
+        if b"Authorization: Digest" not in request:
+            return b'RTSP/1.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Digest realm="cam", nonce="n1"\r\n\r\n'
+        if password and b'response="' in request and getattr(exchange, "ok", True):
+            return b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Type: application/sdp\r\n\r\n"
+        return b'RTSP/1.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Digest realm="cam", nonce="n2"\r\n\r\n'
+
+    monkeypatch.setattr(site_relay, "rtsp_exchange", exchange)
+    return exchange, sent
+
+
+@pytest.mark.asyncio
+async def test_a_camera_without_onvif_is_found_by_its_vendor_path(env, monkeypatch):
+    from services import onvif_digest_service as ods
+    from services import site_probe
+
+    site, _ = _enrolled_with_devices(env, monkeypatch)
+
+    async def no_onvif(*a, **k):
+        raise RuntimeError("no ONVIF")
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", no_onvif)
+    exchange, sent = _fake_camera(monkeypatch)
+    res = await site_probe.probe_device(site["id"], "192.168.1.70", "admin", "pw")
+    assert res["status"] == "ok" and res["via"] == "rtsp"
+    ch = res["channels"][0]
+    # The camera's LAN address, no credentials, and its sub stream derived.
+    assert ch["main_url"] == "rtsp://192.168.1.70:554/Streaming/Channels/101"
+    assert ch["sub_url"] == "rtsp://192.168.1.70:554/Streaming/Channels/102"
+    assert all(b"opennvr-site.invalid" not in r for r in sent), "a site route leaked into a request"
+    exchange.ok = False
+    res = await site_probe.probe_device(site["id"], "192.168.1.70", "admin", "wrong")
+    assert res["status"] == "wrong_password"
+
+
+@pytest.mark.asyncio
+async def test_an_onvif_camera_gives_its_channels_on_its_lan_address(env, monkeypatch):
+    from services import onvif_digest_service as ods
+    from services import site_probe
+
+    site, _ = _enrolled_with_devices(env, monkeypatch)
+
+    async def profiles(host, user, pw, *a, **k):
+        assert host.endswith(".opennvr-site.invalid")
+        return {"port": 80, "scheme": "http", "device_info": {"manufacturer": "Hikvision", "model": "DS-2CD"},
+                "channels": [{"index": 1, "name": "Ch 1",
+                              "main": {"token": "p1", "width": 1920, "height": 1080,
+                                       "stream_uri": "rtsp://admin:pw@192.168.1.64:554/Streaming/Channels/101"},
+                              "sub": {"token": "p2", "stream_uri": "rtsp://192.168.1.64:554/Streaming/Channels/102"}}]}
+
+    async def snap(*a, **k):
+        return "SlBFRw=="
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", profiles)
+    monkeypatch.setattr(site_probe, "_snapshot", snap)
+    res = await site_probe.probe_device(site["id"], "192.168.1.64", "admin", "pw")
+    assert res["status"] == "ok" and res["model"] == "DS-2CD"
+    ch = res["channels"][0]
+    assert ch["main_url"] == "rtsp://192.168.1.64:554/Streaming/Channels/101"  # credentials stripped
+    assert ch["snapshot_b64"] == "SlBFRw==" and ch["width"] == 1920
+
+
+def test_probing_takes_only_devices_the_site_reported(env, monkeypatch):
+    from services import site_probe
+
+    site, _ = _enrolled_with_devices(env, monkeypatch)
+    seen = {}
+
+    async def fake(site_id, ips, username, password):
+        seen["ips"], seen["user"] = ips, username
+        return [{"ip": ip, "status": "ok", "channels": []} for ip in ips]
+
+    monkeypatch.setattr(site_probe, "probe_devices", fake)
+    r = env.tc.post(f"/api/v1/sites/{site['id']}/probe", json={"ips": ["192.168.1.1"], "username": "admin", "password": "x"})
+    assert r.status_code == 422  # the router: never reported, never probed
+    r = env.tc.post(f"/api/v1/sites/{site['id']}/probe",
+                    json={"ips": ["192.168.1.64", "192.168.1.70", "192.168.1.64"], "username": "admin", "password": "x"})
+    assert r.status_code == 200 and seen["ips"] == ["192.168.1.64", "192.168.1.70"]
+
+
+def test_a_scan_request_reaches_the_agent_and_its_result_is_listed(env, monkeypatch):
+    site, token = _enrolled_with_devices(env, monkeypatch)
+    before = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()
+    rid = env.tc.post(f"/api/v1/sites/{site['id']}/scan").json()["requested"]
+    report = {**REPORT, "scan": {"id": rid, "scanned_at": 1.0, "subnets": ["192.168.1.0/24"],
+                                 "devices": [{"ip": "192.168.1.70", "ports": [554], "rtsp": True}]}}
+    after = env.tc.post("/api/v1/site-agent/sync", json={**REPORT}, headers=_auth(token)).json()
+    assert after["scan_request"] == rid and after["etag"] != before["etag"]
+    assert env.tc.get(f"/api/v1/sites/{site['id']}").json()["scan"]["pending"] is True
+    env.tc.post("/api/v1/site-agent/sync", json=report, headers=_auth(token))
+    view = env.tc.get(f"/api/v1/sites/{site['id']}").json()
+    assert view["scan"]["pending"] is False and view["scan"]["subnets"] == ["192.168.1.0/24"]
+    assert [d["ip"] for d in view["found"]] == ["192.168.1.70"] and view["found"][0]["rtsp"] is True
+
+
+def test_cameras_are_added_in_one_go_or_not_at_all(env):
+    site = _create(env)
+    bad = {"cameras": [{"name": "A", "main_url": "rtsp://192.168.1.64/a"},
+                       {"name": "B", "main_url": "http://192.168.1.65/b"}], "username": "admin", "password": "pw"}
+    assert env.tc.post(f"/api/v1/sites/{site['id']}/cameras/bulk", json=bad).status_code == 422
+    with env.SessionLocal() as s:
+        assert s.query(Camera).filter(Camera.site_id == site["id"]).count() == 0
+    good = {"cameras": [{"name": "Gate", "main_url": "rtsp://192.168.1.64:554/Streaming/Channels/101",
+                         "sub_url": "rtsp://192.168.1.64:554/Streaming/Channels/102"},
+                        {"name": "Yard", "main_url": "rtsp://192.168.1.70:554/cam/realmonitor?channel=1&subtype=0"}],
+            "username": "admin", "password": "pw"}
+    r = env.tc.post(f"/api/v1/sites/{site['id']}/cameras/bulk", json=good)
+    assert r.status_code == 201, r.text
+    added = r.json()["added"]
+    assert len(added) == 2 and env.provisioned[-2:] == added  # one after another
+    names = sorted(c["name"] for c in r.json()["cameras"])
+    assert names == ["Gate", "Yard"]

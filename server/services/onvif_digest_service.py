@@ -408,6 +408,26 @@ def _extract_xaddr(capabilities_xml: str, service_tag: str) -> str | None:
     return None
 
 
+def route_xaddr(xaddr: str, ip: str) -> str:
+    """An XAddr the camera returned, for use from here.
+
+    A camera names its services by its own address (``http://192.168.1.64/
+    onvif/media``). For a camera at a remote site that address means nothing
+    here, and worse, it may be a device on THIS server's network: the
+    request must go through the site's agent like the first one did. So for
+    a site route (services/site_relay.py) the XAddr's host is replaced by
+    that route; its scheme, port and path are kept."""
+    from services import site_relay
+
+    if not site_relay.is_site_host(ip):
+        return xaddr
+    parsed = urlparse(xaddr)
+    if not parsed.scheme or not parsed.netloc:
+        return xaddr
+    netloc = ip + (f":{parsed.port}" if parsed.port else "")
+    return parsed._replace(netloc=netloc).geturl()
+
+
 def _extract_path(url: str) -> str:
     """Extract path from URL."""
     parsed = urlparse(url)
@@ -492,7 +512,7 @@ async def get_capabilities(
     for service in ["Device", "Media", "PTZ", "Events", "Imaging", "Analytics"]:
         xaddr = _extract_xaddr(text, service)
         if xaddr:
-            services[service.lower()] = xaddr
+            services[service.lower()] = route_xaddr(xaddr, ip)
 
     return services
 
@@ -549,7 +569,7 @@ async def get_services(
             if ns_m and xa_m:
                 key = _SERVICE_NS_MAP.get(ns_m.group(1).strip())
                 if key:
-                    services[key] = _xml_text(xa_m.group(1).strip())
+                    services[key] = route_xaddr(_xml_text(xa_m.group(1).strip()), ip)
 
     if not services:
         # Fallback: older GetCapabilities (no media2/analytics granularity).
@@ -766,6 +786,30 @@ async def get_stream_uri_digest(
         raise HTTPException(status_code=500, detail="No stream URI in response")
 
     return _xml_text(uri_match.group(1))
+
+
+async def get_snapshot_uri_digest(
+    ip: str,
+    username: str,
+    password: str,
+    profile_token: str,
+    port: int = 80,
+    scheme: str = "http",
+) -> str | None:
+    """The JPEG snapshot URI of a profile (ONVIF GetSnapshotUri), or None."""
+    try:
+        capabilities = await get_capabilities(ip, username, password, port, scheme)
+        media_url = capabilities.get("media") or f"{scheme}://{ip}:{port}/onvif/media_service"
+    except Exception:
+        media_url = f"{scheme}://{ip}:{port}/onvif/media_service"
+    body = f"""<trt:GetSnapshotUri>
+      <trt:ProfileToken>{profile_token}</trt:ProfileToken>
+    </trt:GetSnapshotUri>"""
+    status, text = await _onvif_request(media_url, body, username, password)
+    if status != 200:
+        return None
+    m = re.search(r"<tt:Uri>([^<]+)</tt:Uri>", text)
+    return _xml_text(m.group(1)) if m else None
 
 
 # Common ONVIF control ports across vendors (kept in sync with the discovery

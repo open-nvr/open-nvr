@@ -62,6 +62,9 @@ type Answer struct {
 	WaitMaxS   int       `json:"wait_max_s"`
 	// Camera requests core needs sent on this site's LAN (wait only).
 	RPC []RPC `json:"rpc"`
+	// ScanRequest: an admin asked for a camera scan (scan.go); a new value
+	// starts one.
+	ScanRequest int64 `json:"scan_request,omitempty"`
 }
 
 // PublisherState is one relayed stream, as reported.
@@ -91,6 +94,7 @@ type Report struct {
 	Hostname   string           `json:"hostname,omitempty"`
 	Publishers []PublisherState `json:"publishers"`
 	Onvif      *OnvifScan       `json:"onvif,omitempty"`
+	Scan       *CameraScan      `json:"scan,omitempty"`
 }
 
 // Token is a short publish token for one camera's paths.
