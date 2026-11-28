@@ -87,8 +87,10 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_alpn opennvr-rtsps;
     ssl_handshake_timeout 10s;
-    # A site pushes main + sub per camera; a few dozen per address is a site.
-    limit_conn opennvr_rtsps_per_ip 64;
+    # A site pushes main + sub per camera: 256 is a 128-channel site, or several
+    # sites behind one carrier-grade NAT address. Each session still needs its
+    # own path-scoped publish token; this only bounds idle connections.
+    limit_conn opennvr_rtsps_per_ip 256;
     set $opennvr_rtsp mediamtx:8554;
     proxy_connect_timeout 5s;
     # A publisher sends continuously; ten idle minutes is a dead link.

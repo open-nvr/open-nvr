@@ -131,6 +131,25 @@ out=$(run_layout "$REPO_ROOT/nginx" -- \
 if [ "$(grep -cx 0 <<<"$out")" -eq 2 ] && grep -q 'test is successful' <<<"$out"; then pass
 else fail "$out"; fi
 
+# ── 6. Live: tokens stay out of the access log; site-agent body limits ──
+# nginx runs (default layout), curl hits it through the 443 stream layer.
+# Nothing upstream answers (no core here): requests that pass nginx's own
+# checks end in 502, the ones it refuses in 413.
+start_test "the access log has no query strings (?jwt= tokens) and site-agent bodies are bounded"
+out=$(run_layout "$REPO_ROOT/nginx" -- '
+    nginx; sleep 1
+    head -c 2000000 /dev/zero > /tmp/big; head -c 20000 /dev/zero > /tmp/mid
+    c() { curl -sk -o /dev/null -w "%{http_code}\n" "$@"; }
+    c "https://127.0.0.1/hls/cam-1/index.m3u8?jwt=SECRETTOKEN" >/dev/null
+    echo "sync-2MB $(c -X POST --data-binary @/tmp/big https://127.0.0.1/api/v1/site-agent/sync)"
+    echo "rpc-2MB $(c -X POST --data-binary @/tmp/big https://127.0.0.1/api/v1/site-agent/rpc/r1/result)"
+    echo "enrol-20k $(c -X POST --data-binary @/tmp/mid https://127.0.0.1/api/v1/site-agent/enrol)"
+    sleep 1')
+if ! grep -q SECRETTOKEN <<<"$out" && grep -q '"GET /hls/cam-1/index.m3u8 ' <<<"$out" \
+    && grep -q 'sync-2MB 413' <<<"$out" && grep -q 'enrol-20k 413' <<<"$out" \
+    && grep -qE 'rpc-2MB (502|504)' <<<"$out"; then pass
+else fail "$out"; fi
+
 echo ""
 echo "Ran $TESTS_RUN, failed $TESTS_FAILED"
 [ "$TESTS_FAILED" -eq 0 ]

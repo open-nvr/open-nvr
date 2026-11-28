@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,14 +48,18 @@ const (
 
 // rpcRunner sends core's requests, but only to this site's own cameras:
 // the hosts of the cameras it relays and the devices its ONVIF discovery
-// found. A server that could name any address would turn the agent into a
-// scanner of the customer's network; it cannot.
+// found, and of those only what the agent's own TargetPolicy allows. The
+// host list comes from the server, so it alone would not stop a compromised
+// server naming the router or a NAS as a "camera"; the policy does.
 type rpcRunner struct {
 	mu      sync.Mutex
 	allowed map[string]bool
 	client  *http.Client
 	sem     chan struct{}
 	logf    func(string, ...any)
+	// policy is the agent's own rule (TargetPolicy): even a host core lists
+	// is reached only if it passes. nil: tests that predate it.
+	policy *TargetPolicy
 	// allowLoopback: tests only (their camera is an httptest server).
 	allowLoopback bool
 }
@@ -72,10 +77,13 @@ func newRPCRunner(logf func(string, ...any)) *rpcRunner {
 			if err != nil {
 				return nil, err
 			}
-			// The address actually dialled, after any name resolution.
-			if ip := remoteIP(c); ip != nil && r.forbidden(ip) {
-				c.Close()
-				return nil, fmt.Errorf("refusing to reach %s", ip)
+			// The address actually dialled, after any name resolution: a
+			// name that resolves elsewhere now (DNS rebinding) is caught here.
+			if a, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+				if err := r.check(a.IP, a.Port); err != nil {
+					c.Close()
+					return nil, err
+				}
 			}
 			return c, nil
 		},
@@ -90,16 +98,16 @@ func newRPCRunner(logf func(string, ...any)) *rpcRunner {
 	return r
 }
 
-func (r *rpcRunner) forbidden(ip net.IP) bool {
+// check: may a camera request go to ip:port?
+func (r *rpcRunner) check(ip net.IP, port int) error {
 	if r.allowLoopback && ip.IsLoopback() {
-		return false
+		return nil
 	}
-	return forbiddenIP(ip)
-}
-
-func remoteIP(c net.Conn) net.IP {
-	if a, ok := c.RemoteAddr().(*net.TCPAddr); ok {
-		return a.IP
+	if forbiddenIP(ip) {
+		return fmt.Errorf("refusing to reach %s", ip)
+	}
+	if r.policy != nil {
+		return r.policy.Check(ip, port)
 	}
 	return nil
 }
@@ -138,8 +146,17 @@ func (r *rpcRunner) run(ctx context.Context, rpc RPC) RPCResult {
 	if !r.isAllowed(u.Hostname()) {
 		return RPCResult{Error: fmt.Sprintf("%s is not a camera of this site", u.Hostname())}
 	}
-	if ip := net.ParseIP(u.Hostname()); ip != nil && r.forbidden(ip) {
-		return RPCResult{Error: "refusing that address"}
+	if ip := net.ParseIP(u.Hostname()); ip != nil {
+		port := 80
+		if u.Scheme == "https" {
+			port = 443
+		}
+		if p, err := strconv.Atoi(u.Port()); err == nil {
+			port = p
+		}
+		if err := r.check(ip, port); err != nil {
+			return RPCResult{Error: "refusing that address: " + err.Error()}
+		}
 	}
 	body, err := base64.StdEncoding.DecodeString(rpc.BodyB64)
 	if err != nil {

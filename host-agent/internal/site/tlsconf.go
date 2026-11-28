@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // IngestALPN is the ALPN the server's 443 stream layer routes to camera
@@ -28,13 +29,43 @@ func Pin(cert *x509.Certificate) string {
 type ErrUntrusted struct {
 	ServerPin string
 	Cause     error
+	// Pinned: an enrolled agent met a key it was not enrolled with.
+	Pinned bool
 }
 
 func (e *ErrUntrusted) Error() string {
 	return fmt.Sprintf("the server's certificate is not trusted (%v); its pin is %s", e.Cause, e.ServerPin)
 }
 
-// TLSConfig verifies the server as `serverName`:
+// recordPin wraps cfg so that every handshake that passes stores the
+// server's key in *seen (enrolment saves it: from then on the agent trusts
+// that key only).
+func recordPin(cfg *tls.Config, seen *pinBox) *tls.Config {
+	inner := cfg.VerifyConnection
+	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		if inner != nil {
+			if err := inner(cs); err != nil {
+				return err
+			}
+		}
+		if len(cs.PeerCertificates) > 0 {
+			seen.set(Pin(cs.PeerCertificates[0]))
+		}
+		return nil
+	}
+	return cfg
+}
+
+type pinBox struct {
+	mu  sync.Mutex
+	pin string
+}
+
+func (b *pinBox) set(p string) { b.mu.Lock(); b.pin = p; b.mu.Unlock() }
+func (b *pinBox) get() string  { b.mu.Lock(); defer b.mu.Unlock(); return b.pin }
+
+// TLSConfig is for enrolment (and tests); an enrolled agent uses
+// PinnedTLSConfig. It verifies the server as `serverName`:
 //   - no pin: the normal chain + host name check;
 //   - a pin: the chain check OR the leaf's key matching the pin (a
 //     self-signed server, or a CA the site does not know);

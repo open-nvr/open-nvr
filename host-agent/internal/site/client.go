@@ -6,12 +6,18 @@ package site
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/open-nvr/open-nvr/host-agent/internal/onvifdisc"
@@ -106,25 +112,134 @@ type Client struct {
 	Server string // https://host[:port]
 	Token  string
 	HTTP   *http.Client
+
+	seen *pinBox // the key of the last server that passed verification
+	pins *PinSet // enrolled: trust only these keys (nil: enrolment, tests)
+	logf func(string, ...any)
+
+	repinMu   sync.Mutex
+	repinLast time.Time
+	repinErr  error
 }
 
-// NewClient verifies the server per TLSConfig (pin / insecure).
-func NewClient(server, token, pin string, insecure bool) *Client {
-	host := server
+func serverHost(server string) string {
 	if u, err := url.Parse(server); err == nil {
-		host = u.Hostname()
+		return u.Hostname()
 	}
+	return server
+}
+
+// NewClient verifies the server per TLSConfig (pin / insecure): for
+// enrolment, before the agent has a key of its own to trust.
+func NewClient(server, token, pin string, insecure bool) *Client {
+	seen := &pinBox{}
+	cfg := recordPin(TLSConfig(serverHost(server), pin, insecure, ""), seen)
+	return &Client{Server: server, Token: token, HTTP: newHTTP(cfg), seen: seen, logf: func(string, ...any) {}}
+}
+
+// NewPinnedClient trusts the server by its key only (PinSet), and learns a
+// new key only when the server proves it (repin).
+func NewPinnedClient(server, token string, pins *PinSet, logf func(string, ...any)) *Client {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	seen := &pinBox{}
+	cfg := recordPin(PinnedTLSConfig(serverHost(server), pins, ""), seen)
+	return &Client{Server: server, Token: token, HTTP: newHTTP(cfg), seen: seen, pins: pins, logf: logf}
+}
+
+func newHTTP(cfg *tls.Config) *http.Client {
 	tr := &http.Transport{
-		TLSClientConfig:     TLSConfig(host, pin, insecure, ""),
+		TLSClientConfig:     cfg,
 		Proxy:               http.ProxyFromEnvironment,
 		TLSHandshakeTimeout: 15 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
 	}
 	// No overall timeout here: wait holds for up to ~25 s; each call sets its own.
-	return &Client{Server: server, Token: token, HTTP: &http.Client{Transport: tr}}
+	return &http.Client{Transport: tr}
 }
 
+// SeenPin is the key of the server the last successful call reached
+// (enrolment saves it).
+func (c *Client) SeenPin() string { return c.seen.get() }
+
 func (c *Client) do(ctx context.Context, method, path string, body any, timeout time.Duration, out any) error {
+	err := c.doOnce(ctx, method, path, body, timeout, out)
+	var ue *ErrUntrusted
+	if c.pins != nil && errors.As(err, &ue) && ue.Pinned {
+		if rerr := c.Repin(ctx); rerr != nil {
+			return rerr
+		}
+		return c.doOnce(ctx, method, path, body, timeout, out)
+	}
+	return err
+}
+
+// ErrKeyNotProven: the server's key changed and the server could not prove
+// it holds this site's credential: something in between replaced it.
+var ErrKeyNotProven = errors.New("the server's certificate changed and it could not prove it is the same server; " +
+	"refusing it (a firewall that inspects HTTPS? exempt the OpenNVR server from it)")
+
+// repinEvery: a failing proof is not asked for again sooner than this.
+const repinEvery = 30 * time.Second
+
+// Repin learns the server's new key after the server proves it is the same
+// server: it answers HMAC(credential hash, nonce ‖ the key this agent sees)
+// without the agent sending anything secret (no credential on this call).
+// A man in the middle shows its own key and cannot make that proof.
+func (c *Client) Repin(ctx context.Context) error {
+	c.repinMu.Lock()
+	defer c.repinMu.Unlock()
+	if time.Since(c.repinLast) < repinEvery {
+		if c.repinErr != nil {
+			return c.repinErr
+		}
+		return nil
+	}
+	c.repinLast = time.Now()
+	c.repinErr = c.repin(ctx)
+	return c.repinErr
+}
+
+func (c *Client) repin(ctx context.Context) error {
+	id, secret, ok := tokenSecret(c.Token)
+	if !ok {
+		return ErrKeyNotProven
+	}
+	siteID, err := strconv.Atoi(id)
+	if err != nil {
+		return ErrKeyNotProven
+	}
+	nb := make([]byte, 32)
+	if _, err := rand.Read(nb); err != nil {
+		return err
+	}
+	nonce := base64.RawURLEncoding.EncodeToString(nb)
+	// One connection, no reuse: the key recorded is the key of the very
+	// connection that carried the proof.
+	seen := &pinBox{}
+	cfg := recordPin(&tls.Config{ServerName: serverHost(c.Server), MinVersion: tls.VersionTLS12,
+		InsecureSkipVerify: true}, seen) //nolint:gosec // verified by the proof below
+	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg, Proxy: http.ProxyFromEnvironment,
+		DisableKeepAlives: true, TLSHandshakeTimeout: 15 * time.Second}}
+	bare := &Client{Server: c.Server, HTTP: hc, seen: seen}
+	var out struct {
+		Proof string `json:"proof"`
+	}
+	if err := bare.doOnce(ctx, http.MethodPost, "/repin", map[string]any{"site_id": siteID, "nonce": nonce}, 30*time.Second, &out); err != nil {
+		return fmt.Errorf("asking the server to prove its new key: %w", err)
+	}
+	pin := seen.get()
+	if pin == "" || !hmac.Equal([]byte(out.Proof), []byte(RepinProof(secret, nonce, pin))) {
+		c.logf("%v (it showed %s)", ErrKeyNotProven, pin)
+		return ErrKeyNotProven
+	}
+	c.pins.Add(pin)
+	c.logf("the server's certificate key changed; it proved it is the same server, now trusting %s", pin)
+	return nil
+}
+
+func (c *Client) doOnce(ctx context.Context, method, path string, body any, timeout time.Duration, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var rd io.Reader

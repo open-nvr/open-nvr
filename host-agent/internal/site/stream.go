@@ -43,7 +43,14 @@ type deps struct {
 	backoff   []time.Duration
 	liveAfter time.Duration
 	healthy   time.Duration
+	// checkURL is the agent's own rule for camera URLs (TargetPolicy):
+	// the server's answer names them, the agent decides. nil: tests.
+	checkURL func(ctx context.Context, lanURL string) error
 }
+
+// refusedRetry: how soon a URL the agent refused is looked at again (the
+// machine's networks may change; the server may send a corrected camera).
+const refusedRetry = time.Minute
 
 func newStream(parent context.Context, key string, cameraID int, kind, lanURL, path string, d *deps) *stream {
 	ctx, cancel := context.WithCancel(parent)
@@ -96,6 +103,9 @@ func Args(lanURL string, relayPort int, path, token string) []string {
 		// A camera that stops sending ends ffmpeg in 10 s (microseconds),
 		// so the stream is retried instead of hanging on a dead socket.
 		"-timeout", "10000000",
+		// Only network protocols a camera stream needs, whatever the URL or
+		// the camera's answers say: never file:, http:, concat: or the like.
+		"-protocol_whitelist", "rtsp,rtsps,tcp,tls,rtp,udp",
 		"-i", lanURL,
 		"-map", "0:v:0", "-c:v", "copy", "-an",
 		"-f", "rtsp", "-rtsp_transport", "tcp",
@@ -119,6 +129,19 @@ func (s *stream) run() {
 				return
 			}
 			continue
+		}
+		if d.checkURL != nil {
+			if err := d.checkURL(s.ctx, s.lanURL); err != nil {
+				msg := "not relayed: " + publisher.Redact(redactURL(err.Error()))
+				if s.state().Detail != msg {
+					d.logf("camera %d %s: %s", s.cameraID, s.kind, msg)
+				}
+				s.set("error", msg)
+				if !s.sleep(refusedRetry) {
+					return
+				}
+				continue
+			}
 		}
 		port := d.relayPort()
 		if port == 0 {

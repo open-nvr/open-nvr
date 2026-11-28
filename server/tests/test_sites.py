@@ -593,3 +593,158 @@ def test_setup_without_a_pin_trusts_the_chain_only(env, monkeypatch):
     for s in site["setup"]:
         assert "pinnedpubkey" not in s["download"] and "-k" not in s["download"].split()
         assert " -pin " not in s["enrol"]
+
+
+# ── hardening (S0): no pool held, one code once, the old agent cut off ──
+
+
+def test_wait_lets_go_of_the_database_before_it_waits(env, monkeypatch):
+    """Held across the 25 s wait, ~30 polling sites took core's whole pool."""
+    import core.database as database
+    from routers import sites as sites_router
+
+    a = _create(env)
+    token = _enrol(env, a["enrol_code"]).json()["token"]
+    etag = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()["etag"]
+    events: list[str] = []
+    real_release = database.release
+    monkeypatch.setattr(database, "release", lambda db: (events.append("release"), real_release(db)))
+
+    async def fake_wait(ev, timeout=svc.WAIT_MAX_S):
+        events.append("wait")
+        return False
+
+    monkeypatch.setattr(svc, "wait", fake_wait)
+    r = env.tc.get("/api/v1/site-agent/wait", params={"etag": etag}, headers=_auth(token))
+    assert r.status_code == 200
+    assert events[:2] == ["release", "wait"], events
+    assert sites_router  # imported for its patched module
+
+
+def test_an_agent_replaced_while_it_waits_gets_nothing_more(env, monkeypatch):
+    a = _create(env)
+    old = _enrol(env, a["enrol_code"]).json()["token"]
+    etag = env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(old)).json()["etag"]
+
+    async def re_enrol_meanwhile(ev, timeout=svc.WAIT_MAX_S):
+        with env.SessionLocal() as s:
+            code, _ = svc.issue_enrol_code(s, s.get(Site, a["id"]))
+            assert svc.enrol(s, code, ip=None, version=None) is not None
+        return True
+
+    monkeypatch.setattr(svc, "wait", re_enrol_meanwhile)
+    r = env.tc.get("/api/v1/site-agent/wait", params={"etag": etag}, headers=_auth(old))
+    assert r.status_code == 404
+
+
+def test_one_code_enrols_once_even_when_two_agents_race(env):
+    from sqlalchemy.orm import Session as _Session
+
+    a = _create(env)
+    code = a["enrol_code"]
+    engine = env.SessionLocal.kw["bind"]
+    raced = {"done": False}
+
+    class Racing(_Session):
+        def execute(self, statement, *args, **kwargs):
+            # The other agent's enrol lands between this one's read and its
+            # UPDATE.
+            if not raced["done"] and getattr(statement, "is_dml", False):
+                raced["done"] = True
+                with env.SessionLocal() as other:
+                    assert svc.enrol(other, code, ip=None, version=None) is not None
+            return super().execute(statement, *args, **kwargs)
+
+    with Racing(bind=engine, expire_on_commit=False) as s:
+        assert svc.enrol(s, code, ip=None, version=None) is None
+    assert raced["done"]
+
+
+def test_re_enrolling_ends_the_old_agents_streams(env):
+    a = _create(env)
+    _enrol(env, a["enrol_code"])
+    env.tc.put(f"/api/v1/sites/{a['id']}/cameras/{env.ids['pushed']}",
+               json={"main_url": "rtsp://192.168.1.64:554/main"})
+    env.kicked.clear()
+    code = env.tc.post(f"/api/v1/sites/{a['id']}/enrol-code").json()["enrol_code"]
+    assert _enrol(env, code).status_code == 200
+    with env.SessionLocal() as s:
+        expected = list(svc.stream_names(s.get(Camera, env.ids["pushed"])))
+    assert env.kicked == [expected]
+
+
+def test_a_first_enrolment_kicks_nothing(env):
+    a = _create(env)
+    env.kicked.clear()
+    assert _enrol(env, a["enrol_code"]).status_code == 200
+    assert env.kicked == []
+
+
+def test_enrolment_is_also_limited_across_all_addresses(env, monkeypatch):
+    from routers import sites as sites_router
+
+    monkeypatch.setattr(sites_router, "ENROL_GLOBAL_PER_MINUTE", 2)
+    codes = [_create(env, f"S{i}")["enrol_code"] for i in range(3)]
+    assert [_enrol(env, c).status_code for c in codes[:2]] == [200, 200]
+    assert _enrol(env, codes[2]).status_code == 429
+
+
+def test_camera_answers_do_not_use_up_the_control_budget(env, monkeypatch):
+    from routers import sites as sites_router
+
+    monkeypatch.setattr(sites_router, "AGENT_PER_MINUTE", 3)
+    a = _create(env)
+    token = _enrol(env, a["enrol_code"]).json()["token"]
+    for _ in range(10):  # unknown ids: 404, but authenticated and counted
+        env.tc.post("/api/v1/site-agent/rpc/rx/result", json={"status": 200}, headers=_auth(token))
+    assert env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_newer_poll_wakes_the_older():
+    ev1 = svc.arm(4343)
+    first = asyncio.create_task(svc.wait(ev1, timeout=5))
+    await asyncio.sleep(0.05)
+    ev2 = svc.arm(4343)
+    assert await asyncio.wait_for(first, 2) is True
+    assert await svc.wait(ev2, timeout=0.05) is False
+    assert svc.holding() == 0
+
+
+@pytest.mark.asyncio
+async def test_over_the_global_cap_a_poll_answers_at_once(monkeypatch):
+    monkeypatch.setattr(svc, "WAIT_GLOBAL_MAX", 0)
+    ev = svc.arm(4444)
+    assert await asyncio.wait_for(svc.wait(ev, timeout=5), 1) is False
+
+
+# ── repin: the server proves a new certificate key ──────────────────────
+
+
+def test_the_repin_proof_matches_the_agents():
+    """The same vector is in host-agent/internal/site/s0_test.go."""
+    import hashlib
+
+    cred = hashlib.sha256(b"s3cret").hexdigest()
+    assert svc.repin_proof(cred, "nonce-0123456789ab", "sha256/AAA=") == (
+        "d6faf2169657c81d6db1db0eca51a418d94cde01ad2d99ef7b38295ab46726ce")
+
+
+def test_repin_proves_only_for_a_live_site(env, monkeypatch):
+    monkeypatch.setattr(svc, "server_pin", lambda: "sha256/AAA=")
+    a = _create(env)
+    token = _enrol(env, a["enrol_code"]).json()["token"]
+    secret = token.split("_", 2)[2]
+    nonce = "nonce-0123456789ab"
+    want = svc.repin_proof(svc._sha256(secret), nonce, "sha256/AAA=")
+    r = env.tc.post("/api/v1/site-agent/repin", json={"site_id": a["id"], "nonce": nonce})
+    assert r.status_code == 200 and r.json()["proof"] == want
+    # No credential is needed (the agent sends none to a server it does not
+    # trust yet), and an unknown or revoked site gets a proof of the same
+    # shape that proves nothing.
+    unknown = env.tc.post("/api/v1/site-agent/repin", json={"site_id": 999, "nonce": nonce}).json()["proof"]
+    env.tc.delete(f"/api/v1/sites/{a['id']}/credential")
+    revoked = env.tc.post("/api/v1/site-agent/repin", json={"site_id": a["id"], "nonce": nonce}).json()["proof"]
+    for p in (unknown, revoked):
+        assert len(p) == 64 and p != want
+    assert env.tc.post("/api/v1/site-agent/repin", json={"site_id": a["id"], "nonce": "short"}).status_code == 422

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -27,6 +28,9 @@ type Options struct {
 	Logf    func(format string, args ...any)
 	// Discover: run ONVIF discovery on the site's LAN and report it.
 	Discover bool
+	// ConfigPath: where Config came from; newly proven server keys are
+	// saved there when it is writable ("" = not saved).
+	ConfigPath string
 }
 
 // Agent is the running site mode.
@@ -43,6 +47,10 @@ type Agent struct {
 	camHosts []string
 	ingest   Ingest
 	scan     *OnvifScan
+	// pins: the server keys trusted (control and video alike); policy:
+	// where on the LAN the agent may connect, whatever the server says.
+	pins   *PinSet
+	policy *TargetPolicy
 	// Uplink: what each stream sends, the cap, what is wanted, what is paused.
 	meter   *Meter
 	capKbps int
@@ -63,13 +71,20 @@ func Run(ctx context.Context, o Options) error {
 	c := o.Config
 	a := &Agent{
 		o:       o,
-		client:  NewClient(c.Server, c.Token, c.Pin, c.Insecure),
 		streams: map[string]*stream{},
 		rpc:     newRPCRunner(o.Logf),
 		meter:   NewMeter(),
 		want:    map[string]wantStream{},
 		shed:    map[string]shedStream{},
+		policy:  NewTargetPolicy(c.AllowSubnets, c.AllowPorts, o.Logf),
 	}
+	a.pins = NewPinSet(c.TrustedPins(), a.savePins)
+	if c.Insecure {
+		a.client = NewClient(c.Server, c.Token, "", true)
+	} else {
+		a.client = NewPinnedClient(c.Server, c.Token, a.pins, o.Logf)
+	}
+	a.rpc.policy = a.policy
 	a.d = &deps{
 		ffmpeg:    o.FFmpeg,
 		relayPort: a.relayPort,
@@ -79,6 +94,7 @@ func Run(ctx context.Context, o Options) error {
 		backoff:   []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, 60 * time.Second},
 		liveAfter: 5 * time.Second,
 		healthy:   60 * time.Second,
+		checkURL:  a.policy.CheckStreamURL,
 	}
 	defer a.stopAll()
 
@@ -94,6 +110,8 @@ func Run(ctx context.Context, o Options) error {
 	for ctx.Err() == nil {
 		var ans *Answer
 		var err error
+		asked := time.Now()
+		waited := etag != ""
 		if etag == "" {
 			ans, err = a.client.Sync(ctx, a.report())
 		} else {
@@ -127,9 +145,35 @@ func Run(ctx context.Context, o Options) error {
 		}
 		if len(ans.RPC) > 0 {
 			a.rpc.handle(ctx, a.client, ans.RPC)
+		} else if waited && ans.ETag == etag && time.Since(asked) < time.Second {
+			// The server answered a long poll at once with nothing new: it
+			// holds no more polls just now (too many sites, or another
+			// agent with this site's credential). Poll gently instead.
+			pause := time.Duration(ans.PollAfterS) * time.Second
+			if pause <= 0 || pause > 30*time.Second {
+				pause = 5 * time.Second
+			}
+			if !sleepCtx(ctx, pause) {
+				return nil
+			}
 		}
 	}
 	return nil
+}
+
+// savePins writes newly proven server keys into the config, if it can (a
+// systemd credential is read-only: the key is then proven again after a
+// restart, which costs one extra request).
+func (a *Agent) savePins(pins []string) {
+	if a.o.ConfigPath == "" {
+		return
+	}
+	cfg := *a.o.Config
+	cfg.Pins = pins
+	cfg.Pin = ""
+	if err := cfg.Save(a.o.ConfigPath); err != nil {
+		a.o.Logf("trusting the server's key for this run; could not save it to %s: %v", a.o.ConfigPath, err)
+	}
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
@@ -167,7 +211,12 @@ func (a *Agent) apply(ctx context.Context, ans *Answer) {
 		if alpn == "" {
 			alpn = IngestALPN
 		}
-		cfg := TLSConfig(ans.Ingest.Host, a.o.Config.Pin, a.o.Config.Insecure, alpn)
+		// Video is verified by the same keys as control: an ingest host the
+		// server names gets nothing unless it holds the server's own key.
+		cfg := PinnedTLSConfig(ans.Ingest.Host, a.pins, alpn)
+		if a.o.Config.Insecure {
+			cfg = TLSConfig(ans.Ingest.Host, "", true, alpn)
+		}
 		if r, err := StartRelay(ctx, ans.Ingest.Host, port, cfg, a.o.Logf); err == nil {
 			if a.relay != nil {
 				a.relay.Close()
@@ -302,6 +351,9 @@ func (a *Agent) reportLoop(ctx context.Context) {
 func (a *Agent) discoverLoop(ctx context.Context) {
 	for {
 		devs := onvifdisc.Probe(ctx, 3*time.Second)
+		if a.policy != nil {
+			a.policy.SetObserved(announcedPorts(devs))
+		}
 		a.mu.Lock()
 		a.scan = &OnvifScan{ScannedAt: nowF(), Devices: devs}
 		a.refreshAllowedLocked()
@@ -316,3 +368,30 @@ var urlCredRe = regexp.MustCompile(`(rtsps?://)[^/@\s]+@`)
 
 // redactURL hides credentials inside camera URLs in ffmpeg's messages.
 func redactURL(s string) string { return urlCredRe.ReplaceAllString(s, "${1}***@") }
+
+// announcedPorts: the ports each discovered camera named in its own ONVIF
+// reply (its service addresses), which the target policy then allows for
+// that camera.
+func announcedPorts(devs []onvifdisc.Device) map[string][]int {
+	out := map[string][]int{}
+	for _, d := range devs {
+		if d.Port > 0 {
+			out[d.IP] = append(out[d.IP], d.Port)
+		}
+		for _, x := range d.XAddrs {
+			u, err := url.Parse(x)
+			if err != nil || u.Hostname() != d.IP {
+				continue
+			}
+			port := 80
+			if u.Scheme == "https" {
+				port = 443
+			}
+			if p, err := strconv.Atoi(u.Port()); err == nil {
+				port = p
+			}
+			out[d.IP] = append(out[d.IP], port)
+		}
+	}
+	return out
+}
