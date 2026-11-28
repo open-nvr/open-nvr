@@ -285,9 +285,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const [autoHls, setAutoHls] = useState(initial.fallenBack)
     // When this tile's next WebRTC probe is due, once it is on HLS by
     // fallback: at once for the tile the session picked to probe (it starts
-    // on HLS and probes in the background), BLIP_PROBE_MS after WebRTC had
-    // worked and then dropped, PROBE_INTERVAL_MS otherwise.
+    // on HLS and probes in the background) and right after WebRTC had worked
+    // and then dropped, PROBE_INTERVAL_MS otherwise.
     const nextProbeInRef = useRef(initial.probing ? 0 : PROBE_INTERVAL_MS)
+    // Set by a drop: if the probe at once fails, the next one comes after
+    // BLIP_PROBE_MS rather than the full interval.
+    const afterDropRef = useRef(false)
     // WebRTC reached `connected` at least once on this mount.
     const everConnectedRef = useRef(false)
     const [isPlaying, setIsPlaying] = useState(false)
@@ -553,10 +556,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     scheduleAutoRetryRef.current = scheduleAutoRetry
 
     // WebRTC could not connect from this network (ICE failed, or the
-    // deadline passed). With an HLS URL and no explicit choice from the
-    // viewer, the tile switches to HLS and the session remembers it; the
-    // spinner stays up throughout, never an error. Otherwise the old
-    // bounded WebRTC retry applies.
+    // deadline passed), or a connection that worked was lost (ICE dropped,
+    // or no frames). With an HLS URL and no explicit choice from the
+    // viewer, the tile switches to HLS at once and the session remembers
+    // it; the spinner (over the last frame) stays up throughout, never an
+    // error. Otherwise the old bounded WebRTC retry applies.
     const giveUpWebRTC = useCallback((reason: string) => {
       if (mode === 'live' && hlsUrl && !manualChoiceRef.current) {
         if (everConnectedRef.current) {
@@ -564,7 +568,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           // re-key), not a network without WebRTC. HLS for now, and look
           // again soon rather than in fifteen minutes.
           rememberHls(transportMemory(), memoryKey, reason, Date.now(), BLIP_PROBE_MS)
-          nextProbeInRef.current = BLIP_PROBE_MS
+          // Probe at once, in the background, while HLS starts: where
+          // WebRTC normally works (a LAN) the tile is back on it in about a
+          // second; where it only gets through by luck, HLS carries on.
+          nextProbeInRef.current = 0
+          afterDropRef.current = true
         } else {
           rememberHls(transportMemory(), memoryKey, reason, Date.now())
         }
@@ -574,7 +582,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         setStreamType('hls')
         return
       }
-      scheduleAutoRetry(reason === 'ice-failed' ? 'WebRTC connection failed' : 'WebRTC connection timed out')
+      scheduleAutoRetry(
+        reason === 'ice-failed' ? 'WebRTC connection failed'
+          : reason === 'ice-timeout' ? 'WebRTC connection timed out'
+            : reason === 'no-frames' ? 'No video frames'
+              : 'WebRTC connection lost',
+      )
     }, [mode, hlsUrl, memoryKey, cleanup, scheduleAutoRetry])
     giveUpRef.current = giveUpWebRTC
 
@@ -703,10 +716,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         if (stalled(frames, Date.now(), bytes)) {
           if (stallTimerRef.current) clearInterval(stallTimerRef.current)
           stallTimerRef.current = null
-          scheduleAutoRetry('No video frames')
+          // Connected but no picture: the same as a lost connection.
+          giveUpRef.current('no-frames')
         }
       }, STALL_CHECK_MS)
-    }, [scheduleAutoRetry])
+    }, [])
 
     // The tile's connection reached `connected` (or was adopted connected).
     const markConnected = useCallback((pc: RTCPeerConnection, adopted = false) => {
@@ -743,10 +757,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           pc.connectionState === 'closed'
         ) {
           if (whepConnectedRef.current) {
-            // A drop after it had worked: the network blipped, not the
-            // route. Reconnect over WebRTC; the deadline on that attempt
-            // falls back if the route is really gone.
-            scheduleAutoRetry('WebRTC connection lost')
+            // A drop after it had worked. Straight to HLS (the last frame
+            // stays up), not another WebRTC attempt first: on a network that
+            // only gets through by NAT hole punching that attempt usually
+            // fails and costs ICE_GIVE_UP_MS of spinner. The probe looks for
+            // WebRTC again after BLIP_PROBE_MS.
+            giveUpRef.current('webrtc-lost')
           } else {
             giveUpRef.current('ice-failed')
           }
@@ -757,13 +773,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             disconnectGraceRef.current = window.setTimeout(() => {
               disconnectGraceRef.current = null
               if (pcRef.current === pc && pc.connectionState !== 'connected') {
-                scheduleAutoRetry('WebRTC connection lost')
+                giveUpRef.current('webrtc-lost')
               }
             }, 5000)
           }
         }
       }
-    }, [markConnected, scheduleAutoRetry])
+    }, [markConnected])
 
     // Setup WebRTC WHEP
     const setupWebRTC = useCallback(async () => {
@@ -1487,7 +1503,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           backToWebRTC()
           return
         }
-        scheduleProbeRef.current(PROBE_INTERVAL_MS)
+        scheduleProbeRef.current(afterDropRef.current ? BLIP_PROBE_MS : PROBE_INTERVAL_MS)
+        afterDropRef.current = false
       }
       // The effect's cleanup ends a probe still in flight through this.
       const abandon = () => finish(false)
