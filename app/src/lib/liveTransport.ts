@@ -79,15 +79,10 @@ export const RETURN_PROBE_DELAY_MS = 3000
 export const BLIP_PROBE_MS = 60 * 1000
 
 /** Fired on `window` by a tile whose probe reached WebRTC: every other tile
- *  on HLS by fallback switches back at once instead of waiting for its own
- *  probe. */
+ *  on HLS by fallback runs its own probe at once instead of waiting out the
+ *  interval. It does not switch blindly: on a network where WebRTC connects
+ *  only some of the time, one tile's luck is no promise for the next. */
 export const WEBRTC_BACK_EVENT = 'opennvr:webrtc-back'
-
-/** Fired on `window` by a tile whose probe could not even start because its
- *  own camera has no stream (WHEP 404, an error before ICE): that says
- *  nothing about the network, so another fallen-back tile whose picture is
- *  playing claims the probe (claimProbe) and runs it at once. */
-export const PROBE_HANDOFF_EVENT = 'opennvr:probe-handoff'
 
 export const MEMORY_KEY = 'opennvr.live.transport'
 
@@ -308,23 +303,58 @@ export function shouldDeleteSession(everConnected: boolean, ageMs: number): bool
 
 // ---- per-session memory --------------------------------------------------
 
-export type TransportMemory = {
-  mode: 'hls'
+/** What the session remembers about one stream path. */
+export type PathMemory = {
   reason: string
+  /** When WebRTC last fell back to HLS for this path. */
   at: number
-  /** When a WebRTC probe last started; 0 forces one on the next mount. */
+  /** When a WebRTC probe for this path last started; 0 forces one. */
   probedAt: number
 }
 
+/**
+ * The session's answer per stream path, not one answer for the whole site.
+ * On a network where WebRTC connects only some of the time (no port forward,
+ * NAT hole punching that works for one session and not the next), a single
+ * shared flag was cleared by whichever tile got lucky, and every other tile
+ * then waited out ICE_GIVE_UP_MS again on the next visit.
+ *
+ * `failAt` is the site-wide hint: WebRTC has fallen back for some path in
+ * this session. A path with no record of its own then starts on HLS too and
+ * probes at once, so it shows a picture straight away and moves to WebRTC
+ * only once that is proven.
+ */
+export type TransportMemory = {
+  failAt: number | null
+  paths: Record<string, PathMemory>
+}
+
 type StorageLike = { getItem(k: string): string | null; setItem(k: string, v: string): void; removeItem(k: string): void }
+
+/** The memory key for a WHEP URL: its path, without host or query (the
+ *  token changes on every mount). */
+export function transportKey(whepUrl: string | null | undefined): string {
+  if (!whepUrl) return ''
+  try {
+    return new URL(whepUrl, 'http://opennvr.invalid').pathname
+  } catch {
+    return whepUrl.split('?')[0]
+  }
+}
 
 export function readMemory(storage: StorageLike | null | undefined): TransportMemory | null {
   try {
     const raw = storage?.getItem(MEMORY_KEY)
     if (!raw) return null
     const v = JSON.parse(raw)
-    if (v?.mode !== 'hls' || typeof v.at !== 'number') return null
-    return { mode: 'hls', reason: String(v.reason ?? ''), at: v.at, probedAt: typeof v.probedAt === 'number' ? v.probedAt : v.at }
+    if (!v || typeof v !== 'object' || typeof v.paths !== 'object' || v.paths === null) return null
+    const paths: Record<string, PathMemory> = {}
+    for (const [k, raw] of Object.entries(v.paths as Record<string, unknown>)) {
+      const p = raw as Partial<PathMemory> | null
+      if (!p || typeof p.at !== 'number') continue
+      paths[k] = { reason: String(p.reason ?? ''), at: p.at, probedAt: typeof p.probedAt === 'number' ? p.probedAt : p.at }
+    }
+    return { failAt: typeof v.failAt === 'number' ? v.failAt : null, paths }
   } catch {
     return null
   }
@@ -332,7 +362,7 @@ export function readMemory(storage: StorageLike | null | undefined): TransportMe
 
 function writeMemory(storage: StorageLike | null | undefined, m: TransportMemory | null) {
   try {
-    if (!m) storage?.removeItem(MEMORY_KEY)
+    if (!m || (m.failAt === null && Object.keys(m.paths).length === 0)) storage?.removeItem(MEMORY_KEY)
     else storage?.setItem(MEMORY_KEY, JSON.stringify(m))
   } catch {
     // Storage can be unavailable (private windows, blocked site data). The
@@ -340,63 +370,80 @@ function writeMemory(storage: StorageLike | null | undefined, m: TransportMemory
   }
 }
 
-/** WebRTC did not connect: later tiles in this session start on HLS.
+/** WebRTC did not connect for `path`: its later tiles start on HLS, and
+ *  paths with no record of their own start on HLS and probe.
  *  `probeAfterMs` brings the next probe forward (BLIP_PROBE_MS after a
  *  connection that had worked); without it the earlier schedule stands. */
 export function rememberHls(
   storage: StorageLike | null | undefined,
+  path: string,
   reason: string,
   now: number,
   probeAfterMs?: number,
 ) {
-  const prev = readMemory(storage)
+  const m = readMemory(storage) ?? { failAt: null, paths: {} }
+  const prev = m.paths[path]
   let probedAt = prev?.probedAt ?? now
   if (probeAfterMs !== undefined) {
     probedAt = Math.min(probedAt, now - PROBE_INTERVAL_MS + probeAfterMs)
   }
-  writeMemory(storage, { mode: 'hls', reason, at: now, probedAt })
+  m.paths[path] = { reason, at: now, probedAt }
+  m.failAt = now
+  writeMemory(storage, m)
 }
 
-/** WebRTC connected: forget the fallback. */
-export function clearMemory(storage: StorageLike | null | undefined) {
-  writeMemory(storage, null)
+/** WebRTC connected for `path`: forget that path's fallback. Other paths
+ *  keep theirs: one lucky connection says nothing about the next. */
+export function clearMemory(storage: StorageLike | null | undefined, path: string) {
+  const m = readMemory(storage)
+  if (!m || !(path in m.paths)) return
+  delete m.paths[path]
+  writeMemory(storage, m)
 }
 
-/** The network changed (browser `online`): the next tile probes WebRTC. */
+/** The network changed (browser `online`): every remembered path probes on
+ *  its next mount, and the site-wide hint no longer applies. */
 export function forgetProbe(storage: StorageLike | null | undefined) {
   const m = readMemory(storage)
-  if (m) writeMemory(storage, { ...m, probedAt: 0 })
-}
-
-/** Take a handed-off probe (forgetProbe left it unclaimed): true for the
- *  first tile that asks, which records the probe; false for the rest. */
-export function claimProbe(storage: StorageLike | null | undefined, now: number): boolean {
-  const m = readMemory(storage)
-  if (!m || m.probedAt !== 0) return false
-  writeMemory(storage, { ...m, probedAt: now })
-  return true
+  if (!m) return
+  for (const p of Object.values(m.paths)) p.probedAt = 0
+  m.failAt = null
+  writeMemory(storage, m)
 }
 
 /**
- * What a new tile starts with. `preferred` is the caller's wish (every live
- * surface asks for WebRTC); the session's memory turns that into HLS. Once
- * per PROBE_INTERVAL_MS one tile is told to probe: it still STARTS on HLS
- * (a picture at once, never a black tile waiting out ICE) and tries WebRTC
- * at once in the background; when that connects, every fallen-back tile
- * switches. The probe is recorded here so a wall of tiles mounting together
- * runs one.
+ * What a new tile for `path` starts with. `preferred` is the caller's wish
+ * (every live surface asks for WebRTC); the session's memory turns that into
+ * HLS:
+ *  - the path fell back before: HLS, and once per PROBE_INTERVAL_MS (sooner
+ *    after a blip) the tile probes WebRTC in the background;
+ *  - no record for the path, but WebRTC fell back for another path within
+ *    PROBE_INTERVAL_MS: HLS with a probe at once;
+ *  - otherwise WebRTC (a LAN, a forwarded port, or nothing known yet).
+ * A probing tile still STARTS on HLS (a picture at once, never a black tile
+ * waiting out ICE) and moves to WebRTC when the probe connects. The probe is
+ * recorded here so two tiles of one path mounting together run one.
  */
 export function initialTransport(
   preferred: 'webrtc' | 'hls',
   hasHls: boolean,
   storage: StorageLike | null | undefined,
   now: number,
+  path: string,
 ): { start: 'webrtc' | 'hls'; probing: boolean; fallenBack: boolean } {
   if (preferred !== 'webrtc' || !hasHls) return { start: preferred, probing: false, fallenBack: false }
   const m = readMemory(storage)
   if (!m) return { start: 'webrtc', probing: false, fallenBack: false }
-  if (m.probedAt === 0 || now - m.probedAt >= PROBE_INTERVAL_MS) {
-    writeMemory(storage, { ...m, probedAt: now })
+  const p = m.paths[path]
+  if (!p) {
+    if (m.failAt === null || now - m.failAt >= PROBE_INTERVAL_MS) return { start: 'webrtc', probing: false, fallenBack: false }
+    m.paths[path] = { reason: 'site-hint', at: now, probedAt: now }
+    writeMemory(storage, m)
+    return { start: 'hls', probing: true, fallenBack: true }
+  }
+  if (p.probedAt === 0 || now - p.probedAt >= PROBE_INTERVAL_MS) {
+    p.probedAt = now
+    writeMemory(storage, m)
     return { start: 'hls', probing: true, fallenBack: true }
   }
   return { start: 'hls', probing: false, fallenBack: true }
