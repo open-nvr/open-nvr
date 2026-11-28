@@ -108,6 +108,8 @@ function LiveTile({ cam, spotlit, onSpotlight, playing }: {
         <VideoPlayer
           key={`${cam.id}-${version}-${usingSub ? 's' : 'm'}`}
           mode="live"
+          keepWarm
+          warmKey={version}
           chrome="none"
           whepUrl={whep}
           hlsUrl={hls}

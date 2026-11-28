@@ -24,6 +24,7 @@ import {
   useImperativeHandle,
   useCallback,
   useMemo,
+  useLayoutEffect,
 } from 'react'
 import { apiService } from '../../lib/apiService'
 import type Hls from 'hls.js'
@@ -64,6 +65,8 @@ import { useDigitalZoom } from '../../hooks/useDigitalZoom'
 import { ZoomBadge } from '../ZoomBadge'
 import { AlertCircle } from 'lucide-react'
 import { useTranslation } from '../../i18n'
+import { LAST_FRAME_EVERY_MS, keepFrame, lastFrameOf } from '../../lib/lastFrame'
+import { adopt as adoptParked, canAdopt, park, parkKey } from '../../lib/liveStreams'
 
 export type VideoPlayerMode = 'live' | 'playback'
 export type StreamType = 'webrtc' | 'hls' | 'mp4'
@@ -178,7 +181,20 @@ export interface VideoPlayerProps {
       webcam that is still starting, or a browser webcam nobody is
       publishing. The player keeps retrying either way. */
   offlineLabel?: string
+  /** Live: when this tile leaves the screen, keep its WebRTC connection
+      warm for a short while (lib/liveStreams) so the next tile for the same
+      stream picks it up at once. For surfaces people move away from and
+      back to (Live View, the dashboard wall, peek); not for a tour, whose
+      pages would keep each other connected. */
+  keepWarm?: boolean
+  /** The camera's stream version: a warm connection made before the camera
+      changed is never picked up. */
+  warmKey?: string | number | null
 }
+
+/** An on-screen live tile in a hidden tab stops streaming after this long
+ *  and starts again when the tab is shown. */
+export const HIDDEN_CLOSE_MS = 2 * 60 * 1000
 
 export interface VideoPlayerHandle {
   play: () => Promise<void>
@@ -218,6 +234,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       chrome = 'full',
       cover = false,
       offlineLabel,
+      keepWarm = false,
+      warmKey = null,
     },
     ref
   ) {
@@ -237,9 +255,16 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // The memory is kept per stream path: one camera connecting by luck
     // says nothing about the next one.
     const memoryKey = transportKey(whepUrl)
+    // The warm-connection key (lib/liveStreams): stream path + camera version.
+    const warmId = parkKey(whepUrl, warmKey)
     const [initial] = useState(() => {
       if (mode === 'playback') return { start: 'webrtc' as const, probing: false, fallenBack: false }
       installOnlineHook()
+      // A warm connection for this very stream is waiting: take it, whatever
+      // the memory says (it is proof that WebRTC works from here).
+      if (preferredStreamType === 'webrtc' && canAdopt(warmId)) {
+        return { start: 'webrtc' as const, probing: false, fallenBack: false }
+      }
       return initialTransport(preferredStreamType, !!hlsUrl && !!whepUrl, transportMemory(), Date.now(), memoryKey)
     })
     // Identifies this tile's own WEBRTC_BACK_EVENT so it does not answer it.
@@ -303,6 +328,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // never float over a black picture and the two appear together.
     const [hasPicture, setHasPicture] = useState(false)
     const waitingForPicture = mode === 'live' && !hasPicture
+    // Until the picture arrives, the camera's last frame in this tab
+    // (lib/lastFrame) stands in for it under the spinner: a tile coming
+    // back after a page change or a reconnect is never a black box.
+    const poster = waitingForPicture ? lastFrameOf(cameraId) : undefined
+    // For cleanup(), which keeps the frame before it tears the element down.
+    const frameCameraRef = useRef<number | null>(null)
+    frameCameraRef.current = mode === 'live' ? cameraId : null
     // The current WHEP attempt: when it was answered, whether ICE ever
     // reached `connected`, and the deadline after which the tile gives up on
     // WebRTC. A viewer's explicit stream choice (the player menu) switches
@@ -408,6 +440,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
     // Cleanup function
     const cleanup = useCallback(() => {
+      // The picture on screen now is the best stand-in for the next start.
+      if (frameCameraRef.current != null) keepFrame(frameCameraRef.current, videoRef.current)
+
       // Clear any existing error state — except mid-offline-poll, where the
       // overlay must not flash off while a probe attempt tears down/rebuilds.
       if (!offlinePollingRef.current) setError(null)
@@ -643,9 +678,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // mean a long keyframe interval, so that wait is longer (see
     // FIRST_FRAME_WAIT_MS). A hidden tab or a paused element decodes nothing
     // by design, so those checks are skipped.
-    const startStallWatch = useCallback((pc: RTCPeerConnection) => {
+    const startStallWatch = useCallback((pc: RTCPeerConnection, adopted = false) => {
       if (stallTimerRef.current) clearInterval(stallTimerRef.current)
-      const stalled = makeStallTracker(STALL_AFTER_MS)
+      const stalled = makeStallTracker(STALL_AFTER_MS, undefined, adopted)
       stallTimerRef.current = window.setInterval(async () => {
         if (pcRef.current !== pc) {
           if (stallTimerRef.current) clearInterval(stallTimerRef.current)
@@ -675,9 +710,84 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }, STALL_CHECK_MS)
     }, [scheduleAutoRetry])
 
+    // The tile's connection reached `connected` (or was adopted connected).
+    const markConnected = useCallback((pc: RTCPeerConnection, adopted = false) => {
+      setIsLoading(false)
+      offlinePollingRef.current = false
+      setError(null)
+      setIsReconnecting(false)
+      retryCountRef.current = 0
+      whepConnectedRef.current = true
+      everConnectedRef.current = true
+      if (iceDeadlineRef.current) {
+        clearTimeout(iceDeadlineRef.current)
+        iceDeadlineRef.current = null
+      }
+      if (disconnectGraceRef.current) {
+        clearTimeout(disconnectGraceRef.current)
+        disconnectGraceRef.current = null
+      }
+      // WebRTC works from here for this path: forget its earlier
+      // fallback so its new tiles start on it again.
+      clearMemory(transportMemory(), memoryKey)
+      setAutoHls(false)
+      startStallWatch(pc, adopted)
+    }, [memoryKey, startStallWatch])
+
+    // The tile's reaction to its connection's state, for a connection it
+    // built and for one it adopted.
+    const watchConnection = useCallback((pc: RTCPeerConnection) => {
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'connected') {
+          markConnected(pc)
+        } else if (
+          pc.connectionState === 'failed' ||
+          pc.connectionState === 'closed'
+        ) {
+          if (whepConnectedRef.current) {
+            // A drop after it had worked: the network blipped, not the
+            // route. Reconnect over WebRTC; the deadline on that attempt
+            // falls back if the route is really gone.
+            scheduleAutoRetry('WebRTC connection lost')
+          } else {
+            giveUpRef.current('ice-failed')
+          }
+        } else if (pc.connectionState === 'disconnected') {
+          // 'disconnected' can self-heal; give ICE a short grace period
+          // before tearing down and reconnecting.
+          if (!disconnectGraceRef.current) {
+            disconnectGraceRef.current = window.setTimeout(() => {
+              disconnectGraceRef.current = null
+              if (pcRef.current === pc && pc.connectionState !== 'connected') {
+                scheduleAutoRetry('WebRTC connection lost')
+              }
+            }, 5000)
+          }
+        }
+      }
+    }, [markConnected, scheduleAutoRetry])
+
     // Setup WebRTC WHEP
     const setupWebRTC = useCallback(async () => {
       if (!whepUrl || !videoRef.current) return
+
+      // A warm connection for this stream (lib/liveStreams): a tile that just
+      // left, or this tile's own successful probe. No new session, no ICE.
+      // Synchronous, before anything awaits, so the picture is back at once.
+      const warm = adoptParked(warmId)
+      if (warm) {
+        pcRef.current = warm.pc
+        whepResourceRef.current = warm.resource
+        whepCreatedAtRef.current = Date.now()
+        offlinePollingRef.current = false
+        watchConnection(warm.pc)
+        const el = videoRef.current
+        el.srcObject = warm.stream
+        el.play().catch(() => {})
+        markConnected(warm.pc, true)
+        return
+      }
+
       if (!offlinePollingRef.current) {
         setIsLoading(true)
         setError(null)
@@ -702,53 +812,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           }
         }
 
-        pc.onconnectionstatechange = () => {
-          if (pc.connectionState === 'connected') {
-            setIsLoading(false)
-            offlinePollingRef.current = false
-            setError(null)
-            setIsReconnecting(false)
-            retryCountRef.current = 0
-            whepConnectedRef.current = true
-            everConnectedRef.current = true
-            if (iceDeadlineRef.current) {
-              clearTimeout(iceDeadlineRef.current)
-              iceDeadlineRef.current = null
-            }
-            if (disconnectGraceRef.current) {
-              clearTimeout(disconnectGraceRef.current)
-              disconnectGraceRef.current = null
-            }
-            // WebRTC works from here for this path: forget its earlier
-            // fallback so its new tiles start on it again.
-            clearMemory(transportMemory(), memoryKey)
-            setAutoHls(false)
-            startStallWatch(pc)
-          } else if (
-            pc.connectionState === 'failed' ||
-            pc.connectionState === 'closed'
-          ) {
-            if (whepConnectedRef.current) {
-              // A drop after it had worked: the network blipped, not the
-              // route. Reconnect over WebRTC; the deadline on that attempt
-              // falls back if the route is really gone.
-              scheduleAutoRetry('WebRTC connection lost')
-            } else {
-              giveUpRef.current('ice-failed')
-            }
-          } else if (pc.connectionState === 'disconnected') {
-            // 'disconnected' can self-heal; give ICE a short grace period
-            // before tearing down and reconnecting.
-            if (!disconnectGraceRef.current) {
-              disconnectGraceRef.current = window.setTimeout(() => {
-                disconnectGraceRef.current = null
-                if (pcRef.current === pc && pc.connectionState !== 'connected') {
-                  scheduleAutoRetry('WebRTC connection lost')
-                }
-              }, 5000)
-            }
-          }
-        }
+        watchConnection(pc)
 
         const done = await negotiateWhep(pc, () => pcRef.current === pc)
         if (!done || pcRef.current !== pc) return // torn down meanwhile
@@ -788,7 +852,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           scheduleAutoRetry(msg)
         }
       }
-    }, [whepUrl, memoryKey, onError, scheduleAutoRetry, rtcConfig, negotiateWhep, startStallWatch])
+    }, [whepUrl, warmId, onError, scheduleAutoRetry, rtcConfig, negotiateWhep, watchConnection, markConnected])
 
     // Setup HLS
     const setupHLS = useCallback(async () => {
@@ -1061,10 +1125,71 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
     }, [hlsPlaybackUrl, isMuted, autoPlay, onError, onHlsPlaybackError])
 
+    const keepWarmRef = useRef(keepWarm)
+    keepWarmRef.current = keepWarm
+    const warmIdRef = useRef(warmId)
+    warmIdRef.current = warmId
+
+    // Leaving the screen with a healthy WebRTC connection: hand it to
+    // lib/liveStreams instead of closing it, so the next tile for this
+    // stream (the same page a moment later) picks it up at once.
+    const parkIfWarm = useCallback(() => {
+      const pc = pcRef.current
+      const stream = videoRef.current?.srcObject
+      if (
+        !keepWarmRef.current || mode !== 'live' || manualChoiceRef.current ||
+        !pc || pc.connectionState !== 'connected' || !(stream instanceof MediaStream)
+      ) return
+      if (frameCameraRef.current != null) keepFrame(frameCameraRef.current, videoRef.current)
+      pc.onconnectionstatechange = null
+      pc.ontrack = null
+      park(warmIdRef.current, pc, stream, whepResourceRef.current)
+      // cleanup() below must neither close it nor end its session.
+      pcRef.current = null
+      whepResourceRef.current = null
+    }, [mode])
+
+    // Leaving the screen is the only time a connection is parked: never on a
+    // restart, a fallback or a manual switch (those close it). A layout
+    // effect's cleanup runs when React removes the player and BEFORE React
+    // detaches the <video> ref, so the stream and the picture are still
+    // there; the main effect's teardown runs later and then finds nothing
+    // left to close.
+    const parkIfWarmRef = useRef(parkIfWarm)
+    parkIfWarmRef.current = parkIfWarm
+    useLayoutEffect(() => () => {
+      // The last frame too, for HLS tiles as well (cleanup() is too late).
+      if (frameCameraRef.current != null) keepFrame(frameCameraRef.current, videoRef.current)
+      parkIfWarmRef.current()
+    }, [])
+
+    // An on-screen live tile in a hidden tab streams for nobody: after
+    // HIDDEN_CLOSE_MS it stops, and it starts again when the tab is shown
+    // (its last frame stands in meanwhile).
+    const [suspended, setSuspended] = useState(false)
+    useEffect(() => {
+      if (mode !== 'live') return
+      let timer: number | undefined
+      const onVisibility = () => {
+        window.clearTimeout(timer)
+        if (document.visibilityState === 'hidden') {
+          timer = window.setTimeout(() => setSuspended(true), HIDDEN_CLOSE_MS)
+        } else {
+          setSuspended(false)
+        }
+      }
+      document.addEventListener('visibilitychange', onVisibility)
+      return () => {
+        window.clearTimeout(timer)
+        document.removeEventListener('visibilitychange', onVisibility)
+      }
+    }, [mode])
+
     // Initialize player based on mode and stream type
     useEffect(() => {
       cleanup()
-      
+      if (suspended) return
+
       // Small delay to ensure video element is fully reset before loading new source
       const timeoutId = setTimeout(() => {
         if (mode === 'playback') {
@@ -1085,7 +1210,19 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         clearTimeout(timeoutId)
         cleanup()
       }
-    }, [mode, streamType, whepUrl, hlsUrl, mp4Url, hlsPlaybackUrl, cleanup, setupWebRTC, setupHLS, setupMP4, setupHLSPlayback])
+    }, [mode, streamType, whepUrl, hlsUrl, mp4Url, hlsPlaybackUrl, suspended, cleanup, setupWebRTC, setupHLS, setupMP4, setupHLSPlayback])
+
+    // While a live picture plays, keep its last frame fresh.
+    useEffect(() => {
+      if (mode !== 'live' || cameraId == null || !hasPicture) return
+      const grab = () => keepFrame(cameraId, videoRef.current)
+      const first = window.setTimeout(grab, 1_500)
+      const timer = window.setInterval(grab, LAST_FRAME_EVERY_MS)
+      return () => {
+        window.clearTimeout(first)
+        window.clearInterval(timer)
+      }
+    }, [mode, cameraId, hasPicture])
 
     // Video event listeners
     useEffect(() => {
@@ -1321,7 +1458,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         return
       }
       probePcRef.current = pc
+      // Audio too: a probe that gets through becomes the tile's connection.
       pc.addTransceiver('video', { direction: 'recvonly' })
+      pc.addTransceiver('audio', { direction: 'recvonly' })
+      let probeStream: MediaStream | null = null
+      pc.ontrack = (ev) => { if (!probeStream && ev.streams[0]) probeStream = ev.streams[0] }
       let resource: string | null = null
       let deadline = 0
       let settled = false
@@ -1330,8 +1471,17 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         settled = true
         window.clearTimeout(deadline)
         pc.onconnectionstatechange = null
-        pc.close()
-        if (resource) fetch(resource, { method: 'DELETE' }).catch(() => {})
+        pc.ontrack = null
+        if (ok && probeStream) {
+          // Keep the connection the probe won: the tile adopts it in
+          // setupWebRTC (lib/liveStreams) instead of dialling again, which on
+          // a network that only gets through by NAT hole punching would be a
+          // second gamble.
+          park(warmIdRef.current, pc, probeStream, resource)
+        } else {
+          pc.close()
+          if (resource) fetch(resource, { method: 'DELETE' }).catch(() => {})
+        }
         if (probePcRef.current === pc) probePcRef.current = null
         if (probeFinishRef.current === abandon) probeFinishRef.current = null
         if (ok) {
@@ -1368,7 +1518,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // `online`, the tab shown again), and its own probe at once when another
     // tile's probe got through.
     useEffect(() => {
-      if (!isLive || !autoHls || streamType !== 'hls' || !whepUrl) return
+      if (!isLive || !autoHls || streamType !== 'hls' || !whepUrl || suspended) return
       const schedule = (ms: number) => {
         if (probeTimerRef.current) window.clearTimeout(probeTimerRef.current)
         probeTimerRef.current = window.setTimeout(() => {
@@ -1400,7 +1550,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         document.removeEventListener('visibilitychange', soon)
         window.removeEventListener(WEBRTC_BACK_EVENT, onBack)
       }
-    }, [isLive, autoHls, streamType, whepUrl, probeWebRTC])
+    }, [isLive, autoHls, streamType, whepUrl, suspended, probeWebRTC])
 
     // A tile that is not playing (a retry pending, the error overlay, the
     // offline poll) does not wait out its backoff when the network comes
@@ -1569,6 +1719,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             />
           </div>
         </div>
+
+        {poster && (
+          <img src={poster} alt="" aria-hidden="true" draggable={false}
+            className={`pointer-events-none absolute inset-0 w-full h-full ${cover ? 'object-cover' : 'object-contain'}`} />
+        )}
 
         {/* Detection overlay — INSIDE the feed box so its rectangle is the
             video's rectangle and normalized boxes need no letterbox math.

@@ -63,29 +63,6 @@ const STREAM_STALE_MS = 45 * 60_000
  *  wall its cheap streams for the rest of the day. */
 const SUB_RETRY_MS = 10 * 60_000
 
-/** Each camera's last frame on this wall (a small JPEG data URL), shown in
- *  its tile until the video plays, so a tile coming back is never black. */
-const LAST_FRAME = new Map<number, string>()
-const LAST_FRAME_MAX = 400
-const LAST_FRAME_WIDTH = 320
-/** How often a playing tile refreshes its last frame. */
-const LAST_FRAME_EVERY_MS = 20_000
-function keepFrame(cameraId: number, video: HTMLVideoElement) {
-  if (!video.videoWidth || !video.videoHeight) return
-  try {
-    const canvas = document.createElement('canvas')
-    canvas.width = LAST_FRAME_WIDTH
-    canvas.height = Math.round((LAST_FRAME_WIDTH * video.videoHeight) / video.videoWidth)
-    canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height)
-    LAST_FRAME.delete(cameraId)
-    LAST_FRAME.set(cameraId, canvas.toDataURL('image/jpeg', 0.6))
-    // Oldest first out: a 1000-camera tour keeps the most recent few hundred.
-    while (LAST_FRAME.size > LAST_FRAME_MAX) LAST_FRAME.delete(LAST_FRAME.keys().next().value!)
-  } catch {
-    // A frame the browser will not hand over (a tainted canvas): no still, no harm.
-  }
-}
-
 /** Cameras whose substream failed, and until when they start on the main stream. */
 const NO_SUB = new Map<number, number>()
 const subBlocked = (cameraId: number) => {
@@ -690,29 +667,8 @@ function TourTile({ cameraId, cam, pausedCamera, playing, spotlit, cover, labelC
     }
   }, [usingSub, live, playing, whep, version, dropSub])
 
-  // Until the video plays, the camera's last frame stands in for it; while
-  // it plays, that frame is kept fresh for the next time.
-  const [started, setStarted] = useState(false)
-  useEffect(() => { setStarted(false) }, [whep, version])
-  useEffect(() => {
-    const box = boxRef.current
-    if (!live || !playing || !box) return
-    let timer: number | undefined
-    const grab = () => { const v = box.querySelector('video'); if (v) keepFrame(cameraId, v) }
-    const onPlaying = () => {
-      setStarted(true)
-      window.clearInterval(timer)
-      window.setTimeout(grab, 1_500)
-      timer = window.setInterval(grab, LAST_FRAME_EVERY_MS)
-    }
-    box.addEventListener('playing', onPlaying, true)
-    return () => {
-      grab()
-      window.clearInterval(timer)
-      box.removeEventListener('playing', onPlaying, true)
-    }
-  }, [live, playing, cameraId, whep, version])
-  const lastFrame = !started && live && playing ? LAST_FRAME.get(cameraId) : undefined
+  // The camera's last frame (lib/lastFrame) is drawn by the player itself
+  // until its video plays.
 
   const name = cam?.name || t('tours.cameraN', { id: cameraId })
 
@@ -740,10 +696,6 @@ function TourTile({ cameraId, cam, pausedCamera, playing, spotlit, cover, labelC
           className="w-full h-full !bg-black"
         />
       ) : null}
-      {lastFrame && (
-        <img src={lastFrame} alt="" aria-hidden="true" draggable={false}
-          className={clsx('pointer-events-none absolute inset-0 w-full h-full', cover ? 'object-cover' : 'object-contain')} />
-      )}
       {live && playing && (whep || hls) ? null : (
         <div
           className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 text-white/45"

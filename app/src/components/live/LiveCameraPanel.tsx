@@ -321,6 +321,8 @@ export function LiveCameraPanel({
             <VideoPlayer
               key={`${cameraId}-${streamVersion}-${tokenVersion}`}
               mode="live"
+              keepWarm
+              warmKey={streamVersion}
               whepUrl={urls?.whep}
               hlsUrl={urls?.hls}
               mediamtxToken={urls?.token}
