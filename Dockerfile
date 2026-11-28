@@ -36,7 +36,7 @@ RUN npm run build
 # signed, pinned by digest, offline-bundled and updated with core, with no
 # separate release asset. Cross-compiled on the builder's own architecture
 # (static, CGO off), like the frontend stage above: no QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS host-agent-builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS host-agent-builder
 WORKDIR /src
 COPY host-agent/go.mod host-agent/go.sum ./
 RUN go mod download

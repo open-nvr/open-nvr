@@ -112,9 +112,6 @@ export function SiteSetup() {
         {os === 'windows' && (
           <ol className="list-decimal pl-5 space-y-3">
             <li>
-              Install <b>ffmpeg</b> if it is not there yet (<code>winget install ffmpeg</code> in PowerShell).
-            </li>
-            <li>
               <a className={`${authButton} !w-auto px-4 inline-flex`} href={dl('windows-amd64')} download>
                 <Download size={16} /> Download the OpenNVR agent
               </a>
@@ -122,7 +119,7 @@ export function SiteSetup() {
             <li>
               Open PowerShell in your Downloads folder and run:
               <Copyable text={'.\\opennvr-host.exe setup'} label="the command" />
-              When it asks, paste the setup code (step 4).
+              When it asks, paste the setup code (step 3).
             </li>
             <li>
               Setup code:
@@ -136,9 +133,6 @@ export function SiteSetup() {
         {os !== 'windows' && (
           <ol className="list-decimal pl-5 space-y-3">
             <li>
-              Install <b>ffmpeg</b> if it is not there yet ({os === 'macos' ? <code>brew install ffmpeg</code> : <code>sudo apt install ffmpeg</code>}).
-            </li>
-            <li>
               In a terminal, download the agent:
               <Copyable
                 text={os === 'macos'
@@ -147,7 +141,7 @@ export function SiteSetup() {
                 label="the download command" />
             </li>
             <li>
-              Set it up, and paste the setup code (step 4) when it asks:
+              Set it up, and paste the setup code (step 3) when it asks:
               <Copyable text="./opennvr-host setup" label="the command" />
             </li>
             <li>

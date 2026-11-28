@@ -956,3 +956,17 @@ def test_enrol_takes_a_code_or_a_token_not_both(env, links):
     r = env.tc.post("/api/v1/site-agent/enrol", json={"code": site["enrol_code"], "token": token})
     assert r.status_code == 422
     assert env.tc.post("/api/v1/site-agent/enrol", json={}).status_code == 404
+
+
+def test_the_report_says_which_relay_carries_each_stream(env):
+    site = _create(env)
+    token = _enrol(env, site["enrol_code"]).json()["token"]
+    report = {**REPORT, "publishers": [
+        {"camera_id": env.ids["pushed"], "stream": "main", "state": "live", "relay": "ffmpeg"},
+        {"camera_id": env.ids["pushed"], "stream": "sub", "state": "live", "relay": "native"},
+    ]}
+    assert env.tc.post("/api/v1/site-agent/sync", json=report, headers=_auth(token)).status_code == 200
+    pubs = env.tc.get(f"/api/v1/sites/{site['id']}").json()["publishers"]
+    assert [p["relay"] for p in pubs] == ["ffmpeg", "native"]
+    bad = {**REPORT, "publishers": [{"camera_id": 1, "state": "live", "relay": "vlc"}]}
+    assert env.tc.post("/api/v1/site-agent/sync", json=bad, headers=_auth(token)).status_code == 422

@@ -8,7 +8,10 @@ camera ──RTSP──▶ opennvr-host site ──TLS 443 (ALPN opennvr-rtsps)�
                        │         ──HTTPS 443 /api/v1/site-agent ──▶ core
 ```
 
-- **Video** is relayed as it is: the agent copies each camera's stream (`-c copy`), it does not re-encode, so a small box is enough. It goes over TLS to port 443; nginx on the server ends TLS and hands the stream to MediaMTX. Each stream needs a short-lived token for that one camera.
+- **Video** is relayed as it is. The agent's built-in relay takes the RTP packets of the camera's first video track and passes them on unchanged, without decoding or re-encoding, so any codec the camera sends (H.264, H.265, MJPEG...) works and a small box is enough. Audio is not sent.
+  - **Nothing to install:** ffmpeg is not needed. If the built-in relay fails three times in a row on a camera before it goes live and ffmpeg is installed, that camera uses ffmpeg (`-c copy`) for 15 minutes, then the built-in relay again. The Sites page shows **via ffmpeg** for such a camera.
+  - **Where it goes:** over TLS to port 443; nginx on the server ends TLS and hands the stream to MediaMTX.
+  - **Credentials:** each stream needs a short-lived token for that one camera. The camera's password and the token stay in the agent's memory: they are on no command line.
 - **Control** is HTTPS to `/api/v1/site-agent` with the site's credential. A camera added on the Sites page starts within a second.
 - **Camera control** (ONVIF, PTZ, settings): core's HTTP requests for a site camera ride the same long poll; the agent sends them on the site's LAN and posts the answers back. Core keeps all the protocol logic.
 - **Camera credentials** are stored encrypted on the server and sent only to that site's agent, over TLS. They never leave the agent's memory.
@@ -46,7 +49,7 @@ When the server cannot offer links, the dialog says why, and you use the code be
 ## Add a site with a code
 
 1. **Administration → Sites → Add site.** Name it; you get a one-time code (15 minutes, single use) and the command to run at the site.
-2. **At the site**, on any machine that can reach the cameras (a Linux box, a Raspberry Pi, a Windows PC, a Mac), install `ffmpeg`, then run the three commands the dialog shows for that machine's OS: download the agent, enrol it, start it. On Linux or macOS they look like:
+2. **At the site**, on any machine that can reach the cameras (a Linux box, a Raspberry Pi, a Windows PC, a Mac), run the three commands the dialog shows for that machine's OS: download the agent, enrol it, start it. On Linux or macOS they look like:
 
    ```sh
    (curl -fso opennvr-host "https://nvr.example.com/api/v1/site-agent/download/$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
@@ -87,7 +90,7 @@ The agent sits on the customer's network and takes its instructions from the ser
   - another network
   - the internet
 
-  Camera streams must be `rtsp://` or `rtsps://`, and ffmpeg is held to network protocols only (`-protocol_whitelist`). A compromised server can therefore reach what looks like a camera on that site's camera network, and nothing else.
+  Camera streams must be `rtsp://` or `rtsps://`, and the fallback relay, ffmpeg, is held to network protocols only (`-protocol_whitelist`). A compromised server can therefore reach what looks like a camera on that site's camera network, and nothing else.
 - **Cameras on another subnet** (a routed camera VLAN) or on an unusual port are allowed on the site machine itself, never from the server. Add them to the agent's config file (the one `enrol` wrote) and restart the agent:
 
   ```json

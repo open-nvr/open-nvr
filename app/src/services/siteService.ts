@@ -16,6 +16,8 @@ export type SitePublisher = {
   since?: number | null
   /** What the stream sends upstream, last 10 s. */
   kbps?: number | null
+  /** The agent's own relay, or ffmpeg (its fallback for a camera it cannot handle). */
+  relay?: 'native' | 'ffmpeg' | null
 }
 
 export type SiteCamera = {

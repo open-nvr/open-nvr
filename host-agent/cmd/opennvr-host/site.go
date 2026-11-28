@@ -82,7 +82,7 @@ func enrolCmd(args []string) int {
 func siteCmd(args []string) int {
 	fs := flag.NewFlagSet("site", flag.ExitOnError)
 	cfgPath := fs.String("config", site.DefaultPath(), "the site's config, written by `enrol`")
-	ffmpegPath := fs.String("ffmpeg", "", "ffmpeg to use (default: look for it)")
+	ffmpegPath := fs.String("ffmpeg", "", "ffmpeg to use as the fallback relay (default: look for it; not required)")
 	logFile := fs.String("log-file", "", "log file ('' = stderr only)")
 	noDiscovery := fs.Bool("no-discovery", false, "do not look for ONVIF cameras on this network")
 	_ = fs.Parse(args)
@@ -104,9 +104,9 @@ func siteCmd(args []string) int {
 	defer lock.Close()
 	ff := ffmpeg.Find(*ffmpegPath)
 	if ff == "" {
-		log.Printf("ffmpeg not found: cameras cannot be relayed until it is installed")
+		log.Printf("cameras are relayed by the built-in relay (ffmpeg, the fallback for a camera it cannot handle, is not installed)")
 	} else {
-		log.Printf("ffmpeg %s at %s", ffmpeg.Version(ff), ff)
+		log.Printf("cameras are relayed by the built-in relay; ffmpeg %s at %s is the fallback", ffmpeg.Version(ff), ff)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
