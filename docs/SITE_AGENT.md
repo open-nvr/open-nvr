@@ -26,8 +26,10 @@ camera ──RTSP──▶ opennvr-host site ──TLS 443 (ALPN opennvr-rtsps)�
 When `PUBLIC_HOSTNAME` is set and this server has a publicly trusted certificate for it (Let's Encrypt, or the company's own public certificate), **Add site** also makes a **setup link**. Send it to the person at the site, by WhatsApp or e-mail, or show its QR code.
 
 1. **They open the link.** The page needs no login. It shows what to download for their computer (Windows, Linux / Raspberry Pi, macOS) and a **setup code**.
-2. **They run `opennvr-host setup`** and paste the setup code when it asks.
-3. **They run `opennvr-host site`.** The site turns **Online**, and you add its cameras as below.
+2. **On Linux or a Raspberry Pi, they paste one line** into a terminal, which downloads the agent and runs `sudo ./opennvr-host setup`, and they paste the setup code when it asks. `setup` enrols the machine, installs the agent as a service (see [Keep it running](#keep-it-running)) and starts it. It then says what it found ("3 cameras answered on this network"). Nothing else needs to be done at the site.
+3. **On Windows or macOS** (until their installers exist), they run `opennvr-host setup`, then `opennvr-host site`.
+
+The site turns **Online**, and you add its cameras as below.
 
 Nobody types a code against the clock or compares a fingerprint. In detail:
 
@@ -63,12 +65,32 @@ When the server cannot offer links, the dialog says why, and you use the code be
    The same builds are attached to every [GitHub release](https://github.com/open-nvr/open-nvr/releases) (`opennvr-host-<os>-<arch>`, plus `SHA256SUMS`), with a build provenance attestation: `gh attestation verify opennvr-host-linux-amd64 -R open-nvr/open-nvr`. Use the release that matches your server's version.
 
    **Enrolling.** The `-pin` is the server certificate's fingerprint, as the Sites page shows it. If you leave it out and the server's certificate is self-signed, `enrol` refuses and prints the fingerprint it saw: compare it with the Sites page before using it.
-3. **Keep it running** as a service, so it starts again after a reboot:
-   - Linux (systemd): `host-agent/packaging/opennvr-site.service`, steps in its header. Logs: `journalctl -u opennvr-site -f`.
-   - Windows: a scheduled task that runs `opennvr-host site` at startup as SYSTEM, with the config under `C:\ProgramData\opennvr-site\config.json` (`enrol -config` and `site -config`).
+3. **Keep it running** as a service, so it starts again after a reboot (see [Keep it running](#keep-it-running)): on Linux, `sudo ./opennvr-host install-service` after `enrol`. On Windows, a scheduled task that runs `opennvr-host site` at startup as SYSTEM, with the config under `C:\ProgramData\opennvr-site\config.json` (`enrol -config` and `site -config`).
 4. Back on the Sites page the site turns **Online**. Cameras the agent finds by ONVIF on the site's network are listed: click one, enter its stream URL (as the camera serves it on the site's LAN, without credentials) and its user and password. Or add one by hand with **Camera**.
 
 The camera then appears on the Cameras page as **Site · \<its LAN address\>** and is recorded, shown and analysed like any other camera.
+
+## Keep it running
+
+On Linux with systemd (Ubuntu, Debian, Raspberry Pi OS 32- or 64-bit), `sudo ./opennvr-host setup` installs the agent as a service by itself. For an agent enrolled with a code, use `sudo ./opennvr-host install-service [-config FILE]`. Either puts:
+
+| | |
+|---|---|
+| `/opt/opennvr-site/bin/opennvr-host` | the agent, root-owned; the service cannot change it |
+| `/etc/opennvr-site/config.json` | the site's credential, `0600` root; systemd hands the service a private read-only copy |
+| `/etc/systemd/system/opennvr-site.service` | the service ([host-agent/packaging/opennvr-site.service](../host-agent/packaging/opennvr-site.service)) |
+| `/var/lib/opennvr-site/` | the only place the service may write (the server keys it proved, `state.json`) |
+
+The service runs as a throwaway user (`DynamicUser`) with no privileges. It can't write to the system, read home folders or load kernel modules. It may only open network connections:
+- outgoing ones;
+- a multicast socket for ONVIF discovery;
+- netlink, to see which networks the machine is on. The agent only relays cameras on those networks.
+
+Running setup again (a new link, a replaced box) replaces the agent, the credential and the service, and restarts it.
+
+- **Logs:** `journalctl -u opennvr-site -f`.
+- **Remove everything** (service, agent, credential, state): `sudo ./opennvr-host uninstall`. Revoke the site on the server too if it isn't going to be used again.
+- **One agent per site** runs on a machine. A second one, for example started by hand next to the service, refuses to start, and `setup` warns about any it finds.
 
 ## Revoke, re-enrol, remove
 
@@ -108,7 +130,7 @@ The agent sits on the customer's network and takes its instructions from the ser
   - **Per site:** limits for each kind of call.
   - **Long polls:** at most one held per site, and they hold no database connection while they wait.
 - **Logs.** nginx's access log records paths without query strings, so the short `?jwt=` tokens of playback and HLS URLs are not written to it.
-- **Two agents on one config** are refused: `opennvr-host site` takes a lock for its config file.
+- **Two agents for one site** on one machine are refused: `opennvr-host site` takes a lock for its site, which holds across users and the service's private filesystem.
 
 ## Uplink
 

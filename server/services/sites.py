@@ -520,7 +520,10 @@ def ingest_target(request_host: str | None) -> dict[str, Any]:
 #: Where the core image keeps the host agent builds (Dockerfile, stage 1b):
 #: ``<os>-<arch>/opennvr-host[.exe]``, Windows also ``console/`` (see below).
 AGENT_DIR_DEFAULT = "/opt/opennvr-host"
-AGENT_PLATFORMS = tuple(f"{o}-{a}" for o in ("linux", "darwin", "windows") for a in ("amd64", "arm64"))
+#: `uname -m` to this server's platform names (x86_64, aarch64, armv7l).
+UNAME_SED = "'s/x86_64/amd64/;s/aarch64/arm64/;s/armv7l/arm/'"
+AGENT_PLATFORMS = (*(f"{o}-{a}" for o in ("linux", "darwin", "windows") for a in ("amd64", "arm64")),
+                   "linux-arm")  # 32-bit Raspberry Pi OS (ARMv7)
 _sum_cache: dict[str, tuple[float, int, str]] = {}
 
 
@@ -604,7 +607,7 @@ def setup_commands(host: str, code: str, pin: str | None) -> list[dict[str, str]
     pin_arg = f"-pin {pin} " if pin else ""
     curl_pin = f"sha256//{pin.split('/', 1)[1]}" if pin and "/" in pin else None
 
-    unix_url = f"{base}/$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+    unix_url = f"{base}/$(uname -s | tr A-Z a-z)-$(uname -m | sed {UNAME_SED})"
     unix_dl = f'curl -fso opennvr-host "{unix_url}"'
     if curl_pin:
         unix_dl += f' || curl -fsSko opennvr-host --pinnedpubkey "{curl_pin}" "{unix_url}"'
@@ -617,9 +620,11 @@ def setup_commands(host: str, code: str, pin: str | None) -> list[dict[str, str]
                    f'--pinnedpubkey "{curl_pin}" "{win_url}" }}')
 
     return [
-        {"os": "linux", "label": "Linux / macOS / Raspberry Pi", "download": unix_dl,
+        # Linux: installed as a service, so it starts again after a reboot
+        # (macOS: `./opennvr-host site`, docs/SITE_AGENT.md).
+        {"os": "linux", "label": "Linux / Raspberry Pi", "download": unix_dl,
          "enrol": f"./opennvr-host enrol {pin_arg}https://{host} {code}",
-         "run": "./opennvr-host site"},
+         "run": "sudo ./opennvr-host install-service"},
         {"os": "windows", "label": "Windows (PowerShell)", "download": win_dl,
          "enrol": f".\\opennvr-host.exe enrol {pin_arg}https://{host} {code}",
          "run": ".\\opennvr-host.exe site"},

@@ -10,9 +10,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -96,7 +101,7 @@ func siteCmd(args []string) int {
 	}
 	// One agent per config: two would relay every camera twice and fight
 	// over its paths.
-	lock, err := siteLock(*cfgPath)
+	lock, err := siteLock(cfg)
 	if err != nil {
 		log.Printf("%v", err)
 		return 1
@@ -114,28 +119,52 @@ func siteCmd(args []string) int {
 	_ = site.Run(ctx, site.Options{
 		Config: cfg, FFmpeg: ff, Version: buildinfo.Build, Logf: log.Printf, Discover: !*noDiscovery,
 		ConfigPath: *cfgPath,
+		StatePath:  statePath(),
 	})
 	log.Printf("site agent stopped")
 	return 0
 }
 
-// siteLock takes a lock beside the config, or (a read-only config, as
-// systemd hands it to the service) in the temp folder, keyed by the config's
-// path.
-func siteLock(cfgPath string) (*os.File, error) {
-	abs, err := filepath.Abs(cfgPath)
+// siteLock keeps one agent per site on this machine: two would relay every
+// camera twice and fight over its paths. It is keyed by the site (server and
+// site id), not by the config file: the service reads its config from a
+// systemd credential path while an agent started by hand reads another copy.
+//
+// On Linux it is an abstract unix socket: shared by every user and every
+// mount namespace (the service runs as a throwaway user with a private /tmp),
+// and gone the moment the process ends. Elsewhere a file lock in the temp
+// folder.
+func siteLock(cfg *site.Config) (io.Closer, error) {
+	sum := sha256.Sum256([]byte(cfg.Server + "#" + strconv.Itoa(cfg.SiteID)))
+	key := "opennvr-site-" + hex.EncodeToString(sum[:8])
+	held := fmt.Errorf("another site agent for site %d is already running on this machine", cfg.SiteID)
+	if runtime.GOOS == "linux" {
+		ln, err := net.Listen("unix", "@"+key)
+		if err != nil {
+			if errors.Is(err, syscall.EADDRINUSE) {
+				return nil, held
+			}
+			return nil, fmt.Errorf("cannot take the site agent's lock: %w", err)
+		}
+		return ln, nil
+	}
+	f, err := singleton.Acquire(filepath.Join(os.TempDir(), key+".lock"))
+	if errors.Is(err, singleton.ErrHeld) {
+		return nil, held
+	}
 	if err != nil {
-		abs = cfgPath
+		return nil, fmt.Errorf("cannot take the site agent's lock: %w", err)
 	}
-	sum := sha256.Sum256([]byte(abs))
-	for _, p := range []string{abs + ".lock", filepath.Join(os.TempDir(), "opennvr-site-"+hex.EncodeToString(sum[:6])+".lock")} {
-		f, err := singleton.Acquire(p)
-		if err == nil {
-			return f, nil
-		}
-		if errors.Is(err, singleton.ErrHeld) {
-			return nil, fmt.Errorf("another site agent is already running with %s", cfgPath)
-		}
+	return f, nil
+}
+
+// statePath: under systemd the service's state directory ($STATE_DIRECTORY,
+// the unit's StateDirectory=), where the agent keeps what it learns: its
+// config there is a read-only credential.
+func statePath() string {
+	dir, _, _ := strings.Cut(os.Getenv("STATE_DIRECTORY"), ":")
+	if dir == "" {
+		return ""
 	}
-	return nil, fmt.Errorf("cannot take the site agent's lock for %s", cfgPath)
+	return filepath.Join(dir, "state.json")
 }

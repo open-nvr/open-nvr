@@ -31,6 +31,9 @@ type Options struct {
 	// ConfigPath: where Config came from; newly proven server keys are
 	// saved there when it is writable ("" = not saved).
 	ConfigPath string
+	// StatePath: a state file (State) for what the agent learns, used
+	// instead of the config when set (the service's config is read-only).
+	StatePath string
 }
 
 // Agent is the running site mode.
@@ -78,7 +81,15 @@ func Run(ctx context.Context, o Options) error {
 		shed:    map[string]shedStream{},
 		policy:  NewTargetPolicy(c.AllowSubnets, c.AllowPorts, o.Logf),
 	}
-	a.pins = NewPinSet(c.TrustedPins(), a.savePins)
+	trusted := c.TrustedPins()
+	if o.StatePath != "" {
+		if st, err := LoadState(o.StatePath); err == nil {
+			trusted = append(trusted, st.Pins...)
+		} else {
+			o.Logf("ignoring %s: %v", o.StatePath, err)
+		}
+	}
+	a.pins = NewPinSet(trusted, a.savePins)
 	if c.Insecure {
 		a.client = NewClient(c.Server, c.Token, "", true)
 	} else {
@@ -168,6 +179,12 @@ func Run(ctx context.Context, o Options) error {
 // systemd credential is read-only: the key is then proven again after a
 // restart, which costs one extra request).
 func (a *Agent) savePins(pins []string) {
+	if a.o.StatePath != "" {
+		if err := (&State{Pins: pins}).Save(a.o.StatePath); err != nil {
+			a.o.Logf("trusting the server's key for this run; could not save it to %s: %v", a.o.StatePath, err)
+		}
+		return
+	}
 	if a.o.ConfigPath == "" {
 		return
 	}

@@ -1,14 +1,11 @@
 # systemd unit for the OpenNVR site agent (docs/SITE_AGENT.md).
 #
+# Installed by `sudo opennvr-host setup` (or `sudo opennvr-host
+# install-service` after `enrol`); removed by `sudo opennvr-host uninstall`.
+# The same file is host-agent/packaging/opennvr-site.service.
+#
 # The site agent runs at a remote site and relays its cameras to an OpenNVR
 # on the internet over port 443. It only dials out.
-#
-# Install (as root):
-#   install -m 0755 opennvr-host /usr/local/bin/opennvr-host
-#   install -d -m 0700 /etc/opennvr-site
-#   opennvr-host enrol -config /etc/opennvr-site/config.json -pin sha256/... https://nvr.example.com ABCDE-FGHJK
-#   install -m 0644 opennvr-site.service /etc/systemd/system/opennvr-site.service
-#   systemctl daemon-reload && systemctl enable --now opennvr-site
 #
 # Logs: journalctl -u opennvr-site -f
 
@@ -22,12 +19,18 @@ Type=simple
 # The config holds the site's credential. It stays 0600 root in
 # /etc/opennvr-site; systemd hands this unit a private read-only copy.
 LoadCredential=config.json:/etc/opennvr-site/config.json
-ExecStart=/usr/local/bin/opennvr-host site -config ${CREDENTIALS_DIRECTORY}/config.json
+# What the agent learns while it runs (a server key it proved, see
+# docs/SITE_AGENT.md "Security") goes to /var/lib/opennvr-site, the one place
+# it may write.
+StateDirectory=opennvr-site
+StateDirectoryMode=0700
+ExecStart=/opt/opennvr-site/bin/opennvr-host site -config ${CREDENTIALS_DIRECTORY}/config.json
 Restart=always
 RestartSec=5
 
-# No privileges needed: it reads its config, runs ffmpeg, opens outgoing
-# connections and (for ONVIF discovery) a UDP multicast socket.
+# No privileges needed: it reads its config, opens outgoing connections, a
+# UDP multicast socket for ONVIF discovery, and netlink to list this
+# machine's networks (the agent only relays cameras on them).
 DynamicUser=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -37,7 +40,7 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes

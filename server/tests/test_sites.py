@@ -970,3 +970,15 @@ def test_the_report_says_which_relay_carries_each_stream(env):
     assert [p["relay"] for p in pubs] == ["ffmpeg", "native"]
     bad = {**REPORT, "publishers": [{"camera_id": 1, "state": "live", "relay": "vlc"}]}
     assert env.tc.post("/api/v1/site-agent/sync", json=bad, headers=_auth(token)).status_code == 422
+
+
+def test_32_bit_raspberry_pi_os_gets_its_own_build(env, agent_dir):
+    p = agent_dir / "linux-arm" / "opennvr-host"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"armv7-bin")
+    r = env.tc.get("/api/v1/site-agent/download/linux-arm")
+    assert r.status_code == 200 and r.content == b"armv7-bin"
+    setup = svc.setup_commands("nvr.example.com", "ABCDE-FGHJK", None)
+    linux = next(s for s in setup if s["os"] == "linux")
+    assert "s/armv7l/arm/" in linux["download"]
+    assert linux["run"] == "sudo ./opennvr-host install-service"

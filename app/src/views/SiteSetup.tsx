@@ -130,14 +130,27 @@ export function SiteSetup() {
             </li>
           </ol>
         )}
-        {os !== 'windows' && (
+        {os === 'linux' && (
+          <ol className="list-decimal pl-5 space-y-3">
+            <li>
+              Copy the setup code:
+              <Copyable text={code} label="the setup code" />
+            </li>
+            <li>
+              In a terminal, run this, and paste the code when it asks:
+              <Copyable
+                text={`curl -fsSLo opennvr-host "https://${host}/api/v1/site-agent/download/linux-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/armv7l/arm/')" && chmod +x opennvr-host && sudo ./opennvr-host setup`}
+                label="the command" />
+              It installs the agent as a service (it starts again after a reboot) and says when it is done.
+            </li>
+          </ol>
+        )}
+        {os === 'macos' && (
           <ol className="list-decimal pl-5 space-y-3">
             <li>
               In a terminal, download the agent:
               <Copyable
-                text={os === 'macos'
-                  ? `curl -fsSLo opennvr-host "https://${host}/api/v1/site-agent/download/darwin-$(uname -m | sed 's/x86_64/amd64/')" && chmod +x opennvr-host`
-                  : `curl -fsSLo opennvr-host "https://${host}/api/v1/site-agent/download/linux-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" && chmod +x opennvr-host`}
+                text={`curl -fsSLo opennvr-host "https://${host}/api/v1/site-agent/download/darwin-$(uname -m | sed 's/x86_64/amd64/')" && chmod +x opennvr-host`}
                 label="the download command" />
             </li>
             <li>
@@ -149,7 +162,7 @@ export function SiteSetup() {
               <Copyable text={code} label="the setup code" />
             </li>
             <li>
-              Then start it: <Copyable text="./opennvr-host site" label="the command" />
+              Then start it (keep this window open): <Copyable text="./opennvr-host site" label="the command" />
             </li>
           </ol>
         )}

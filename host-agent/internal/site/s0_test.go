@@ -339,3 +339,18 @@ func TestRepinProofMatchesTheServers(t *testing.T) {
 		t.Fatalf("proof %s", got)
 	}
 }
+
+func TestStateKeepsLearnedPinsWhenTheConfigIsReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/state.json"
+	if st, err := LoadState(path); err != nil || len(st.Pins) != 0 {
+		t.Fatalf("missing state: %+v %v", st, err)
+	}
+	if err := (&State{Pins: []string{"sha256/AAA="}}).Save(path); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(path)
+	if err != nil || len(st.Pins) != 1 || st.Pins[0] != "sha256/AAA=" {
+		t.Fatalf("loaded %+v %v", st, err)
+	}
+}
