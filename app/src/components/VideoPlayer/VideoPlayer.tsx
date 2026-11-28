@@ -33,6 +33,7 @@ import {
   DEFAULT_EXTRAS,
   GATHER_WAIT_MS,
   ICE_GIVE_UP_MS,
+  BLIP_PROBE_MS,
   PROBE_INTERVAL_MS,
   RETURN_PROBE_DELAY_MS,
   SLOW_RETRY_MS,
@@ -51,6 +52,7 @@ import {
   parseExtras,
   rememberHls,
   shouldDeleteSession,
+  transportKey,
   type RtcExtras,
 } from '../../lib/liveTransport'
 import { displayAspect, isStretched, snapshotSize } from '../../lib/aspect'
@@ -66,8 +68,8 @@ import { useTranslation } from '../../i18n'
 export type VideoPlayerMode = 'live' | 'playback'
 export type StreamType = 'webrtc' | 'hls' | 'mp4'
 
-/** Where the session remembers that WebRTC could not connect from this
- *  network (lib/liveTransport). Per origin, so the LAN address and the
+/** Where the session remembers, per stream path, that WebRTC could not
+ *  connect from this network (lib/liveTransport). Per origin, so the LAN address and the
  *  public one keep separate answers. Unavailable storage just means the
  *  tiles forget between mounts. */
 function transportMemory(): Storage | null {
@@ -232,11 +234,16 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // it cannot connect. The session remembers a fallback so later tiles
     // start on HLS at once, and one tile per interval probes WebRTC again.
     // Decided once, at mount: the memory must not re-route a playing tile.
+    // The memory is kept per stream path: one camera connecting by luck
+    // says nothing about the next one.
+    const memoryKey = transportKey(whepUrl)
     const [initial] = useState(() => {
       if (mode === 'playback') return { start: 'webrtc' as const, probing: false, fallenBack: false }
       installOnlineHook()
-      return initialTransport(preferredStreamType, !!hlsUrl && !!whepUrl, transportMemory(), Date.now())
+      return initialTransport(preferredStreamType, !!hlsUrl && !!whepUrl, transportMemory(), Date.now(), memoryKey)
     })
+    // Identifies this tile's own WEBRTC_BACK_EVENT so it does not answer it.
+    const tileIdRef = useRef<object>({})
     // Determine initial stream type based on mode and available URLs
     const getInitialStreamType = (): StreamType => {
       if (mode === 'playback') {
@@ -251,6 +258,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // True while this tile plays HLS because WebRTC could not connect (as
     // opposed to the caller or the viewer asking for HLS). Drives the badge.
     const [autoHls, setAutoHls] = useState(initial.fallenBack)
+    // When this tile's next WebRTC probe is due, once it is on HLS by
+    // fallback: at once for the tile the session picked to probe (it starts
+    // on HLS and probes in the background), BLIP_PROBE_MS after WebRTC had
+    // worked and then dropped, PROBE_INTERVAL_MS otherwise.
+    const nextProbeInRef = useRef(initial.probing ? 0 : PROBE_INTERVAL_MS)
+    // WebRTC reached `connected` at least once on this mount.
+    const everConnectedRef = useRef(false)
     const [isPlaying, setIsPlaying] = useState(false)
     const [isMuted, setIsMuted] = useState(muted)
     const [volume, setVolume] = useState(muted ? 0 : 1)
@@ -510,7 +524,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // bounded WebRTC retry applies.
     const giveUpWebRTC = useCallback((reason: string) => {
       if (mode === 'live' && hlsUrl && !manualChoiceRef.current) {
-        rememberHls(transportMemory(), reason, Date.now())
+        if (everConnectedRef.current) {
+          // It worked here minutes ago: a blip (Wi-Fi hand-over, VPN
+          // re-key), not a network without WebRTC. HLS for now, and look
+          // again soon rather than in fifteen minutes.
+          rememberHls(transportMemory(), memoryKey, reason, Date.now(), BLIP_PROBE_MS)
+          nextProbeInRef.current = BLIP_PROBE_MS
+        } else {
+          rememberHls(transportMemory(), memoryKey, reason, Date.now())
+        }
         cleanup()
         setIsReconnecting(false)
         setAutoHls(true)
@@ -518,7 +540,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         return
       }
       scheduleAutoRetry(reason === 'ice-failed' ? 'WebRTC connection failed' : 'WebRTC connection timed out')
-    }, [mode, hlsUrl, cleanup, scheduleAutoRetry])
+    }, [mode, hlsUrl, memoryKey, cleanup, scheduleAutoRetry])
     giveUpRef.current = giveUpWebRTC
 
     // The RTCPeerConnection configuration. ICE servers come from Settings >
@@ -686,6 +708,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             setIsReconnecting(false)
             retryCountRef.current = 0
             whepConnectedRef.current = true
+            everConnectedRef.current = true
             if (iceDeadlineRef.current) {
               clearTimeout(iceDeadlineRef.current)
               iceDeadlineRef.current = null
@@ -694,9 +717,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
               clearTimeout(disconnectGraceRef.current)
               disconnectGraceRef.current = null
             }
-            // WebRTC works from here: forget any earlier fallback so new
-            // tiles start on it again.
-            clearMemory(transportMemory())
+            // WebRTC works from here for this path: forget its earlier
+            // fallback so its new tiles start on it again.
+            clearMemory(transportMemory(), memoryKey)
             setAutoHls(false)
             startStallWatch(pc)
           } else if (
@@ -763,7 +786,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           scheduleAutoRetry(msg)
         }
       }
-    }, [whepUrl, onError, scheduleAutoRetry, rtcConfig, negotiateWhep, startStallWatch])
+    }, [whepUrl, memoryKey, onError, scheduleAutoRetry, rtcConfig, negotiateWhep, startStallWatch])
 
     // Setup HLS
     const setupHLS = useCallback(async () => {
@@ -1274,18 +1297,18 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // Leave the HLS rung: this tile goes back to WebRTC now.
     const backToWebRTC = useCallback(() => {
       if (manualChoiceRef.current) return
-      clearMemory(transportMemory())
+      clearMemory(transportMemory(), memoryKey)
       offlinePollingRef.current = false
       retryCountRef.current = 0
       setAutoHls(false)
       setStreamType('webrtc')
-    }, [])
+    }, [memoryKey])
 
     // Can WebRTC connect from here now? A throwaway WHEP session, video
     // only, never attached to the element, so the HLS picture keeps playing
     // while it runs. Success flips this tile back to WebRTC and tells every
-    // other fallen-back tile through WEBRTC_BACK_EVENT; failure leaves HLS
-    // alone and asks again at the next interval.
+    // other fallen-back tile through WEBRTC_BACK_EVENT to run its own probe;
+    // failure leaves HLS alone and asks again at the next interval.
     const probeWebRTC = useCallback(async () => {
       if (!whepUrl || probePcRef.current || manualChoiceRef.current) return
       let pc: RTCPeerConnection
@@ -1310,11 +1333,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         if (probePcRef.current === pc) probePcRef.current = null
         if (probeFinishRef.current === abandon) probeFinishRef.current = null
         if (ok) {
-          window.dispatchEvent(new Event(WEBRTC_BACK_EVENT))
+          window.dispatchEvent(new CustomEvent(WEBRTC_BACK_EVENT, { detail: tileIdRef.current }))
           backToWebRTC()
-        } else {
-          scheduleProbeRef.current(PROBE_INTERVAL_MS)
+          return
         }
+        scheduleProbeRef.current(PROBE_INTERVAL_MS)
       }
       // The effect's cleanup ends a probe still in flight through this.
       const abandon = () => finish(false)
@@ -1332,14 +1355,16 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         }
         resource = done.resource
       } catch {
+        // WHEP refused before any ICE (e.g. this camera has no stream):
+        // nothing learnt about the network, so no record either way.
         finish(false)
       }
     }, [whepUrl, rtcConfig, negotiateWhep, backToWebRTC])
 
     // A tile on HLS by fallback keeps looking for the way back: a probe
     // every PROBE_INTERVAL_MS, one soon after the network changed (browser
-    // `online`, the tab shown again), and at once when another tile's probe
-    // got through.
+    // `online`, the tab shown again), and its own probe at once when another
+    // tile's probe got through.
     useEffect(() => {
       if (!isLive || !autoHls || streamType !== 'hls' || !whepUrl) return
       const schedule = (ms: number) => {
@@ -1350,11 +1375,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         }, ms)
       }
       scheduleProbeRef.current = schedule
-      schedule(PROBE_INTERVAL_MS)
+      schedule(nextProbeInRef.current)
+      nextProbeInRef.current = PROBE_INTERVAL_MS
       const soon = () => {
         if (document.visibilityState !== 'hidden') schedule(RETURN_PROBE_DELAY_MS)
       }
-      const onBack = () => backToWebRTC()
+      const onBack = (e: Event) => {
+        if ((e as CustomEvent).detail !== tileIdRef.current) schedule(0)
+      }
       window.addEventListener('online', soon)
       document.addEventListener('visibilitychange', soon)
       window.addEventListener(WEBRTC_BACK_EVENT, onBack)
@@ -1370,7 +1398,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         document.removeEventListener('visibilitychange', soon)
         window.removeEventListener(WEBRTC_BACK_EVENT, onBack)
       }
-    }, [isLive, autoHls, streamType, whepUrl, probeWebRTC, backToWebRTC])
+    }, [isLive, autoHls, streamType, whepUrl, probeWebRTC])
 
     // A tile that is not playing (a retry pending, the error overlay, the
     // offline poll) does not wait out its backoff when the network comes
