@@ -8,7 +8,6 @@ import {
   PROBE_INTERVAL_MS,
   addressBarHost,
   candidateLines,
-  claimProbe,
   clearMemory,
   forgetProbe,
   hostCandidates,
@@ -20,6 +19,7 @@ import {
   readMemory,
   rememberHls,
   shouldDeleteSession,
+  transportKey,
 } from '../src/lib/liveTransport.ts'
 
 const extras = (o = {}) => ({ icePort: 8189, publicIcePort: null, singlePortWebrtc: false, serverHosts: [], ...o })
@@ -208,79 +208,99 @@ test('no DELETE for a never-connected session MediaMTX has already dropped', () 
 
 // ---- memory --------------------------------------------------------------
 
-test('a fresh session starts on WebRTC; after a fallback later tiles start on HLS', () => {
-  const s = new MemStorage()
-  const now = 1_000_000
-  assert.deepEqual(initialTransport('webrtc', true, s, now), { start: 'webrtc', probing: false, fallenBack: false })
-  rememberHls(s, 'ice-timeout', now)
-  assert.deepEqual(initialTransport('webrtc', true, s, now + 1000), { start: 'hls', probing: false, fallenBack: true })
-  assert.equal(readMemory(s).reason, 'ice-timeout')
+const A = '/webrtc/cam-2/whep'
+const B = '/webrtc/cam-6/whep'
+
+test('the memory key is the WHEP path, without host or token', () => {
+  assert.equal(transportKey('https://vms.example.org/webrtc/cam-2/whep?jwt=abc'), A)
+  assert.equal(transportKey('/webrtc/cam-2/whep?jwt=def'), A)
+  assert.equal(transportKey(null), '')
 })
 
-test('one tile probes WebRTC again after the interval, and only one, from HLS', () => {
+test('a fresh session starts on WebRTC; after a fallback that path starts on HLS', () => {
+  const s = new MemStorage()
+  const now = 1_000_000
+  assert.deepEqual(initialTransport('webrtc', true, s, now, A), { start: 'webrtc', probing: false, fallenBack: false })
+  rememberHls(s, A, 'ice-timeout', now)
+  assert.deepEqual(initialTransport('webrtc', true, s, now + 1000, A), { start: 'hls', probing: false, fallenBack: true })
+  assert.equal(readMemory(s).paths[A].reason, 'ice-timeout')
+})
+
+test('another path connecting by luck does not reset a path that fell back', () => {
+  // The vms case: the webcam connects over WebRTC by NAT hole punching, the
+  // classroom camera never does. The classroom tile must not wait out ICE
+  // again on the next visit.
+  const s = new MemStorage()
+  rememberHls(s, A, 'ice-timeout', 1_000_000)
+  clearMemory(s, B)
+  assert.deepEqual(initialTransport('webrtc', true, s, 1_000_100, A), { start: 'hls', probing: false, fallenBack: true })
+  clearMemory(s, A)
+  assert.equal(readMemory(s).paths[A], undefined)
+})
+
+test('a path with no record starts on HLS and probes at once while the site has fallen back', () => {
   const s = new MemStorage()
   const t0 = 1_000_000
-  rememberHls(s, 'ice-failed', t0)
+  rememberHls(s, A, 'ice-timeout', t0)
+  assert.deepEqual(initialTransport('webrtc', true, s, t0 + 10, B), { start: 'hls', probing: true, fallenBack: true })
+  // Its probe is recorded: a second tile of the same path does not run another.
+  assert.deepEqual(initialTransport('webrtc', true, s, t0 + 20, B), { start: 'hls', probing: false, fallenBack: true })
+  // The hint expires with the probe interval.
+  assert.deepEqual(initialTransport('webrtc', true, s, t0 + PROBE_INTERVAL_MS, '/webrtc/cam-9/whep'), { start: 'webrtc', probing: false, fallenBack: false })
+})
+
+test('one tile per path probes WebRTC again after the interval, from HLS', () => {
+  const s = new MemStorage()
+  const t0 = 1_000_000
+  rememberHls(s, A, 'ice-failed', t0)
   const later = t0 + PROBE_INTERVAL_MS
   // The probing tile starts on HLS too: a picture at once, the probe runs
   // in the background, never a black tile waiting out ICE.
-  assert.deepEqual(initialTransport('webrtc', true, s, later), { start: 'hls', probing: true, fallenBack: true })
-  assert.deepEqual(initialTransport('webrtc', true, s, later + 10), { start: 'hls', probing: false, fallenBack: true })
+  assert.deepEqual(initialTransport('webrtc', true, s, later, A), { start: 'hls', probing: true, fallenBack: true })
+  assert.deepEqual(initialTransport('webrtc', true, s, later + 10, A), { start: 'hls', probing: false, fallenBack: true })
 })
 
 test('a fallback after WebRTC had worked probes again after BLIP_PROBE_MS, not the full interval', () => {
   const s = new MemStorage()
   const t0 = 1_000_000
-  rememberHls(s, 'ice-timeout', t0, BLIP_PROBE_MS)
-  assert.equal(initialTransport('webrtc', true, s, t0 + BLIP_PROBE_MS - 1).probing, false)
-  assert.equal(initialTransport('webrtc', true, s, t0 + BLIP_PROBE_MS).probing, true)
-})
-
-test('a handed-off probe is claimed by exactly one tile', () => {
-  const s = new MemStorage()
-  rememberHls(s, 'ice-timeout', 1_000_000)
-  // Nothing to claim while a probe is recorded.
-  assert.equal(claimProbe(s, 1_000_100), false)
-  forgetProbe(s)
-  assert.equal(claimProbe(s, 1_000_200), true)
-  assert.equal(claimProbe(s, 1_000_201), false)
-  assert.equal(readMemory(s).probedAt, 1_000_200)
-  // No fallback remembered: nothing to claim.
-  clearMemory(s)
-  assert.equal(claimProbe(s, 1_000_300), false)
+  rememberHls(s, A, 'ice-timeout', t0, BLIP_PROBE_MS)
+  assert.equal(initialTransport('webrtc', true, s, t0 + BLIP_PROBE_MS - 1, A).probing, false)
+  assert.equal(initialTransport('webrtc', true, s, t0 + BLIP_PROBE_MS, A).probing, true)
 })
 
 test('a plain fallback never pushes an earlier, sooner probe back', () => {
   const s = new MemStorage()
-  rememberHls(s, 'ice-timeout', 1_000_000, BLIP_PROBE_MS)
-  const soon = readMemory(s).probedAt
-  rememberHls(s, 'ice-timeout', 1_000_500)
-  assert.equal(readMemory(s).probedAt, soon)
+  rememberHls(s, A, 'ice-timeout', 1_000_000, BLIP_PROBE_MS)
+  const soon = readMemory(s).paths[A].probedAt
+  rememberHls(s, A, 'ice-timeout', 1_000_500)
+  assert.equal(readMemory(s).paths[A].probedAt, soon)
 })
 
-test('coming back online forces a probe; a successful connection clears everything', () => {
+test('coming back online forces a probe for every path and drops the site hint', () => {
   const s = new MemStorage()
-  rememberHls(s, 'ice-timeout', 5000)
+  rememberHls(s, A, 'ice-timeout', 5000)
   forgetProbe(s)
-  assert.equal(initialTransport('webrtc', true, s, 6000).probing, true)
-  clearMemory(s)
+  assert.equal(initialTransport('webrtc', true, s, 6000, A).probing, true)
+  assert.deepEqual(initialTransport('webrtc', true, s, 6000, B), { start: 'webrtc', probing: false, fallenBack: false })
+  clearMemory(s, A)
   assert.equal(readMemory(s), null)
-  assert.deepEqual(initialTransport('webrtc', true, s, 7000), { start: 'webrtc', probing: false, fallenBack: false })
 })
 
 test('a manual HLS preference, or no HLS URL, bypasses the memory', () => {
   const s = new MemStorage()
-  rememberHls(s, 'x', 1)
-  assert.deepEqual(initialTransport('hls', true, s, 2), { start: 'hls', probing: false, fallenBack: false })
-  assert.deepEqual(initialTransport('webrtc', false, s, 2), { start: 'webrtc', probing: false, fallenBack: false })
+  rememberHls(s, A, 'x', 1)
+  assert.deepEqual(initialTransport('hls', true, s, 2, A), { start: 'hls', probing: false, fallenBack: false })
+  assert.deepEqual(initialTransport('webrtc', false, s, 2, A), { start: 'webrtc', probing: false, fallenBack: false })
 })
 
-test('corrupt or missing storage is treated as no memory', () => {
+test('corrupt, missing or old-format storage is treated as no memory', () => {
   const s = new MemStorage()
   s.setItem('opennvr.live.transport', '{nope')
   assert.equal(readMemory(s), null)
+  s.setItem('opennvr.live.transport', JSON.stringify({ mode: 'hls', reason: 'x', at: 1, probedAt: 1 }))
+  assert.equal(readMemory(s), null)
   assert.equal(readMemory(null), null)
-  assert.doesNotThrow(() => rememberHls(null, 'x', 1))
+  assert.doesNotThrow(() => rememberHls(null, A, 'x', 1))
 })
 
 // ---- no hardcoded ICE servers anywhere in the app ----------------------------
