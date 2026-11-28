@@ -1482,7 +1482,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       let resource: string | null = null
       let deadline = 0
       let settled = false
-      const finish = (ok: boolean) => {
+      const finish = (ok: boolean, retryInMs?: number) => {
         if (settled) return
         settled = true
         window.clearTimeout(deadline)
@@ -1505,8 +1505,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           backToWebRTC()
           return
         }
-        scheduleProbeRef.current(afterDropRef.current ? BLIP_PROBE_MS : PROBE_INTERVAL_MS)
-        afterDropRef.current = false
+        scheduleProbeRef.current(retryInMs ?? (afterDropRef.current ? BLIP_PROBE_MS : PROBE_INTERVAL_MS))
+        if (retryInMs === undefined) afterDropRef.current = false
       }
       // The effect's cleanup ends a probe still in flight through this.
       const abandon = () => finish(false)
@@ -1524,9 +1524,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         }
         resource = done.resource
       } catch {
-        // WHEP refused before any ICE (e.g. this camera has no stream):
-        // nothing learnt about the network, so no record either way.
-        finish(false)
+        // WHEP refused before any ICE (e.g. this camera has no stream yet: a
+        // browser webcam nobody is publishing, a camera still starting).
+        // Nothing learnt about the network, so no record either way, and look
+        // again soon: waiting out PROBE_INTERVAL_MS left a camera that came
+        // online on HLS for a quarter of an hour.
+        finish(false, SLOW_RETRY_MS)
       }
     }, [whepUrl, rtcConfig, negotiateWhep, backToWebRTC])
 
