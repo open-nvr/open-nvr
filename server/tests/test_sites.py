@@ -1231,3 +1231,133 @@ def test_a_new_camera_password_reaches_the_agent(env):
     urls = [d["main_url"] for d in
             env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()["desired"]]
     assert urls == ["rtsp://ops:p2@192.168.1.64:554/main"] * 2
+
+
+# ── health, alerts, checks (S7b) ───────────────────────────────────────
+
+
+@pytest.mark.parametrize(("state", "detail", "code"), [
+    ("live", None, None),
+    ("uplink_cap", None, "paused_cap"),
+    ("error", "camera: bad status code: 401 (Unauthorized)", "wrong_password"),
+    ("error", "camera: dial tcp 192.168.1.64:554: connect: connection refused", "unreachable"),
+    ("error", "camera: dial tcp 192.168.1.64:554: i/o timeout", "unreachable"),
+    ("error", "the camera sent nothing for 10s", "stream_ended"),
+    ("error", "not relayed: 192.168.1.1 is a router on this network", "not_relayed"),
+    ("error", "publish token: the server asks to slow down (429)", "server"),
+    ("error", "something odd", "error"),
+])
+def test_a_streams_error_is_said_in_plain_words(state, detail, code):
+    from services.site_health import camera_problem
+
+    got = camera_problem(state, detail)
+    assert (got or {}).get("code") == code
+    if got:
+        assert got["text"] and "rtsp://" not in got["text"]
+
+
+def test_the_site_machines_own_problems():
+    from services.site_health import box_problems
+
+    assert box_problems({"temp_c": 55, "disk_free_mb": 5000}, 3.0) == []
+    codes = [p["code"] for p in box_problems({"temp_c": 85, "disk_free_mb": 50}, -600.0)]
+    assert codes == ["clock", "hot", "disk"]
+
+
+def test_the_clock_and_health_come_from_the_report(env):
+    import time as _t
+
+    site = _create(env)
+    token = _enrol(env, site["enrol_code"]).json()["token"]
+    report = {**REPORT, "now": _t.time() + 900, "health": {"temp_c": 61.5, "disk_free_mb": 120}}
+    env.tc.post("/api/v1/site-agent/sync", json=report, headers=_auth(token))
+    h = env.tc.get(f"/api/v1/sites/{site['id']}").json()["health"]
+    assert 880 < h["clock_skew_s"] < 920 and h["temp_c"] == 61.5
+    assert [p["code"] for p in h["problems"]] == ["clock", "disk"]
+
+
+@pytest.fixture
+def events(env, monkeypatch):
+    from services import system_events
+
+    monkeypatch.setattr(system_events, "SessionLocal", env.SessionLocal)
+    from models import SystemEvent
+
+    def active(event_type):
+        with env.SessionLocal() as s:
+            row = (s.query(SystemEvent).filter(SystemEvent.event_type == event_type)
+                   .order_by(SystemEvent.id.desc()).first())
+            return row.event_state if row else None
+    return active
+
+
+def test_an_offline_site_and_a_down_camera_raise_an_alert_once_and_clear(env, events):
+    import datetime as dt
+    import time as _t
+
+    from services import site_health
+
+    site = _create(env)
+    token = _enrol(env, site["enrol_code"]).json()["token"]
+    env.tc.put(f"/api/v1/sites/{site['id']}/cameras/{env.ids['pushed']}", json={"main_url": "rtsp://192.168.1.64/m"})
+    long_ago = _t.time() - 20 * 60
+    report = {**REPORT, "publishers": [{"camera_id": env.ids["pushed"], "stream": "main", "state": "error",
+                                        "detail": "camera: 401 Unauthorized", "since": long_ago}]}
+    env.tc.post("/api/v1/site-agent/sync", json=report, headers=_auth(token))
+    with env.SessionLocal() as s:
+        rows = site_health.tick(s)
+    cam_event = f"site_camera_down:{env.ids['pushed']}"
+    assert [r["event_type"] for r in rows] == [cam_event]
+    assert "user and password" in rows[0]["description"]
+    with env.SessionLocal() as s:
+        assert site_health.tick(s) == []  # edge-triggered: nothing new
+    # The site goes quiet for 6 minutes: one site alert; the camera's is
+    # cleared (the site's says it all).
+    with env.SessionLocal() as s:
+        row = s.get(Site, site["id"])
+        row.last_seen_at = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=6)
+        s.commit()
+        rows = site_health.tick(s)
+    assert {r["event_type"]: r["event_state"] for r in rows} == {
+        f"site_offline:{site['id']}": "active", cam_event: "inactive"}
+    # Back, and the camera works.
+    ok = {**REPORT, "publishers": [{"camera_id": env.ids["pushed"], "stream": "main", "state": "live"}]}
+    env.tc.post("/api/v1/site-agent/sync", json=ok, headers=_auth(token))
+    with env.SessionLocal() as s:
+        site_health.tick(s)
+    assert events(f"site_offline:{site['id']}") == "inactive"
+
+
+def test_alerts_and_updates_can_be_switched_off_per_site(env, events, agent_dir):
+    import datetime as dt
+
+    from services import site_health
+
+    site = _create(env)
+    token = _enrol(env, site["enrol_code"]).json()["token"]
+    r = env.tc.patch(f"/api/v1/sites/{site['id']}", json={"alert_offline": False, "agent_updates": False})
+    assert r.status_code == 200 and r.json()["alert_offline"] is False and r.json()["agent_updates"] is False
+    with env.SessionLocal() as s:
+        row = s.get(Site, site["id"])
+        row.last_seen_at = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=30)
+        s.commit()
+        assert site_health.tick(s) == []
+    (agent_dir / "manifest.json").write_bytes(b"{}")
+    (agent_dir / "manifest.sig").write_bytes(b"{}")
+    assert env.tc.get("/api/v1/site-agent/update", headers=_auth(token)).status_code == 404
+    env.tc.patch(f"/api/v1/sites/{site['id']}", json={"agent_updates": True})
+    assert env.tc.get("/api/v1/site-agent/update", headers=_auth(token)).status_code == 200
+
+
+def test_run_checks_reaches_the_agent_and_its_answer_is_shown(env):
+    site = _create(env)
+    token = _enrol(env, site["enrol_code"]).json()["token"]
+    rid = env.tc.post(f"/api/v1/sites/{site['id']}/checks").json()["requested"]
+    assert env.tc.post("/api/v1/site-agent/sync", json=REPORT, headers=_auth(token)).json()["checks_request"] == rid
+    assert env.tc.get(f"/api/v1/sites/{site['id']}").json()["checks"]["pending"] is True
+    report = {**REPORT, "checks": {"id": rid, "at": 1.0, "items": [
+        {"name": "The server (HTTPS)", "ok": True, "detail": "reached", "ms": 40},
+        {"name": "Camera 3", "ok": False, "detail": "401 Unauthorized", "ms": 12}]}}
+    env.tc.post("/api/v1/site-agent/sync", json=report, headers=_auth(token))
+    checks = env.tc.get(f"/api/v1/sites/{site['id']}").json()["checks"]
+    assert checks["pending"] is False and [i["ok"] for i in checks["items"]] == [True, False]

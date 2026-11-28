@@ -464,6 +464,11 @@ class Site(Base):
     approval_pending_at = Column(DateTime(timezone=True), nullable=True)
     pending_agent = Column(Text, nullable=True)
 
+    # Alerts (services/site_health.py) and the agent's self-update.
+    alert_offline = Column(Boolean, nullable=False, default=True, server_default=sa_true())
+    alert_camera_down = Column(Boolean, nullable=False, default=True, server_default=sa_true())
+    agent_updates = Column(Boolean, nullable=False, default=True, server_default=sa_true())
+
 
 class SiteSetupToken(Base):
     """A setup link for a site (https://<server>/site-setup#<id>.<secret>):

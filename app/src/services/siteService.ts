@@ -18,7 +18,11 @@ export type SitePublisher = {
   kbps?: number | null
   /** The agent's own relay, or ffmpeg (its fallback for a camera it cannot handle). */
   relay?: 'native' | 'ffmpeg' | null
+  /** What the error means, in plain words (server: services/site_health.py). */
+  problem?: { code: string; text: string } | null
 }
+
+export type CheckItem = { name: string; ok: boolean; detail?: string | null; ms?: number | null }
 
 export type SiteCamera = {
   id: number
@@ -63,6 +67,13 @@ export type Site = {
   found?: FoundDevice[]
   /** The camera scan: asked for, still running, what it covered. */
   scan?: ScanState
+  /** The site machine: clock, temperature, disk, and what is wrong with it. */
+  health?: { temp_c?: number | null; disk_free_mb?: number | null; clock_skew_s?: number | null; problems: { code: string; text: string }[] }
+  /** The last "Run checks". */
+  checks?: { requested: number | null; pending: boolean; at: number | null; items: CheckItem[] }
+  alert_offline?: boolean
+  alert_camera_down?: boolean
+  agent_updates?: boolean
   /** The last uplink test: the upload left free beside the relayed cameras. */
   uplink_test?: { requested: number | null; pending: boolean; kbps: number | null; at: string | null }
   /** A replaced agent waiting for an admin's approval: it gets no cameras yet. */
@@ -186,7 +197,10 @@ export const siteService = {
   remove: async (id: number): Promise<void> => { await api.delete(`/api/v1/sites/${id}`) },
   link: async (id: number, cameraId: number, body: CameraLink): Promise<Site> =>
     (await api.put(`/api/v1/sites/${id}/cameras/${cameraId}`, body)).data,
-  update: async (id: number, body: { name?: string; live_policy?: 'always' | 'sub_only'; uplink_cap_kbps?: number | null }): Promise<Site> =>
+  update: async (id: number, body: {
+    name?: string; live_policy?: 'always' | 'sub_only'; uplink_cap_kbps?: number | null
+    alert_offline?: boolean; alert_camera_down?: boolean; agent_updates?: boolean
+  }): Promise<Site> =>
     (await api.patch(`/api/v1/sites/${id}`, body)).data,
   unlink: async (id: number, cameraId: number): Promise<Site> =>
     (await api.delete(`/api/v1/sites/${id}/cameras/${cameraId}`)).data,
@@ -199,6 +213,8 @@ export const siteService = {
     await api.delete(`/api/v1/sites/${id}/setup-links/${encodeURIComponent(tokenId)}`)
   },
   approveAgent: async (id: number): Promise<Site> => (await api.post(`/api/v1/sites/${id}/approve-agent`)).data,
+  /** Ask the site's agent to test, from the site, the server and each camera. */
+  runChecks: async (id: number): Promise<{ requested: number }> => (await api.post(`/api/v1/sites/${id}/checks`)).data,
   /** Ask the site's agent to measure its free upload (at most once an hour). */
   uplinkTest: async (id: number): Promise<{ requested: number }> => (await api.post(`/api/v1/sites/${id}/uplink-test`)).data,
   /** A new user and/or password for the site's cameras (all, or those listed). */

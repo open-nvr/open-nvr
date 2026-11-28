@@ -26,7 +26,7 @@ from core.database import get_db
 from core.permissions import RequirePermission
 from models import Camera, Site, User
 from services import host_agent
-from services import site_setup
+from services import site_health, site_setup
 from services import sites as svc
 
 router = APIRouter(prefix="/sites", tags=["sites"])
@@ -90,6 +90,9 @@ class SiteUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=100)
     live_policy: Literal["always", "sub_only"] | None = None
     uplink_cap_kbps: int | None = Field(None, ge=0, le=10_000_000)
+    alert_offline: bool | None = None
+    alert_camera_down: bool | None = None
+    agent_updates: bool | None = None
 
 
 class CameraLink(BaseModel):
@@ -166,6 +169,10 @@ def update_site(
         site.live_policy = body.live_policy
     if "uplink_cap_kbps" in body.model_fields_set:
         site.uplink_cap_kbps = body.uplink_cap_kbps or None
+    for flag in ("alert_offline", "alert_camera_down", "agent_updates"):
+        value = getattr(body, flag)
+        if value is not None:
+            setattr(site, flag, value)
     db.commit()
     svc.notify(site.id)
     return svc.public_view(db, site)
@@ -281,6 +288,23 @@ def scan_site(site_id: int, request: Request, db: Session = Depends(get_db),
         raise HTTPException(status_code=429, detail="A scan was just asked for; wait a minute")
     rid = svc.request_scan(site.id)
     audit_request(db, request, action="site.camera_scan", user_id=user.id, entity_type="site", entity_id=site.id)
+    return {"requested": rid}
+
+
+@router.post("/{site_id}/checks")
+def run_site_checks(site_id: int, request: Request, db: Session = Depends(get_db),
+                    user: User = Depends(_require_cameras_manage)):
+    """Ask the site's agent to test, from the site: this server, the video
+    route and each of its cameras. The result arrives in ``checks``."""
+    from services.audit_service import audit_request
+
+    site = _site_or_404(db, site_id)
+    if not site.credential_hash:
+        raise HTTPException(status_code=409, detail="The site has no agent yet")
+    if _rate_limited(f"checks:{site.id}", 6):
+        raise HTTPException(status_code=429, detail="Checks were just asked for; wait a minute")
+    rid = site_health.request_checks(site.id)
+    audit_request(db, request, action="site.checks", user_id=user.id, entity_type="site", entity_id=site.id)
     return {"requested": rid}
 
 
@@ -596,6 +620,24 @@ class CameraScanReport(BaseModel):
     note: str | None = Field(None, max_length=300)
 
 
+class SiteHealth(BaseModel):
+    temp_c: float | None = Field(None, ge=-50, le=200)
+    disk_free_mb: float | None = Field(None, ge=0)
+
+
+class CheckItem(BaseModel):
+    name: str = Field(..., max_length=120)
+    ok: bool
+    detail: str | None = Field(None, max_length=300)
+    ms: int | None = Field(None, ge=0)
+
+
+class ChecksReport(BaseModel):
+    id: int
+    at: float | None = None
+    items: list[CheckItem] = Field(default_factory=list, max_length=200)
+
+
 class SiteReport(BaseModel):
     version: str = Field(..., max_length=100)
     os: str = Field(..., max_length=40)
@@ -605,6 +647,11 @@ class SiteReport(BaseModel):
     onvif: OnvifScan | None = None
     # The camera scan an admin asked for (the agent's scan.go).
     scan: CameraScanReport | None = None
+    # The agent's clock when it wrote this (Unix seconds), its machine's
+    # health, and the checks an admin asked for (services/site_health.py).
+    now: float | None = None
+    health: SiteHealth | None = None
+    checks: ChecksReport | None = None
 
 
 def _require_site(
@@ -646,6 +693,7 @@ def _agent_answer(db: Session, site: Site, request: Request) -> dict:
         "wait_max_s": svc.WAIT_MAX_S,
         "scan_request": svc.scan_request(site.id),
         "uplink_test": svc.uplink_test_request(site.id),
+        "checks_request": site_health.checks_request(site.id),
     }
 
 
@@ -830,8 +878,8 @@ def agent_update(site: Site = Depends(_require_site)):
     import base64
 
     got = svc.agent_update()
-    if got is None:
-        raise _not_found()
+    if got is None or not site.agent_updates:
+        raise _not_found()  # unsigned builds, or updates switched off for this site
     manifest, sig = got
     return {"manifest": base64.b64encode(manifest).decode(), "signature": base64.b64encode(sig).decode()}
 
