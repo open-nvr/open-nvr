@@ -41,6 +41,10 @@ func main() {
 		switch os.Args[1] {
 		case "setup":
 			os.Exit(setupCmd(os.Args[2:]))
+		case "install-service":
+			os.Exit(installServiceCmd(os.Args[2:]))
+		case "uninstall":
+			os.Exit(uninstallCmd(os.Args[2:]))
 		case "enrol":
 			os.Exit(enrolCmd(os.Args[2:]))
 		case "site":

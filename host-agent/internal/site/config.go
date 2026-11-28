@@ -103,12 +103,15 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+// Marshal is the config as Save writes it.
+func (c *Config) Marshal() ([]byte, error) { return json.MarshalIndent(c, "", "  ") }
+
 // Save writes the config atomically, readable by its owner only.
 func (c *Config) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(c, "", "  ")
+	b, err := c.Marshal()
 	if err != nil {
 		return err
 	}
@@ -121,4 +124,45 @@ func (c *Config) Save(path string) error {
 		return err
 	}
 	return os.Chmod(path, 0o600)
+}
+
+// State is what an enrolled agent learns while it runs and keeps across
+// restarts when its config is read-only (the systemd service gets it as a
+// read-only credential): the server keys it proved since enrolment. It
+// lives in the service's state directory, $STATE_DIRECTORY/state.json.
+type State struct {
+	Pins []string `json:"pins,omitempty"`
+}
+
+// LoadState reads a state file; a missing one is an empty state.
+func LoadState(path string) (*State, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return &State{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var s State
+	if err := json.Unmarshal(b, &s); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &s, nil
+}
+
+// Save writes the state atomically, readable by its owner only.
+func (s *State) Save(path string) error {
+	b, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

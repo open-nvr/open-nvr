@@ -115,6 +115,7 @@ export const AGENT_DOWNLOADS: { platform: string; label: string }[] = [
   { platform: 'windows-amd64', label: 'Windows (x64)' },
   { platform: 'linux-amd64', label: 'Linux (x64)' },
   { platform: 'linux-arm64', label: 'Linux (ARM64, Raspberry Pi 4/5)' },
+  { platform: 'linux-arm', label: 'Linux (32-bit ARM, Raspberry Pi OS 32-bit)' },
   { platform: 'darwin-arm64', label: 'macOS (Apple silicon)' },
   { platform: 'darwin-amd64', label: 'macOS (Intel)' },
 ]
