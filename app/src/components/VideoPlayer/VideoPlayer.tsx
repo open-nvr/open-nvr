@@ -185,8 +185,10 @@ export interface VideoPlayerProps {
       warm for a short while (lib/liveStreams) so the next tile for the same
       stream picks it up at once. For surfaces people move away from and
       back to (Live View, the dashboard wall, peek); not for a tour, whose
-      pages would keep each other connected. */
-  keepWarm?: boolean
+      pages would keep each other connected. A function is asked at the
+      moment the tile leaves: a tour says yes only when the whole tour is
+      closing, never on a page flip. */
+  keepWarm?: boolean | (() => boolean)
   /** The camera's stream version: a warm connection made before the camera
       changed is never picked up. */
   warmKey?: string | number | null
@@ -1155,8 +1157,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const parkIfWarm = useCallback(() => {
       const pc = pcRef.current
       const stream = videoRef.current?.srcObject
+      const kw = keepWarmRef.current
       if (
-        !keepWarmRef.current || mode !== 'live' || manualChoiceRef.current ||
+        !(typeof kw === 'function' ? kw() : kw) || mode !== 'live' || manualChoiceRef.current ||
         !pc || pc.connectionState !== 'connected' || !(stream instanceof MediaStream)
       ) return
       if (frameCameraRef.current != null) keepFrame(frameCameraRef.current, videoRef.current)

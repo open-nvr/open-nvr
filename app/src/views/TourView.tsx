@@ -22,7 +22,7 @@
  * (views/TourEditor.tsx); the wall then carries on from that page.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, BellRing, CameraOff, ChevronLeft, ChevronRight, ExternalLink, Maximize, Minimize, Pause, Pencil, Play, PauseCircle, Route, X } from 'lucide-react'
@@ -86,8 +86,21 @@ const fetchStream = async (cameraId: number) => {
  * window, no app shell, for a board that runs in kiosk mode. Without it the
  * tour sits inside the app like any other page (/live/tour/:id).
  */
+/** True while the tour itself is being closed (left for another page), as
+ *  opposed to flipping pages. Only then do the tiles on screen keep their
+ *  WebRTC connections warm (lib/liveStreams) for the next page to pick up;
+ *  on a page flip that would keep every page connected at once. */
+let tourClosing = false
+const leavingTour = () => tourClosing
+
 export function TourView({ display = false }: { display?: boolean }) {
   const { t } = useTranslation()
+  // A layout-effect cleanup runs before the tiles' own (parent first), so
+  // the tiles see the flag when they decide whether to park.
+  useLayoutEffect(() => {
+    tourClosing = false
+    return () => { tourClosing = true }
+  }, [])
   const fmt = useDateFormat()
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -679,6 +692,8 @@ function TourTile({ cameraId, cam, pausedCamera, playing, spotlit, cover, labelC
           key={`${cameraId}-${version}-${usingSub ? 's' : 'm'}`}
           mode="live"
           chrome="none"
+          keepWarm={leavingTour}
+          warmKey={version}
           whepUrl={whep}
           hlsUrl={hls}
           mediamtxToken={info.data?.token}
