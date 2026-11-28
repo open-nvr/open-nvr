@@ -247,16 +247,16 @@ export const siteService = {
 /** The state shown for a site: what an operator needs to act on first. */
 export function siteStatus(s: Site): { label: string; variant: 'success' | 'warning' | 'neutral' | 'destructive'; hint: string } {
   if (s.revoked_at && !s.enrolled) {
-    return { label: 'Revoked', variant: 'destructive', hint: 'Its agent is cut off. Make a new code to enrol it again.' }
+    return { label: 'Revoked', variant: 'destructive', hint: 'Its agent is cut off. "Set up agent" lets an agent back.' }
   }
   if (!s.enrolled) {
     return s.code_pending
-      ? { label: 'Waiting for agent', variant: 'warning', hint: 'Run the enrol command on a machine at the site.' }
-      : { label: 'Not enrolled', variant: 'neutral', hint: 'Make a code and run the enrol command at the site.' }
+      ? { label: 'Waiting for agent', variant: 'warning', hint: 'Waiting for the setup link (or code) to be used on a computer at the site.' }
+      : { label: 'Not set up', variant: 'neutral', hint: '"Set up agent" makes a link to send to the site.' }
   }
   return s.online
     ? { label: 'Online', variant: 'success', hint: `Agent ${s.agent_version || ''} on ${s.hostname || 'the site'}` }
-    : { label: 'Offline', variant: 'warning', hint: 'The agent has not checked in for a minute: the site, its uplink or the agent is down.' }
+    : { label: 'Offline', variant: 'warning', hint: 'The agent has not checked in for a minute: the site\'s power, its internet, or the computer the agent runs on is down.' }
 }
 
 /** A camera's relay state at the site (its main stream). */

@@ -12,6 +12,7 @@ Start here. Pick the row that matches what you're doing.
 - **[HOME_ASSISTANT.md](HOME_ASSISTANT.md)** — network setup when Home Assistant runs on another machine: WebRTC hosts, optional RTSPS, CORS, mDNS discovery, tokens.
 - **[LOCAL_SETUP.md](LOCAL_SETUP.md)** — run the backend / frontend / KAI-C from source for development.
 - **[../USER_MANUAL.md](../USER_MANUAL.md)** — day-to-day operator guide (add cameras, playback, users).
+- **[SITE_AGENT.md](SITE_AGENT.md)** — cameras at other places (shops, branches) on one server: set a site up with one link, add its cameras in one go, alerts and checks. With **[SITE_SETUP_AT_THE_SITE.md](SITE_SETUP_AT_THE_SITE.md)**, the one page for the person at the site, and **[SITE_SECURITY.md](SITE_SECURITY.md)**, what the site agent trusts and what a compromised server can and cannot do.
 - **[WORKFLOWS.md](WORKFLOWS.md)** — write and run a workflow: set up the model, the file format, the safety rule, Test and On, Ask a person, reading a run, and the API until the Workflows page lands.
 
 ## Contribute
