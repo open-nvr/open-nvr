@@ -13,10 +13,14 @@ import (
 )
 
 // stream relays one camera stream (main or sub) for as long as it is wanted:
-// ask for a token, run ffmpeg from the camera into the local relay, and when
-// ffmpeg stops, wait (backoff) and do it again with a fresh token. A camera
-// that is down, a server that is unreachable or a revoked site all end the
-// same way: an error state and a slower retry.
+// ask for a token, relay the camera into the local relay, and when that
+// stops, wait (backoff) and do it again with a fresh token. A camera that is
+// down, a server that is unreachable or a revoked site all end the same way:
+// an error state and a slower retry.
+//
+// The relay is native (native.go) unless that keeps failing before the
+// stream ever goes live and ffmpeg is installed: then ffmpeg -c copy takes
+// over for a while (nativeRetryAfter), and native is tried again after.
 type stream struct {
 	key      string // "<camera>/<main|sub>"
 	cameraID int
@@ -31,7 +35,21 @@ type stream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// The run loop's own: which relay it uses now, and why.
+	relay       string // relayNative | relayFFmpeg
+	nativeFails int    // native runs in a row that ended before going live
+	ffmpegUntil time.Time
 }
+
+const (
+	relayNative = "native"
+	relayFFmpeg = "ffmpeg"
+	// nativeFallbackAfter native runs in a row that end before the stream
+	// goes live switch it to ffmpeg (when installed) for nativeRetryAfter.
+	nativeFallbackAfter = 3
+	nativeRetryAfter    = 15 * time.Minute
+)
 
 // deps is what every stream shares.
 type deps struct {
@@ -46,6 +64,8 @@ type deps struct {
 	// checkURL is the agent's own rule for camera URLs (TargetPolicy):
 	// the server's answer names them, the agent decides. nil: tests.
 	checkURL func(ctx context.Context, lanURL string) error
+	// native starts the built-in relay (native.go); nil: ffmpeg only.
+	native func(lanURL string, relayPort int, path, token string) publisher.Process
 }
 
 // refusedRetry: how soon a URL the agent refused is looked at again (the
@@ -55,7 +75,7 @@ const refusedRetry = time.Minute
 func newStream(parent context.Context, key string, cameraID int, kind, lanURL, path string, d *deps) *stream {
 	ctx, cancel := context.WithCancel(parent)
 	s := &stream{key: key, cameraID: cameraID, kind: kind, lanURL: lanURL, path: path,
-		deps: d, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+		deps: d, ctx: ctx, cancel: cancel, done: make(chan struct{}), relay: relayNative}
 	s.set("starting", "")
 	go s.run()
 	return s
@@ -66,8 +86,48 @@ func nowF() float64 { return float64(time.Now().UnixNano()) / 1e9 }
 func (s *stream) set(state, detail string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.st.State != state || s.st.Detail != detail {
-		s.st = PublisherState{CameraID: s.cameraID, Stream: s.kind, State: state, Detail: detail, Since: nowF()}
+	if s.st.State != state || s.st.Detail != detail || s.st.Relay != s.relay {
+		s.st = PublisherState{CameraID: s.cameraID, Stream: s.kind, State: state, Detail: detail, Since: nowF(), Relay: s.relay}
+	}
+}
+
+// chooseRelay picks native or ffmpeg for the next run; "" when neither can run.
+func (s *stream) chooseRelay() string {
+	d := s.deps
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.relay == relayFFmpeg && time.Now().After(s.ffmpegUntil) && d.native != nil {
+		s.relay, s.nativeFails = relayNative, 0
+	}
+	switch {
+	case s.relay == relayNative && d.native != nil:
+	case d.ffmpeg != "":
+		s.relay = relayFFmpeg
+	case d.native != nil:
+		s.relay = relayNative
+	default:
+		return ""
+	}
+	return s.relay
+}
+
+// ended records how a run ended: native runs that never went live, enough of
+// them in a row, move the stream to ffmpeg for a while.
+func (s *stream) ended(wentLive bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.relay != relayNative {
+		return
+	}
+	if wentLive {
+		s.nativeFails = 0
+		return
+	}
+	s.nativeFails++
+	if s.nativeFails >= nativeFallbackAfter && s.deps.ffmpeg != "" {
+		s.relay, s.ffmpegUntil = relayFFmpeg, time.Now().Add(nativeRetryAfter)
+		s.deps.logf("camera %d %s: the built-in relay failed %d times; using ffmpeg for %s",
+			s.cameraID, s.kind, s.nativeFails, nativeRetryAfter)
 	}
 }
 
@@ -123,8 +183,9 @@ func (s *stream) run() {
 		return b
 	}
 	for s.ctx.Err() == nil {
-		if d.ffmpeg == "" {
-			s.set("error", "ffmpeg is not installed on this machine")
+		relay := s.chooseRelay()
+		if relay == "" {
+			s.set("error", "no relay: ffmpeg is not installed on this machine")
 			if !s.sleep(30 * time.Second) {
 				return
 			}
@@ -170,15 +231,22 @@ func (s *stream) run() {
 			path = tok.SubStreamName
 		}
 		started := time.Now()
-		p := d.run(d.ffmpeg, Args(s.lanURL, port, path, tok.Token))
+		var p publisher.Process
+		if relay == relayNative {
+			p = d.native(s.lanURL, port, path, tok.Token)
+		} else {
+			p = d.run(d.ffmpeg, Args(s.lanURL, port, path, tok.Token))
+		}
 		exited := make(chan error, 1)
 		go func() { exited <- p.Wait() }()
 		live := time.NewTimer(d.liveAfter)
 		var werr error
+		wentLive := false
 	wait:
 		for {
 			select {
 			case <-live.C:
+				wentLive = true
 				s.set("live", "")
 			case werr = <-exited:
 				break wait
@@ -190,10 +258,11 @@ func (s *stream) run() {
 			}
 		}
 		live.Stop()
+		s.ended(wentLive)
 		if time.Since(started) >= d.healthy {
 			attempt = 0
 		}
-		detail := "ffmpeg stopped"
+		detail := relay + " relay stopped"
 		if lines := p.LastLines(); len(lines) > 0 {
 			detail = lines[len(lines)-1]
 		} else if werr != nil {

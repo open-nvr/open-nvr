@@ -95,6 +95,9 @@ func Run(ctx context.Context, o Options) error {
 		liveAfter: 5 * time.Second,
 		healthy:   60 * time.Second,
 		checkURL:  a.policy.CheckStreamURL,
+		native: func(lanURL string, port int, path, token string) publisher.Process {
+			return startNative(lanURL, port, path, token, a.policy.Dial)
+		},
 	}
 	defer a.stopAll()
 

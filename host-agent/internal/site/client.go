@@ -73,6 +73,8 @@ type PublisherState struct {
 	Since    float64 `json:"since,omitempty"`
 	// Kbps: what the stream sends upstream (last 10 s).
 	Kbps float64 `json:"kbps,omitempty"`
+	// Relay: "native" (built in) or "ffmpeg" (the fallback).
+	Relay string `json:"relay,omitempty"`
 }
 
 // OnvifScan is the last discovery round on the site's LAN.

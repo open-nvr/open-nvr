@@ -397,6 +397,9 @@ class PublisherState(BaseModel):
     detail: str | None = Field(None, max_length=300)
     since: float | None = None
     kbps: float | None = None
+    # Which relay carries it at the site: the agent's own, or ffmpeg (the
+    # fallback for a camera the built-in one cannot handle).
+    relay: Literal["native", "ffmpeg"] | None = None
 
 
 class OnvifScan(BaseModel):

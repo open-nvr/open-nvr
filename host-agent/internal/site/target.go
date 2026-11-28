@@ -320,3 +320,20 @@ func IsTargetRefusal(err error) bool {
 	var t *ErrTarget
 	return errors.As(err, &t)
 }
+
+// Dial connects to a camera and keeps the connection only if the address it
+// actually reached passes Check (a name that resolves elsewhere now, DNS
+// rebinding, is caught here as well).
+func (p *TargetPolicy) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	c, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	if a, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+		if err := p.Check(a.IP, a.Port); err != nil {
+			c.Close()
+			return nil, err
+		}
+	}
+	return c, nil
+}

@@ -191,7 +191,7 @@ function EnrolDialog({ site, code, onClose }: { site: Site; code: EnrolCode; onC
         <p className="font-medium">Or set it up yourself</p>
         <p>
           On a machine at the site that can reach its cameras (a small Linux box, a Raspberry Pi, a
-          Windows PC), with <b>ffmpeg</b> installed:
+          Windows PC):
         </p>
         {setup ? (
           <>
@@ -471,7 +471,8 @@ function SiteCard({ site, canManage, onCode, onAddCamera }: {
                   <Video size={14} className="text-[var(--text-dim)]" />
                   <span className="font-medium">{c.name}</span>
                   <span className="text-xs text-[var(--text-dim)]">{c.lan_host}</span>
-                  <Badge variant={variant} title={st?.detail || undefined}>{label}</Badge>
+                  <Badge variant={variant} title={[st?.detail, st?.relay === 'ffmpeg' ? 'relayed by ffmpeg (the built-in relay could not handle this camera)' : null].filter(Boolean).join(' · ') || undefined}>{label}</Badge>
+                  {st?.relay === 'ffmpeg' && <span className="text-xs text-[var(--text-dim)]">via ffmpeg</span>}
                   {st?.kbps ? <span className="text-xs text-[var(--text-dim)]">{Math.round(st.kbps)} kbps</span> : null}
                   <span className="flex-1" />
                   {canManage && (
