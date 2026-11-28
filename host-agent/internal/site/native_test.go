@@ -310,3 +310,18 @@ func TestNativeRelayAgainstRealServers(t *testing.T) {
 	p.Kill()
 	<-done
 }
+
+func TestTheCameraCheckOpensItsStreamAsTheRelayWould(t *testing.T) {
+	cam := startFakeCamera(t)
+	a := &Agent{o: Options{Config: &Config{}, Logf: t.Logf}}
+	if err := a.checkCamera(context.Background(), "rtsp://"+cam.addr+"/main"); err != nil {
+		t.Fatalf("a working camera failed the check: %v", err)
+	}
+	if err := a.checkCamera(context.Background(), "rtsp://"+freeAddr(t)+"/main"); err == nil {
+		t.Fatal("a camera that is not there passed the check")
+	}
+	a.policy = newFixedPolicy(mustNets("192.168.1.0/24"), nil, nil)
+	if err := a.checkCamera(context.Background(), "rtsp://"+cam.addr+"/main"); err == nil || !strings.Contains(err.Error(), "not relayed") {
+		t.Fatalf("the agent's own rule was not applied: %v", err)
+	}
+}

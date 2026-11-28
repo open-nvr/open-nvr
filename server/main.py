@@ -621,6 +621,12 @@ async def lifespan(app: FastAPI):
 
     spawn_background(_update_notifier(), name="update-notifier")
 
+    # Remote sites: offline sites and down site cameras become host-level
+    # alerts too (services/site_health.py).
+    from services.site_health import run_forever as _site_health
+
+    spawn_background(_site_health(), name="site-health")
+
     # Recording-health watchdog: surfaces "camera silently stopped recording"
     # as a camera event within minutes instead of being discovered days later.
     async def background_recording_watchdog():

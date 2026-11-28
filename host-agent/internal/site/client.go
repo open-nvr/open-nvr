@@ -67,6 +67,8 @@ type Answer struct {
 	ScanRequest int64 `json:"scan_request,omitempty"`
 	// UplinkTest: an admin asked for an uplink test (speedtest.go).
 	UplinkTest int64 `json:"uplink_test,omitempty"`
+	// ChecksRequest: an admin asked for "Run checks" (health.go).
+	ChecksRequest int64 `json:"checks_request,omitempty"`
 }
 
 // PublisherState is one relayed stream, as reported.
@@ -97,6 +99,11 @@ type Report struct {
 	Publishers []PublisherState `json:"publishers"`
 	Onvif      *OnvifScan       `json:"onvif,omitempty"`
 	Scan       *CameraScan      `json:"scan,omitempty"`
+	// Now: this machine's clock (Unix seconds), so the server can tell
+	// when it is off; Health: the machine's own state.
+	Now    float64       `json:"now"`
+	Health *Health       `json:"health,omitempty"`
+	Checks *ChecksResult `json:"checks,omitempty"`
 }
 
 // Token is a short publish token for one camera's paths.

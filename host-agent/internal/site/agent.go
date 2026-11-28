@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -59,6 +60,9 @@ type Agent struct {
 	scanning bool
 	// The last uplink test started (speedtest.go).
 	uplinkTest int64
+	// The last "Run checks" started, and its result (health.go).
+	checksStarted int64
+	checks        *ChecksResult
 	// pins: the server keys trusted (control and video alike); policy:
 	// where on the LAN the agent may connect, whatever the server says.
 	pins   *PinSet
@@ -296,6 +300,10 @@ func (a *Agent) apply(ctx context.Context, ans *Answer) {
 		}
 	}
 	a.refreshAllowedLocked()
+	if ans.ChecksRequest != 0 && ans.ChecksRequest != a.checksStarted {
+		a.checksStarted = ans.ChecksRequest
+		go a.runChecks(ctx, ans.ChecksRequest)
+	}
 	if ans.UplinkTest != 0 && ans.UplinkTest != a.uplinkTest {
 		a.uplinkTest = ans.UplinkTest
 		go a.runUplinkTest(ctx, ans.UplinkTest)
@@ -375,6 +383,7 @@ func (a *Agent) report() Report {
 	states = append(states, a.shedStatesLocked()...)
 	scan := a.scan
 	camScan := a.camScan
+	checks := a.checks
 	a.mu.Unlock()
 	sort.Slice(states, func(i, j int) bool {
 		if states[i].CameraID != states[j].CameraID {
@@ -385,6 +394,7 @@ func (a *Agent) report() Report {
 	return Report{
 		Version: a.o.Version, OS: runtime.GOOS, Arch: runtime.GOARCH, Hostname: host,
 		Publishers: states, Onvif: scan, Scan: camScan,
+		Now: nowF(), Health: machineHealth(a.stateDir()), Checks: checks,
 	}
 }
 
@@ -476,4 +486,12 @@ func (a *Agent) updateObservedLocked() {
 		}
 	}
 	a.policy.SetObserved(ports)
+}
+
+// stateDir is where the agent keeps its state (the service's), or "".
+func (a *Agent) stateDir() string {
+	if a.o.StatePath == "" {
+		return ""
+	}
+	return filepath.Dir(a.o.StatePath)
 }

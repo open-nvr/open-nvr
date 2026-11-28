@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { toDataURL } from 'qrcode'
-import { Check, Copy, Gauge, Globe, KeyRound, Link2, Plus, RefreshCw, Share2, ShieldAlert, Trash2, Unplug, Video } from 'lucide-react'
+import { AlertTriangle, Check, CheckCircle2, Copy, Gauge, Globe, KeyRound, Link2, Loader2, Plus, RefreshCw, Settings, Share2, ShieldAlert, Stethoscope, Trash2, Unplug, Video, XCircle } from 'lucide-react'
 import { useTranslation } from '../i18n'
 import { useConfirm } from '../components/ui/ConfirmDialog'
 import { useSnackbar } from '../components/Snackbar'
@@ -374,6 +374,74 @@ function UplinkDialog({ site, onClose }: { site: Site; onClose: () => void }) {
   )
 }
 
+/** "Run checks": the site's agent tests, from the site, the server, the
+ *  video route and each camera, and the answers are shown as they come. */
+function ChecksDialog({ siteId, onClose }: { siteId: number; onClose: () => void }) {
+  const { data: sites = [] } = useQuery({ queryKey: SITES_KEY, queryFn: siteService.list, refetchInterval: 2000 })
+  const site = sites.find((s) => s.id === siteId)
+  const checks = site?.checks
+  return (
+    <Modal open title={`Checks from "${site?.name ?? ''}"`} onClose={onClose}
+      footer={<div className="flex justify-end"><Button variant="outline" onClick={onClose}>Close</Button></div>}>
+      <div className="space-y-2 text-sm">
+        {!checks || checks.pending ? (
+          <p className="flex items-center gap-2"><Loader2 size={14} className="animate-spin" /> The site's agent is running the checks…</p>
+        ) : (
+          <>
+            <ul className="divide-y divide-[var(--border)] border border-[var(--border)]">
+              {checks.items.map((it, i) => (
+                <li key={i} className="flex items-start gap-2 px-2 py-1.5">
+                  {it.ok ? <CheckCircle2 size={15} className="text-[var(--ok)] mt-0.5" /> : <XCircle size={15} className="text-[var(--danger)] mt-0.5" />}
+                  <div className="flex-1">
+                    <div className="font-medium">{it.name}</div>
+                    {it.detail && <div className="text-xs text-[var(--text-dim)] break-all">{it.detail}</div>}
+                  </div>
+                  {it.ms != null && <span className="text-xs text-[var(--text-dim)]">{it.ms} ms</span>}
+                </li>
+              ))}
+            </ul>
+            {checks.at && <p className="text-xs text-[var(--text-dim)]">Run {new Date(checks.at * 1000).toLocaleString()}.</p>}
+          </>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
+/** Per-site switches: its alerts, and its agent's self-update. */
+function SiteSettingsDialog({ site, onClose }: { site: Site; onClose: () => void }) {
+  const { showSuccess, showError } = useSnackbar()
+  const [offline, setOffline] = useState(site.alert_offline !== false)
+  const [down, setDown] = useState(site.alert_camera_down !== false)
+  const [updates, setUpdates] = useState(site.agent_updates !== false)
+  const save = async () => {
+    try {
+      await siteService.update(site.id, { alert_offline: offline, alert_camera_down: down, agent_updates: updates })
+      showSuccess('Saved')
+      void queryClient.invalidateQueries({ queryKey: SITES_KEY })
+      onClose()
+    } catch (e) {
+      showError(extractApiError(e, 'Could not save'))
+    }
+  }
+  const row = (checked: boolean, set: (v: boolean) => void, title: string, hint: string) => (
+    <label className="flex items-start gap-2">
+      <input type="checkbox" className="mt-1" checked={checked} onChange={(e) => set(e.target.checked)} />
+      <span><span className="font-medium">{title}</span><br /><span className="text-xs text-[var(--text-dim)]">{hint}</span></span>
+    </label>
+  )
+  return (
+    <Modal open title={`Settings for "${site.name}"`} onClose={onClose}
+      footer={<div className="flex justify-end gap-2"><Button variant="outline" onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save}>Save</Button></div>}>
+      <div className="space-y-3 text-sm">
+        {row(offline, setOffline, 'Alert when the site is offline', 'Its agent has not checked in for 5 minutes (power, internet or the machine is down).')}
+        {row(down, setDown, 'Alert when one of its cameras is down', 'A camera of this site has not been relayed for 10 minutes, with the reason.')}
+        {row(updates, setUpdates, 'Update the agent automatically', 'To builds the OpenNVR release signed, when this server ships a newer one. Off: the agent stays as it is until it is set up again.')}
+      </div>
+    </Modal>
+  )
+}
+
 /** A new user/password for the site's cameras, after it was changed on them. */
 function CameraPasswordDialog({ site, onClose }: { site: Site; onClose: () => void }) {
   const { showSuccess, showError } = useSnackbar()
@@ -438,6 +506,8 @@ function SiteCard({ site, canManage, onCode, onAddCameras }: {
   const status = siteStatus(site)
   const [uplinkOpen, setUplinkOpen] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [checksOpen, setChecksOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const uplink = siteUplinkKbps(site)
   const refresh = () => queryClient.invalidateQueries({ queryKey: SITES_KEY })
 
@@ -511,6 +581,19 @@ function SiteCard({ site, canManage, onCode, onAddCameras }: {
             <Button size="sm" variant="outline" title="What the site sends, an uplink cap, and an uplink test" onClick={() => setUplinkOpen(true)}>
               <Gauge size={14} /> Uplink
             </Button>
+            {site.enrolled && (
+              <Button size="sm" variant="outline" disabled={!site.online}
+                title="The site's agent tests, from the site: this server, the video route and each camera"
+                onClick={async () => {
+                  try { await siteService.runChecks(site.id); setChecksOpen(true); void refresh() }
+                  catch (e) { showError(extractApiError(e, 'Could not run the checks')) }
+                }}>
+                <Stethoscope size={14} /> Run checks
+              </Button>
+            )}
+            <Button size="sm" variant="ghost" title="Alerts and automatic updates for this site" onClick={() => setSettingsOpen(true)}>
+              <Settings size={14} />
+            </Button>
             {site.cameras.length > 0 && (
               <Button size="sm" variant="outline" title="A new user/password for the site's cameras" onClick={() => setPasswordOpen(true)}>
                 <KeyRound size={14} /> Camera password
@@ -540,6 +623,17 @@ function SiteCard({ site, canManage, onCode, onAddCameras }: {
 
       {uplinkOpen && <UplinkDialog site={site} onClose={() => setUplinkOpen(false)} />}
       {passwordOpen && <CameraPasswordDialog site={site} onClose={() => setPasswordOpen(false)} />}
+      {checksOpen && <ChecksDialog siteId={site.id} onClose={() => setChecksOpen(false)} />}
+      {settingsOpen && <SiteSettingsDialog site={site} onClose={() => setSettingsOpen(false)} />}
+      {(site.health?.problems?.length ?? 0) > 0 && (
+        <ul className="px-3 py-1.5 border-b border-[var(--border)] text-sm space-y-0.5">
+          {site.health!.problems.map((p) => (
+            <li key={p.code} className="flex items-start gap-2 text-[var(--warn)]">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {p.text}
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="px-3 py-2 space-y-2 text-sm">
         {canManage && <SetupLinks site={site} />}
         {site.cameras.length === 0 ? (
@@ -556,6 +650,7 @@ function SiteCard({ site, canManage, onCode, onAddCameras }: {
                   <span className="font-medium">{c.name}</span>
                   <span className="text-xs text-[var(--text-dim)]">{c.lan_host}</span>
                   <Badge variant={variant} title={[st?.detail, st?.relay === 'ffmpeg' ? 'relayed by ffmpeg (the built-in relay could not handle this camera)' : null].filter(Boolean).join(' · ') || undefined}>{label}</Badge>
+                  {st?.problem && st.state !== 'live' && <span className="text-xs text-[var(--warn)]">{st.problem.text}</span>}
                   {st?.relay === 'ffmpeg' && <span className="text-xs text-[var(--text-dim)]">via ffmpeg</span>}
                   {st?.kbps ? <span className="text-xs text-[var(--text-dim)]">{Math.round(st.kbps)} kbps</span> : null}
                   <span className="flex-1" />

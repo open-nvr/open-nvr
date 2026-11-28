@@ -424,7 +424,7 @@ def etag(desired: list[dict[str, Any]], site: Site) -> str:
     """Changes whenever anything the agent acts on changes."""
     blob = json.dumps(
         {"d": desired, "p": site.live_policy, "c": site.uplink_cap_kbps, "s": scan_request(site.id),
-         "u": uplink_test_request(site.id)},
+         "u": uplink_test_request(site.id), "k": _checks_request(site.id)},
         sort_keys=True, separators=(",", ":"),
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:32]
@@ -449,6 +449,12 @@ def request_scan(site_id: int) -> int:
 
 def scan_request(site_id: int) -> int | None:
     return _scan_requests.get(site_id)
+
+
+def _checks_request(site_id: int) -> int | None:
+    from services.site_health import checks_request
+
+    return checks_request(site_id)
 
 
 # ── uplink test (the agent's speedtest) ──────────────────────────────────
@@ -567,6 +573,10 @@ def record_report(db: Session, site: Site, report: dict[str, Any], ip: str | Non
         before = {}
     if before.get("uplink_test") and "uplink_test" not in report:
         report = {**report, "uplink_test": before["uplink_test"]}
+    # When it arrived, to tell how far the site machine's clock is off.
+    import time as _time
+
+    report = {**report, "received_at": _time.time()}
     site.last_seen_at = _now()
     site.last_ip = (ip or "")[:45] or None
     site.agent_version = str(report.get("version") or "")[:100] or None
@@ -780,7 +790,7 @@ def public_view(db: Session, site: Site) -> dict[str, Any]:
         "last_ip": site.last_ip,
         "agent_version": site.agent_version,
         "hostname": report.get("hostname"),
-        "publishers": report.get("publishers") or [],
+        "publishers": [_with_problem(p) for p in (report.get("publishers") or []) if isinstance(p, dict)],
         "cameras": [
             {"id": c.id, "name": c.name, "lan_host": c.site_lan_host,
              "main_url": c.site_main_url, "sub_url": c.site_sub_url, "is_active": c.is_active}
@@ -793,6 +803,11 @@ def public_view(db: Session, site: Site) -> dict[str, Any]:
         "found": found_devices(report, linked_hosts),
         "scan": _scan_view(site.id, report),
         "uplink_test": _uplink_view(site.id, report),
+        "health": _health_view(report),
+        "checks": _checks_view(site.id, report),
+        "alert_offline": bool(site.alert_offline),
+        "alert_camera_down": bool(site.alert_camera_down),
+        "agent_updates": bool(site.agent_updates),
         "live_policy": site.live_policy,
         "uplink_cap_kbps": site.uplink_cap_kbps,
         # What the agent's enrol checks the server's certificate against.
@@ -819,6 +834,27 @@ def found_devices(report: dict[str, Any], linked_hosts: set[str]) -> list[dict[s
         entry["rtsp"] = bool(d.get("rtsp"))
         entry["ports"] = [p for p in (d.get("ports") or []) if isinstance(p, int)][:8]
     return sorted(out.values(), key=lambda e: tuple(int(x) if x.isdigit() else 0 for x in e["ip"].split(".")))
+
+
+def _with_problem(p: dict[str, Any]) -> dict[str, Any]:
+    from services.site_health import camera_problem
+
+    return {**p, "problem": camera_problem(p.get("state"), p.get("detail"))}
+
+
+def _health_view(report: dict[str, Any]) -> dict[str, Any]:
+    from services.site_health import box_problems, clock_skew
+
+    health = report.get("health") if isinstance(report.get("health"), dict) else {}
+    skew = clock_skew(report, report.get("received_at"))
+    return {**health, "clock_skew_s": round(skew, 1) if skew is not None else None,
+            "problems": box_problems(health, skew)}
+
+
+def _checks_view(site_id: int, report: dict[str, Any]) -> dict[str, Any]:
+    from services.site_health import checks_view
+
+    return checks_view(site_id, report)
 
 
 def _uplink_view(site_id: int, report: dict[str, Any]) -> dict[str, Any]:

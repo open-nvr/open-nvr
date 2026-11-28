@@ -216,6 +216,33 @@ A main stream on demand only while someone watches it is not offered: recording 
 
 After a password was changed on the cameras themselves, click **Camera password** on the site's card. Enter the new password, and the user if that changed too, for all the site's cameras or only the ones you tick. The site's agent reconnects them with it within seconds. The change is in the audit log, without the password.
 
+## Health, alerts and checks
+
+**On the site's card, problems are said in plain words.**
+- **For each camera:** "the camera refused its user and password", "the site's agent cannot reach the camera", "the camera stopped sending", "paused by the uplink cap", or "not relayed" (the agent's own rule, with the reason).
+- **For the site machine itself**, from what its agent reports:
+  - its clock is more than 2 minutes off, so recordings would carry the wrong time;
+  - it is hot (80 °C or more);
+  - its disk is nearly full (under 200 MB).
+
+**Alerts.** These become host-level alerts like a full disk does: kept in the system events and shown live on the dashboard, once when they start and once when they end.
+- **A site offline:** its agent hasn't checked in for 5 minutes.
+- **A camera down:** one of the site's cameras hasn't been relayed for 10 minutes, with the reason. While the whole site is offline, only the site's alert is raised.
+- **Not yet:** they aren't sent by e-mail or Telegram.
+
+**Run checks** asks the site's agent to test, from the site:
+- the server's name;
+- the server itself, and that its key is the one the agent trusts. A firewall that inspects HTTPS shows up here;
+- the video route on 443;
+- each camera: a connection, then its stream with its credentials.
+
+The answers appear within seconds, each with its time. This is what to look at before asking someone at the site to check anything.
+
+**Settings** (the gear on the card) turns each of these off for the site:
+- the offline alert;
+- the camera alert;
+- the agent's automatic update.
+
 ## Limits
 
 - The site's uplink carries every relayed stream all the time (recording needs the main stream). Add a sub stream for each camera where you can.
