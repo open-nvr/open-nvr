@@ -64,6 +64,7 @@ import { useDigitalZoom } from '../../hooks/useDigitalZoom'
 import { ZoomBadge } from '../ZoomBadge'
 import { AlertCircle } from 'lucide-react'
 import { useTranslation } from '../../i18n'
+import { LAST_FRAME_EVERY_MS, keepFrame, lastFrameOf } from '../../lib/lastFrame'
 
 export type VideoPlayerMode = 'live' | 'playback'
 export type StreamType = 'webrtc' | 'hls' | 'mp4'
@@ -303,6 +304,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // never float over a black picture and the two appear together.
     const [hasPicture, setHasPicture] = useState(false)
     const waitingForPicture = mode === 'live' && !hasPicture
+    // Until the picture arrives, the camera's last frame in this tab
+    // (lib/lastFrame) stands in for it under the spinner: a tile coming
+    // back after a page change or a reconnect is never a black box.
+    const poster = waitingForPicture ? lastFrameOf(cameraId) : undefined
+    // For cleanup(), which keeps the frame before it tears the element down.
+    const frameCameraRef = useRef<number | null>(null)
+    frameCameraRef.current = mode === 'live' ? cameraId : null
     // The current WHEP attempt: when it was answered, whether ICE ever
     // reached `connected`, and the deadline after which the tile gives up on
     // WebRTC. A viewer's explicit stream choice (the player menu) switches
@@ -408,6 +416,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
     // Cleanup function
     const cleanup = useCallback(() => {
+      // The picture on screen now is the best stand-in for the next start.
+      if (frameCameraRef.current != null) keepFrame(frameCameraRef.current, videoRef.current)
+
       // Clear any existing error state — except mid-offline-poll, where the
       // overlay must not flash off while a probe attempt tears down/rebuilds.
       if (!offlinePollingRef.current) setError(null)
@@ -1085,6 +1096,18 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
     }, [mode, streamType, whepUrl, hlsUrl, mp4Url, hlsPlaybackUrl, cleanup, setupWebRTC, setupHLS, setupMP4, setupHLSPlayback])
 
+    // While a live picture plays, keep its last frame fresh.
+    useEffect(() => {
+      if (mode !== 'live' || cameraId == null || !hasPicture) return
+      const grab = () => keepFrame(cameraId, videoRef.current)
+      const first = window.setTimeout(grab, 1_500)
+      const timer = window.setInterval(grab, LAST_FRAME_EVERY_MS)
+      return () => {
+        window.clearTimeout(first)
+        window.clearInterval(timer)
+      }
+    }, [mode, cameraId, hasPicture])
+
     // Video event listeners
     useEffect(() => {
       const el = videoRef.current
@@ -1567,6 +1590,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             />
           </div>
         </div>
+
+        {poster && (
+          <img src={poster} alt="" aria-hidden="true" draggable={false}
+            className={`pointer-events-none absolute inset-0 w-full h-full ${cover ? 'object-cover' : 'object-contain'}`} />
+        )}
 
         {/* Detection overlay — INSIDE the feed box so its rectangle is the
             video's rectangle and normalized boxes need no letterbox math.
